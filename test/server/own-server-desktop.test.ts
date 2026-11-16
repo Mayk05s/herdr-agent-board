@@ -87,7 +87,7 @@ describe('on the board’s own server', () => {
   test('its routes are in the table', () => {
     const paths = routeTable(proc).map(r => r.path)
     expect(paths).toContain('^\\/api\\/desktop\\/')
-    expect(paths).toContain('^\\/api\\/browser\\/(start|call|profile|ask|close|open|display)$')
+    expect(paths).toContain('^\\/api\\/browser\\/(start|call|profile|ask|close|open|display|fit)$')
     expect(paths).toContain('/api/browser/cdp')
   })
 
@@ -148,7 +148,7 @@ describe('on the board’s own server', () => {
   })
 
   test('the agent’s own calls: never through the domain; on 127.0.0.1 with the board’s key', async () => {
-    for (const op of ['start', 'call', 'profile', 'ask', 'close', 'open', 'display'])
+    for (const op of ['start', 'call', 'profile', 'ask', 'close', 'open', 'display', 'fit'])
       expect(await answer(caddy.post(`/api/browser/${op}`, { pane: 'w0:p1' }))).toEqual([403, { error: 'key' }])
     const local = (path: string, body: unknown, k = key) =>
       fetch(`${url}${path}`, {
@@ -200,6 +200,12 @@ describe('on the board’s own server', () => {
     // browser_close with no browser running: nothing to close
     expect(await answer(local('/api/browser/close', { pane: 'w0:p1' }))).toEqual([200, { ok: true, closed: false }])
     expect(await answer(local('/api/browser/close', { pane: 'w0 p1;' }))).toEqual([400, { ok: false, error: 'pane' }])
+    // the window put back to the screen after a resize_page: none with no browser running
+    expect(await answer(local('/api/browser/fit', { pane: 'w0:p1' }))).toEqual([
+      409,
+      { ok: false, error: 'no browser' },
+    ])
+    expect(await answer(local('/api/browser/fit', { pane: 'w0 p1;' }))).toEqual([400, { ok: false, error: 'pane' }])
   })
 })
 

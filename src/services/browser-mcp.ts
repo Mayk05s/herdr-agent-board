@@ -25,11 +25,18 @@
 // to a browser restarted). And two that read the page compactly (services/browser-read.ts:
 // read_page, list_interactive), through chrome-devtools-mcp by calls of the wrapper's own, which
 // only look; take_snapshot's and wait_for's descriptions point to them.
+//
+// The browser's window stays on its screen (core/desktop.ts PAGE_MAX): a resize_page or an emulate
+// viewport larger than what shows of the page there is refused before anything is done (the window
+// would grow past the screen, or the page be cut off in it, where the owner's view does not reach,
+// while the agent's screenshots still show it whole), and once a resize_page that went on is
+// answered, the board puts back a window that went past the screen all the same
+// (services/cdp-window.ts), and the agent is told the size that fits.
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { LOCAL_KEY_HEADER } from '../adapters/local-key.ts'
-import { HOLD_MS } from '../core/desktop.ts'
-import { type ChildCall, READ_TOOL_NAMES, READ_TOOLS, readTool, steered } from './browser-read.ts'
+import { HOLD_MS, PAGE_MAX, SCREEN } from '../core/desktop.ts'
+import { type ChildCall, READ_TOOL_NAMES, READ_TOOLS, readTool, STEER, steered } from './browser-read.ts'
 
 type Msg = Record<string, unknown>
 const isRecord = (v: unknown): v is Msg => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -132,9 +139,50 @@ export function onlyLooks(params: unknown): boolean {
 export const BOARD_SILENT =
   'The board does not answer who has the browser (it may be restarting): nothing was done. Try again in a moment.'
 
+const PAGE = `${PAGE_MAX.width}x${PAGE_MAX.height}`
+const SCREEN_SIZE = `${SCREEN.width}x${SCREEN.height}`
+/** To see more of a page than shows: a screenshot of the whole page, which needs no larger window. */
+const WHOLE_PAGE = 'To see a whole long page, take_screenshot with fullPage: true.'
+
+/** What resize_page and emulate are told on top of their descriptions: the page's largest size on the screen. */
+export const WINDOW_STEER: Readonly<Record<string, string>> = {
+  resize_page: ` The browser's window never gets larger than its screen (${SCREEN_SIZE}, which the owner watches): the page is at most ${PAGE} (Chrome's own bar takes the rest), a larger size is refused. ${WHOLE_PAGE}`,
+  emulate: ` A viewport is at most ${PAGE}, what shows of the page on the browser's screen (which the owner watches): a larger one is refused, and nothing of the call is set then.`,
+}
+
+/** The page size a call asks for: resize_page's width and height, emulate's viewport ('<w>x<h>…'); null for none. */
+export function pageAsked(params: unknown): { what: 'page' | 'viewport'; width: number; height: number } | null {
+  if (!isRecord(params)) return null
+  const args = isRecord(params.arguments) ? params.arguments : {}
+  if (params.name === 'resize_page' && typeof args.width === 'number' && typeof args.height === 'number')
+    return { what: 'page', width: args.width, height: args.height }
+  if (params.name !== 'emulate' || typeof args.viewport !== 'string') return null
+  // one chrome-devtools-mcp cannot read goes on: it says why
+  const m = /^\s*(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)/.exec(args.viewport)
+  return m ? { what: 'viewport', width: Number(m[1]), height: Number(m[2]) } : null
+}
+
+/** A call that asks for a page larger than what shows on the screen: what it is told (nothing was done); null when it fits. */
+export function tooLarge(params: unknown): string | null {
+  const a = pageAsked(params)
+  if (!a || (a.width <= PAGE_MAX.width && a.height <= PAGE_MAX.height)) return null
+  const asked = `${a.width}x${a.height}`
+  return a.what === 'page'
+    ? `A page of ${asked} does not fit the browser's screen: nothing was done. The screen is ${SCREEN_SIZE} and the window never gets larger (the owner watches the screen; past it, they would not see the page's right and bottom); under Chrome's own bar the page is at most ${PAGE}. Ask for at most that. ${WHOLE_PAGE}`
+    : `A viewport of ${asked} does not fit the browser's screen: nothing was done (none of this call's settings). What shows of the page there is at most ${PAGE} (the screen is ${SCREEN_SIZE}, Chrome's own bar above the page), and the owner watches the screen: a larger viewport is cut off for them. Call emulate again with a viewport of at most ${PAGE}, or none.`
+}
+
+/** resize_page's page went on, and its window past the screen all the same: put back by the board; what the agent is told. */
+export function putBack(asked: { width: number; height: number }, before: { width: number; height: number }): string {
+  const barW = before.width - asked.width
+  const barH = before.height - asked.height
+  const fits = barW >= 0 && barH >= 0 ? `${SCREEN.width - barW}x${SCREEN.height - barH}` : PAGE
+  return `A page of ${asked.width}x${asked.height} made the browser's window ${before.width}x${before.height}, larger than its screen (${SCREEN_SIZE}, which the owner watches): the window was put back to the screen, so the page is not that size. A page of at most ${fits} fits here. ${WHOLE_PAGE}`
+}
+
 export interface RelayOptions {
   /** POST /api/browser/<op> on the board with this pane: its answer, or null when the board does not answer. */
-  board(op: 'call' | 'start' | 'profile' | 'ask' | 'close' | 'login', body: Msg): Promise<Msg | null>
+  board(op: 'call' | 'start' | 'profile' | 'ask' | 'close' | 'login' | 'fit', body: Msg): Promise<Msg | null>
   toChild(line: string): void
   toClient(line: string): void
   holdMs?: number
@@ -174,6 +222,8 @@ export function createRelay(o: RelayOptions): Relay {
   /** The wrapper's own calls to chrome-devtools-mcp (read_page's), by id: their answers never reach Claude. */
   const mine = new Map<string, (msg: Msg) => void>()
   let mineSeq = 0
+  /** The resize_page calls passed on, by id, with the size asked: once answered, the board fits the window. */
+  const resizing = new Map<string, { width: number; height: number }>()
   const track = (p: Promise<void>): void => {
     busy.add(p)
     void p.finally(() => busy.delete(p))
@@ -243,6 +293,19 @@ export function createRelay(o: RelayOptions): Relay {
       })
       o.toChild(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }))
     })
+
+  /**
+   * resize_page answered: the board puts back a window past the screen (services/cdp-window.ts).
+   * One was: the agent is told so and the size that fits; none, or no word from the board: the
+   * answer as chrome-devtools-mcp gave it.
+   */
+  async function fitAfter(line: string, id: unknown, asked: { width: number; height: number }): Promise<void> {
+    const r = await o.board('fit', {})
+    const first = r?.ok === true && Array.isArray(r.fitted) ? r.fitted.find(isRecord) : undefined
+    const before = first && isRecord(first.before) ? first.before : null
+    if (!before || typeof before.width !== 'number' || typeof before.height !== 'number') return o.toClient(line)
+    o.toClient(result(id, putBack(asked, { width: before.width, height: before.height }), true))
+  }
 
   /** read_page or list_interactive: they only look, so they go on whoever has the browser, once it is up. */
   async function read(msg: Msg, params: Msg): Promise<void> {
@@ -320,6 +383,8 @@ export function createRelay(o: RelayOptions): Relay {
         if (!calls.length) return o.toChild(line)
         const ids = msg.filter(m => isRecord(m) && m.method !== undefined && m.id !== undefined).map(m => (m as Msg).id)
         const late = (text: string) => o.toClient(JSON.stringify(ids.map(i => JSON.parse(result(i, text, true)))))
+        const large = calls.map(c => tooLarge(c.params)).find(t => t !== null)
+        if (large) return late(large)
         const looks = calls.every(c => onlyLooks(c.params))
         return track(
           agentHasIt(calls[0]?.id, late, looks).then(async go => {
@@ -341,10 +406,16 @@ export function createRelay(o: RelayOptions): Relay {
       if (OWN_TOOLS.some(t => t.name === params.name)) return track(own(msg, params))
       if (typeof params.name === 'string' && READ_TOOL_NAMES.has(params.name)) return track(read(msg, params))
       const late = (text: string) => o.toClient(result(msg.id, text, true))
+      // a page larger than the screen shows: refused before anything is done
+      const large = tooLarge(params)
+      if (large) return late(large)
+      const resize = params.name === 'resize_page' ? pageAsked(params) : null
       // Looking goes on whoever has the browser; acting waits for the agent's turn at it.
       track(
         agentHasIt(msg.id, late, onlyLooks(params)).then(async go => {
-          if (go && (await started(late))) o.toChild(line)
+          if (!go || !(await started(late))) return
+          if (resize && msg.id !== undefined) resizing.set(idKey(msg.id), resize)
+          o.toChild(line)
         }),
       )
     },
@@ -361,9 +432,14 @@ export function createRelay(o: RelayOptions): Relay {
         mine.delete(key)
         return answer(msg)
       }
+      const resized = isRecord(msg) && msg.method === undefined ? resizing.get(key) : undefined
+      if (resized && isRecord(msg)) {
+        resizing.delete(key)
+        return track(fitAfter(line, msg.id, resized))
+      }
       if (isRecord(msg) && lists.has(key) && isRecord(msg.result) && Array.isArray(msg.result.tools)) {
         lists.delete(key)
-        const tools = steered(msg.result.tools)
+        const tools = steered(msg.result.tools, { ...STEER, ...WINDOW_STEER })
         msg.result.tools = msg.result.nextCursor ? tools : [...tools, ...READ_TOOLS, ...OWN_TOOLS]
         return o.toClient(JSON.stringify(msg))
       }
@@ -478,7 +554,7 @@ export async function runWrapper(w: WrapperOptions): Promise<number> {
       process.stdout.write(`${line}\n`)
     }
     const relay = createRelay({
-      board: (op, body) => ask(op, body, op === 'call' ? 5000 : 90_000),
+      board: (op, body) => ask(op, body, op === 'call' ? 5000 : op === 'fit' ? 10_000 : 90_000),
       toChild: line => {
         try {
           child.stdin.write(`${line}\n`)

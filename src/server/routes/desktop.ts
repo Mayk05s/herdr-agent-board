@@ -31,6 +31,9 @@
 //   POST /api/browser/close    { pane }            done with it for now (browser_close): stopped, its
 //        profile kept for the next call, which starts it again: { ok, closed }; 409 while the owner
 //        has it or its ask stands
+//   POST /api/browser/fit      { pane }            its windows past the screen put back to it (the
+//        wrapper's ask once a resize_page is answered): { ok, fitted: [{ before, after }] }; 409
+//        while no browser runs
 import { controlOf, openUrl, profileName } from '../../core/desktop.ts'
 import type { Item } from '../../core/types.ts'
 import type { Desktops, VncData } from '../../services/desktop.ts'
@@ -44,7 +47,7 @@ export interface DesktopApp {
 }
 
 const DESKTOP = /^\/api\/desktop\/([^/]+)\/(vnc|video|control)$/
-const BROWSER = /^\/api\/browser\/(start|call|profile|ask|close|open|display)$/
+const BROWSER = /^\/api\/browser\/(start|call|profile|ask|close|open|display|fit)$/
 const PANE = /^[\w:.-]{1,80}$/
 /** What a route answers once the request became a WebSocket: Bun answers it with 101 itself. */
 const UPGRADED = (): Response => new Response(null, { status: 200 })
@@ -129,6 +132,10 @@ export function desktopRoutes(app: DesktopApp): Route[] {
         }
         if (op === 'close') {
           const r = await app.desktops.close(pane)
+          return json(r.ok ? 200 : 409, r)
+        }
+        if (op === 'fit') {
+          const r = await app.desktops.fit(pane)
           return json(r.ok ? 200 : 409, r)
         }
         if (op === 'display') {

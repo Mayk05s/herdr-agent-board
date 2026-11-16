@@ -16,8 +16,33 @@ import type { ItemDesktop, Translator } from './types.ts'
 export const DISPLAY_BASE = 100
 /** At most this many desktops at once (each takes about 300–500 MB). */
 export const MAX_DESKTOPS = 32
-/** The screen: Chrome's window fills it. */
+/** The screen: Chrome's window fills it, and never goes past it (services/cdp-window.ts). */
 export const SCREEN = { width: 1440, height: 900 } as const
+/**
+ * Chrome's own bar above the page (its tabs and toolbar, which Chrome draws itself: the display has
+ * no window manager), in pixels: a page of W×H makes its window W×(H + this). Measured: resize_page
+ * to 1600×1100 made the window 1600×1187.
+ */
+export const CHROME_BAR = 87
+/**
+ * The largest page that shows whole on the screen, under Chrome's bar: what the agent may ask of
+ * resize_page (a larger page grows the window past the screen, where the owner's view does not
+ * reach) and of emulate's viewport (a larger one is cut off in the window) (services/browser-mcp.ts).
+ */
+export const PAGE_MAX = { width: SCREEN.width, height: SCREEN.height - CHROME_BAR } as const
+
+/** A browser window's place and size on the screen (CDP's Browser.Bounds). */
+export interface WindowBounds {
+  left: number
+  top: number
+  width: number
+  height: number
+  windowState?: string
+}
+
+/** Whether part of a window is off the screen, so out of the owner's view. */
+export const pastScreen = (b: WindowBounds): boolean =>
+  b.left < 0 || b.top < 0 || b.left + b.width > SCREEN.width || b.top + b.height > SCREEN.height
 /** chrome-devtools-mcp, pinned: the board's install puts this version in place. */
 export const DEVTOOLS_MCP_VERSION = '1.11.0'
 export const DEVTOOLS_MCP = 'chrome-devtools-mcp'

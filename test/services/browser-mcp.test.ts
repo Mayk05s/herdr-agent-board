@@ -3,6 +3,7 @@
 // while the owner has it and let go when it comes back, answered after the hold's limit, and its
 // own tools through the board. And the session's pane, from herdr's variable.
 import { expect, test } from 'bun:test'
+import { PAGE_MAX, SCREEN } from '../../src/core/desktop.ts'
 import {
   ASKED,
   CLOSED,
@@ -569,4 +570,180 @@ test('the list: take_snapshot’s description points to read_page and list_inter
   for (const t of OWN_TOOLS.filter(t => t.name === 'browser_ask_owner')) expect(t.description).toContain('read_page')
   expect(ASKED).toContain('read_page, list_interactive')
   expect(OWNER_DOING_ASK).toContain('read_page, list_interactive')
+})
+
+// ---------------------------------------------------------------- the window kept on the screen
+
+/** chrome-devtools-mcp's answer to call `id`. */
+const answered = (id: number, text = 'done'): string =>
+  JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } })
+const textOf = (m: Msg | undefined): string =>
+  ((m?.result as { content?: { text?: string }[] } | undefined)?.content ?? []).map(c => c.text ?? '').join('')
+const isError = (m: Msg | undefined): boolean => (m?.result as { isError?: boolean } | undefined)?.isError === true
+const MAX = `${PAGE_MAX.width}x${PAGE_MAX.height}`
+
+test('the page area is the screen under Chrome’s own bar', () => {
+  expect(PAGE_MAX.width).toBe(SCREEN.width)
+  expect(PAGE_MAX.height).toBeLessThan(SCREEN.height)
+  expect(SCREEN.height - PAGE_MAX.height).toBe(87)
+})
+
+test('resize_page larger than what shows on the screen (the window would go past it): refused at once, nothing passed on or asked of the board', async () => {
+  for (const [width, height] of [
+    [1600, 1100],
+    [PAGE_MAX.width + 1, 500],
+    [800, PAGE_MAX.height + 1],
+  ]) {
+    const { relay, toChild, toClient, asked } = relayWith()
+    relay.fromClient(call(5, 'resize_page', { width, height }))
+    await relay.idle()
+    expect(toChild).toEqual([])
+    expect(asked).toEqual([])
+    expect(toClient).toHaveLength(1)
+    expect(isError(toClient[0])).toBe(true)
+    expect(toClient[0]?.id).toBe(5)
+    const text = textOf(toClient[0])
+    expect(text).toContain(`${width}x${height}`)
+    expect(text).toContain(MAX)
+    expect(text).toContain(`${SCREEN.width}x${SCREEN.height}`)
+    expect(text).toContain('nothing was done')
+    expect(text).toContain('fullPage')
+  }
+})
+
+test('resize_page that fits: passed on as any call; once answered, the board puts back a window past the screen, and with none the answer goes to Claude as it is', async () => {
+  const { relay, toChild, toClient, asked, raw } = relayWith({ answers: { fit: { ok: true, fitted: [] } } })
+  relay.fromClient(call(5, 'resize_page', { width: 1280, height: 720 }))
+  await relay.idle()
+  expect(toChild).toEqual([call(5, 'resize_page', { width: 1280, height: 720 })])
+  expect(asked.map(([op]) => op)).toEqual(['call', 'start'])
+  relay.fromChild(answered(5, '# resize_page response'))
+  await relay.idle()
+  expect(asked.map(([op]) => op)).toEqual(['call', 'start', 'fit'])
+  expect(raw).toEqual([answered(5, '# resize_page response')])
+  expect(toClient).toHaveLength(1)
+  // the largest that fits, exactly: passed on
+  const edge = relayWith({ answers: { fit: { ok: true, fitted: [] } } })
+  edge.relay.fromClient(call(6, 'resize_page', { width: PAGE_MAX.width, height: PAGE_MAX.height }))
+  await edge.relay.idle()
+  expect(edge.toChild).toHaveLength(1)
+})
+
+test('resize_page whose window went past the screen all the same (a taller bar): the window put back, and the agent told the size that fits here', async () => {
+  const before = { left: 0, top: 0, width: 1440, height: 905, windowState: 'normal' }
+  const after = { left: 0, top: 0, width: 1439, height: 899, windowState: 'normal' }
+  const { relay, toClient } = relayWith({ answers: { fit: { ok: true, fitted: [{ before, after }] } } })
+  relay.fromClient(call(5, 'resize_page', { width: 1440, height: 813 }))
+  await relay.idle()
+  relay.fromChild(answered(5))
+  await relay.idle()
+  expect(toClient).toHaveLength(1)
+  expect(toClient[0]?.id).toBe(5)
+  expect(isError(toClient[0])).toBe(true)
+  const text = textOf(toClient[0])
+  expect(text).toContain('1440x905')
+  expect(text).toContain('put back')
+  expect(text).toContain('1440x808')
+})
+
+test('resize_page’s answer when the board does not say what it fitted (no browser, no answer): as chrome-devtools-mcp gave it', async () => {
+  for (const fit of [null, { ok: false, error: 'no browser' }]) {
+    const { relay, raw } = relayWith({ answers: { fit } })
+    relay.fromClient(call(5, 'resize_page', { width: 800, height: 600 }))
+    await relay.idle()
+    relay.fromChild(answered(5, 'failed'))
+    await relay.idle()
+    expect(raw).toEqual([answered(5, 'failed')])
+  }
+})
+
+test('emulate: a viewport larger than what shows refused, nothing set; one that fits, none, or one chrome-devtools-mcp cannot read passed on, with no fit after', async () => {
+  for (const viewport of ['1600x1100x1', '390x844x3,mobile,touch', `${PAGE_MAX.width + 1}x400`]) {
+    const { relay, toChild, toClient, asked } = relayWith()
+    relay.fromClient(call(5, 'emulate', { viewport, colorScheme: 'dark' }))
+    await relay.idle()
+    expect(toChild).toEqual([])
+    expect(asked).toEqual([])
+    expect(isError(toClient[0])).toBe(true)
+    expect(textOf(toClient[0])).toContain(viewport.split(',')[0]?.split('x').slice(0, 2).join('x') as string)
+    expect(textOf(toClient[0])).toContain(MAX)
+    expect(textOf(toClient[0])).toContain('nothing was done')
+  }
+  for (const args of [
+    { viewport: '390x800x3,mobile,touch', colorScheme: 'dark' },
+    { viewport: `${PAGE_MAX.width}x${PAGE_MAX.height}` },
+    { colorScheme: 'dark' },
+    { viewport: 'garbage' },
+    {},
+  ]) {
+    const { relay, toChild, asked, raw } = relayWith()
+    relay.fromClient(call(5, 'emulate', args))
+    await relay.idle()
+    expect(toChild).toEqual([call(5, 'emulate', args)])
+    relay.fromChild(answered(5))
+    await relay.idle()
+    expect(raw).toEqual([answered(5)])
+    expect(asked.map(([op]) => op)).toEqual(['call', 'start'])
+  }
+})
+
+test('as before for every other call: passed on, answered as it is, no fit asked; arguments named width or viewport change nothing elsewhere', async () => {
+  for (const [name, args] of [
+    ['click', { uid: '1_2' }],
+    ['navigate_page', { url: 'https://example.com/' }],
+    ['take_screenshot', { fullPage: true }],
+    ['evaluate_script', { function: '() => 1', width: 5000, viewport: '9000x9000' }],
+    ['fill', { uid: '1_3', value: 'Привет % 100' }],
+  ] as const) {
+    const { relay, toChild, asked, raw } = relayWith()
+    relay.fromClient(call(7, name, args))
+    await relay.idle()
+    expect(toChild).toEqual([call(7, name, args)])
+    relay.fromChild(answered(7))
+    await relay.idle()
+    expect(raw).toEqual([answered(7)])
+    expect(asked.some(([op]) => op === 'fit')).toBe(false)
+  }
+})
+
+test('a batch with a resize past the screen in it: refused as a batch, nothing passed on', async () => {
+  const { relay, toChild, raw } = relayWith()
+  const batch = JSON.stringify([
+    JSON.parse(call(1, 'click')),
+    JSON.parse(call(2, 'resize_page', { width: 1600, height: 1100 })),
+  ])
+  relay.fromClient(batch)
+  await relay.idle()
+  expect(toChild).toEqual([])
+  const got = JSON.parse(raw[0] as string) as { id: number; result: { isError: boolean } }[]
+  expect(got.map(a => [a.id, a.result.isError])).toEqual([
+    [1, true],
+    [2, true],
+  ])
+})
+
+test('the list: resize_page’s and emulate’s descriptions say the page’s largest size on the screen; the others’ are as they were', async () => {
+  const { relay, toClient } = relayWith()
+  relay.fromClient(JSON.stringify({ jsonrpc: '2.0', id: 'L', method: 'tools/list' }))
+  relay.fromChild(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'L',
+      result: {
+        tools: [
+          { name: 'resize_page', description: "Resizes the page's window so that the page has specified dimension" },
+          { name: 'emulate', description: 'Emulates various features on the target page.' },
+          { name: 'click', description: 'Clicks on the provided element' },
+        ],
+      },
+    }),
+  )
+  const tools = (toClient[0]?.result as { tools: { name: string; description?: string }[] } | undefined)?.tools ?? []
+  for (const name of ['resize_page', 'emulate']) {
+    const d = tools.find(t => t.name === name)?.description ?? ''
+    expect(d).toContain(MAX)
+    expect(d).toContain('refused')
+  }
+  expect(tools.find(t => t.name === 'resize_page')?.description).toStartWith("Resizes the page's window")
+  expect(tools.find(t => t.name === 'click')).toEqual({ name: 'click', description: 'Clicks on the provided element' })
 })

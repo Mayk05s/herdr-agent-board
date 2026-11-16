@@ -1616,3 +1616,156 @@ test('board browser run: the session’s display and its X cookie file, the brow
   const none = setup({ noChrome: true })
   expect((await none.d.display('w0:p1')).ok).toBe(false)
 })
+
+/**
+ * Chrome's holder of the test's own (a named pipe on Windows), answering what the board's window fit
+ * asks (services/cdp-window.ts): one page in window 7 with `win`'s bounds; what it was asked.
+ */
+async function windowHolder(
+  root: string,
+  win: { left: number; top: number; width: number; height: number },
+  at?: string,
+) {
+  const { createServer } = await import('node:net')
+  const path =
+    at ??
+    (process.platform === 'win32'
+      ? String.raw`\\.\pipe\cdpw-` + Math.random().toString(36).slice(2)
+      : join(root, 'w.sock'))
+  const asked: Record<string, unknown>[] = []
+  const state = { win: { ...win, windowState: 'normal' } }
+  /** Each client that connected, and whether it is still connected. */
+  const conns: { open: boolean }[] = []
+  const server = createServer(c => {
+    const conn = { open: true }
+    conns.push(conn)
+    c.on('close', () => {
+      conn.open = false
+    })
+    let buf = ''
+    c.on('data', (b: Buffer) => {
+      buf += b.toString('utf8')
+      for (let at = buf.indexOf('\0'); at !== -1; at = buf.indexOf('\0')) {
+        const m = JSON.parse(buf.slice(0, at)) as { id: number; method: string; params: Record<string, unknown> }
+        buf = buf.slice(at + 1)
+        asked.push(m)
+        const answer = (result: unknown) => c.write(`${JSON.stringify({ id: m.id, result })}\0`)
+        if (m.method === 'Target.getTargets')
+          answer({ targetInfos: [{ targetId: 'P1', type: 'page', url: 'https://example.com/' }] })
+        else if (m.method === 'Browser.getWindowForTarget') answer({ windowId: 7, bounds: state.win })
+        else if (m.method === 'Browser.setWindowBounds') {
+          state.win = { ...(m.params.bounds as typeof win), windowState: 'normal' }
+          answer({})
+        } else if (m.method === 'Browser.getWindowBounds') answer({ bounds: state.win })
+        else answer({})
+      }
+    })
+  })
+  await new Promise<void>(done => server.listen(path, done))
+  const sets = () => asked.filter(m => m.method === 'Browser.setWindowBounds')
+  return { path, asked, state, sets, conns, close: () => server.close() }
+}
+
+test('a window past the screen (the agent’s resize_page) put back to it as a view opens, as the owner takes the browser, and when the wrapper asks after a resize; the agent’s DevTools never see the board’s messages', async () => {
+  const logs: string[] = []
+  const { d, state, root } = setup({}, undefined, { log: line => logs.push(line) })
+  await d.ensure('w0:p1')
+  const holder = await windowHolder(root, { left: 0, top: 0, width: 1600, height: 1187 })
+  const vnc = await vncServer(root)
+  const agent: string[] = []
+  const cdp = {
+    data: { pane: 'w0:p1', socket: holder.path, cdp: true },
+    send: (m: string) => agent.push(m),
+    close: () => {},
+    getBufferedAmount: () => 0,
+  } as unknown as ServerWebSocket<VncData>
+  const until = async (ok: () => boolean) => {
+    for (let i = 0; i < 200 && !ok(); i++) await Bun.sleep(5)
+  }
+  try {
+    // the agent's chrome-devtools-mcp connected: the board's fit goes on its line
+    d.websocket.open?.(cdp)
+    await vnc.open(d, 'w0:p1')
+    await until(() => holder.sets().length === 1)
+    expect(holder.sets().map(m => m.params)).toEqual([
+      { windowId: 7, bounds: { left: 0, top: 0, width: 1440, height: 900 } },
+    ])
+    expect(holder.state.win).toEqual({ left: 0, top: 0, width: 1440, height: 900, windowState: 'normal' })
+    await until(() => logs.some(l => l.includes('1600x1187')))
+    expect(logs.filter(l => l.includes('past the screen'))).toEqual([
+      expect.stringMatching(
+        /^desktop :100 for .*: its window 1600x1187\+0\+0 went past the screen: put back to 1440x900 \(a view opened\)$/,
+      ),
+    ])
+    // a window on the screen: a second view leaves it as it is
+    await vnc.open(d, 'w0:p1')
+    await until(() => holder.asked.filter(m => m.method === 'Target.getTargets').length === 2)
+    await Bun.sleep(20)
+    expect(holder.sets()).toHaveLength(1)
+    // grown again; the owner takes the browser: put back
+    holder.state.win = { left: 0, top: 0, width: 1600, height: 1187, windowState: 'normal' }
+    expect(d.setControl(state.items[0] as Item, 'owner').ok).toBe(true)
+    await until(() => holder.sets().length === 2)
+    expect(holder.sets()).toHaveLength(2)
+    d.setControl(state.items[0] as Item, 'agent')
+    // the wrapper's ask after a resize_page: what was put back, and from what
+    holder.state.win = { left: 0, top: 0, width: 1440, height: 905, windowState: 'normal' }
+    expect(await d.fit('w0:p1')).toEqual({
+      ok: true,
+      fitted: [
+        {
+          before: { left: 0, top: 0, width: 1440, height: 905, windowState: 'normal' },
+          after: { left: 0, top: 0, width: 1440, height: 900, windowState: 'normal' },
+        },
+      ],
+    })
+    expect(await d.fit('w0:p1')).toEqual({ ok: true, fitted: [] })
+    // every answer was the board's own: none reached the agent's client
+    expect(agent).toEqual([])
+    // no browser in that pane: nothing asked
+    expect(await d.fit('w0:p2')).toEqual({ ok: false, error: 'no browser' })
+  } finally {
+    d.websocket.close?.(cdp, 1000, '')
+    vnc.close()
+    holder.close()
+  }
+})
+
+test.skipIf(process.platform === 'win32')(
+  'with the owner’s sign-in watch on a DevTools connection of its own (no agent’s connected), the fit goes on that line: the holder’s one client is never kicked',
+  async () => {
+    const { d, state, root } = setup({}, undefined, { onLoginCapture: () => {} })
+    await d.ensure('w0:p1')
+    // Chrome's holder at the desktop's own DevTools socket
+    const cdp = join(root, 'sessions', '100', 'cdp.sock')
+    rmSync(cdp)
+    const holder = await windowHolder(root, { left: 0, top: 0, width: 1600, height: 1187 }, cdp)
+    const vnc = await vncServer(root)
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 300 && !ok(); i++) await Bun.sleep(5)
+    }
+    const looks = () => holder.asked.filter(m => m.method === 'Target.getTargets').length
+    try {
+      // a view, no watch yet: the fit on a connection of the board's own
+      await vnc.open(d, 'w0:p1')
+      await until(() => holder.sets().length === 1)
+      expect(holder.conns).toHaveLength(1)
+      // the owner takes it: the watch connects, and the fit goes on its line, no third client
+      holder.state.win = { left: 0, top: 0, width: 1600, height: 1187, windowState: 'normal' }
+      d.setControl(state.items[0] as Item, 'owner')
+      await until(() => holder.sets().length === 2)
+      expect(holder.sets()).toHaveLength(2)
+      expect(holder.conns).toHaveLength(2)
+      // another view meanwhile: on the watch's line again
+      await vnc.open(d, 'w0:p1')
+      await until(() => looks() >= 4)
+      await Bun.sleep(20)
+      expect(holder.conns).toHaveLength(2)
+      expect(holder.conns[1]?.open).toBe(true)
+    } finally {
+      d.setControl(state.items[0] as Item, 'agent')
+      vnc.close()
+      holder.close()
+    }
+  },
+)

@@ -68,11 +68,11 @@ export const STEER: Readonly<Record<string, string>> = {
     ' Its answer carries the whole take_snapshot tree of the page (large); read_page or list_interactive after it read the page compactly.',
 }
 
-/** chrome-devtools-mcp's tool list with STEER added to the descriptions it names. */
-export function steered(tools: unknown[]): unknown[] {
+/** chrome-devtools-mcp's tool list with `steer` (STEER by default) added to the descriptions it names. */
+export function steered(tools: unknown[], steer: Readonly<Record<string, string>> = STEER): unknown[] {
   return tools.map(t => {
-    if (!isRecord(t) || typeof t.name !== 'string' || !(t.name in STEER) || typeof t.description !== 'string') return t
-    return { ...t, description: t.description + STEER[t.name] }
+    if (!isRecord(t) || typeof t.name !== 'string' || !(t.name in steer) || typeof t.description !== 'string') return t
+    return { ...t, description: t.description + steer[t.name] }
   })
 }
 

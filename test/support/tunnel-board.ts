@@ -166,7 +166,7 @@ export const SAMPLES: Record<string, string> = Object.fromEntries(
       [/^\/api\/secret\/([0-9a-f]{12})$/, '/api/secret/0123456789ab'],
       // the board's own server only (routes/desktop.ts)
       [/^\/api\/desktop\//, '/api/desktop/s1/vnc'],
-      [/^\/api\/browser\/(start|call|profile|ask|close|open|display)$/, '/api/browser/call'],
+      [/^\/api\/browser\/(start|call|profile|ask|close|open|display|fit)$/, '/api/browser/call'],
       // with the password vault (routes/vault.ts)
       [/^\/api\/browser\/(login|login-status)$/, '/api/browser/login-status'],
       [/^\/api\/vault\/fill\/([0-9a-f]{12})$/, '/api/vault/fill/0123456789ab'],

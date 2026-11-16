@@ -25,6 +25,10 @@
 // desktop while it has viewers), the VNC connection then carrying the input and no picture; where
 // it has none, the page asks VNC for the picture as before. Server mode only: app.ts makes none
 // of this on a PC.
+//
+// Chrome's window stays on its screen (services/cdp-window.ts): one the agent grew past it
+// (resize_page; the display has no window manager to stop it) is put back as a view opens, as the
+// owner takes the browser, and once the agent's resize_page is answered (the wrapper asks).
 import { randomBytes } from 'node:crypto'
 import {
   closeSync,
@@ -57,6 +61,7 @@ import {
   pickSlot,
   quietPasswords,
   rfbInputFilter,
+  SCREEN,
   slotDisplay,
   xauthority,
   xvncArgs,
@@ -64,6 +69,7 @@ import {
 import type { Card, Item, ItemDesktop } from '../core/types.ts'
 import { type CdpLine, focusedPage, type PeekResult } from './cdp-peek.ts'
 import { nulFrames } from './cdp-pipe.ts'
+import { type FitResult, fitWindows } from './cdp-window.ts'
 import { createDesktopVideo, type DesktopVideo, VIDEO_NONE, type VideoViewer } from './desktop-video.ts'
 import { createLoginWatch } from './login-watch.ts'
 
@@ -386,6 +392,11 @@ export interface Desktops {
    * Not while no browser runs.
    */
   peek(pane: string, o?: { activate?: boolean }): Promise<PeekResult>
+  /**
+   * The pane's browser windows that reach past its screen put back to it (services/cdp-window.ts),
+   * on the board's own DevTools line: which ones, before and after. Not while no browser runs.
+   */
+  fit(pane: string): Promise<FitResult>
   /**
    * Keys typed on the pane's display by the board itself (a login fill): X keysyms, each down and
    * up, by a VNC connection of its own (adapters/rfb-keys.ts). Not while the owner has the browser,
@@ -1035,7 +1046,7 @@ export function createDesktops(o: DesktopsOptions): Desktops {
    * only while the owner holds it; by pane. Started as the owner takes the browser, stopped as it
    * goes back to the agent (handed back, the view gone, no view a while) or the browser stops.
    */
-  const watches = new Map<string, { stop(): Promise<void> }>()
+  const watches = new Map<string, { stop(): Promise<void>; line: CdpLine }>()
   function startWatch(pane: string): void {
     if (!o.onLoginCapture || watches.has(pane)) return
     const d = desktops.get(pane)
@@ -1046,13 +1057,33 @@ export function createDesktops(o: DesktopsOptions): Desktops {
       log: o.log,
       now,
     })
-    watches.set(pane, { stop: () => watch.stop().finally(close) })
+    watches.set(pane, { stop: () => watch.stop().finally(close), line })
   }
   function stopWatch(pane: string): void {
     const w = watches.get(pane)
     if (!w) return
     watches.delete(pane)
     void w.stop()
+  }
+
+  /** The pane's browser windows past the screen put back to it (`why`: what asked, for the log). */
+  async function fitNow(pane: string, why: string): Promise<FitResult> {
+    const d = desktops.get(pane)
+    if (!d || d.stopping || d.closing || !d.running || !existsSync(d.cdp)) return { ok: false, error: 'no browser' }
+    // the holder takes one client at a time: on the watch's line when it has one of its own, never one that kicks it
+    const watching = bridges.has(pane) ? undefined : watches.get(pane)?.line
+    const { line, close } = watching ? { line: watching, close: () => {} } : lineTo(pane, d.cdp)
+    try {
+      const r = await fitWindows(line)
+      if (r.ok)
+        for (const { before: b } of r.fitted)
+          o.log(
+            `desktop :${d.display} for ${d.key || pane}: its window ${b.width}x${b.height}+${b.left}+${b.top} went past the screen: put back to ${SCREEN.width}x${SCREEN.height} (${why})`,
+          )
+      return r
+    } finally {
+      close()
+    }
   }
 
   /** A DevTools line for the board's own look: the agent's open bridge, else a connection of its own to the holder (`cdp`). */
@@ -1405,6 +1436,8 @@ export function createDesktops(o: DesktopsOptions): Desktops {
       // the owner holds it: the board watches for their own sign-in (services/login-watch.ts); back to the agent, it stops
       if (to === 'owner') startWatch(d.pane)
       else stopWatch(d.pane)
+      // what they take over shows whole: a window the agent grew past the screen is put back
+      if (to === 'owner') void fitNow(d.pane, 'the owner took it')
       // handed back: what the agent asked is done (its own ask only: a later `board ask` stays), and it is told
       if (to === 'agent') handedBack(d, item.key)
       save()
@@ -1446,6 +1479,8 @@ export function createDesktops(o: DesktopsOptions): Desktops {
         close()
       }
     },
+
+    fit: pane => fitNow(pane, 'after the agent’s resize_page'),
 
     async typeKeys(pane, keysyms) {
       const d = desktops.get(pane)
@@ -1495,6 +1530,8 @@ export function createDesktops(o: DesktopsOptions): Desktops {
         const d = desktops.get(ws.data.pane)
         touch(ws.data.pane)
         if (d && !d.stopping) void keymapOf(d)
+        // the view shows the screen: a window the agent grew past it is put back first
+        if (d && !d.stopping) void fitNow(d.pane, 'a view opened')
       },
       // keys, the mouse and the clipboard reach the display only while the owner has the browser
       message(ws, msg) {
