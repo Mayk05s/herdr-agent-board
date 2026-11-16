@@ -63,7 +63,8 @@ interface Pending {
  * message comes next as a user line of its own, which says which one went), `remove` (taken
  * into the running turn, absorbed_mid_turn, and kept as a queued_command attachment), or `popAll`
  * (pulled back into the input box). Task notifications, other sessions' messages, board
- * reminders, scheduled prompts and Code Mode's background results go the same way; they are left out. A queue goes with its
+ * reminders, scheduled prompts and Code Mode's background results go the same way; they are
+ * left out. A queue goes with its
  * Claude process: nothing from before `since` (when it started), nor from before `idleSince`
  * (when it last said its turn was over, which empties the queue).
  */

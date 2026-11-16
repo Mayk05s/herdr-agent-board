@@ -252,7 +252,8 @@ export const boardNotice = (text: unknown): ReminderNotice | CallNotice | null =
  * `<event nonce="…" kind="…">` envelope and hands it to Claude as a tool result, never as the
  * user's line. Any kind: repl-eval, a monitor, whatever comes next.
  */
-export const codeModeEvent = (text: unknown): boolean => /^\s*<event\b[^>]*\snonce="[^"]*"/.test(String(text ?? ''))
+export const codeModeEvent = (text: unknown): boolean =>
+  /^\s*<event\s(?:[^>]*\s)?nonce="[^"]*"/.test(String(text ?? ''))
 
 /** True for a prompt the user did not type: a task notification, a board reminder or a call's results. */
 export const isNotice = (text: unknown): boolean => !!(taskNotice(text) || boardNotice(text))

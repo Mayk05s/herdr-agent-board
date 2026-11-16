@@ -84,6 +84,8 @@ test("Code Mode's background results are not the user's queued messages", () => 
   assert.deepEqual(queued(dequeued), ['also check the logs'])
   // The event's dequeue owes no user line: the real one goes only when its own comes.
   assert.deepEqual(queued([...dequeued, q(60, 'dequeue'), user(60, 'also check the logs')]), [])
+  // Nor does a line typed otherwise take the waiting one in its stead.
+  assert.deepEqual(queued([...dequeued, user(20, 'typed elsewhere')]), ['also check the logs'])
   const slash = [
     ...busy,
     q(10, 'enqueue', event(10)),
@@ -94,7 +96,8 @@ test("Code Mode's background results are not the user's queued messages", () => 
   ]
   assert.deepEqual(queued(slash), ['/rename probe', 'then this'])
   // A typed line that only looks like one (no nonce) is still the user's.
-  assert.deepEqual(queued([...busy, q(10, 'enqueue', '<event kind="x"> is the tag')]), ['<event kind="x"> is the tag'])
+  for (const typed of ['<event kind="x"> is the tag', '<event-log nonce="x"> too'])
+    assert.deepEqual(queued([...busy, q(10, 'enqueue', typed)]), [typed])
 })
 
 test('a dequeue takes the one its user line names, whatever else waits', () => {
