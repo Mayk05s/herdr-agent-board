@@ -28,7 +28,7 @@ import {
   statusOf,
 } from '../core/secrets.ts'
 import type { Config } from '../core/types.ts'
-import { askSecret, cancelSecret, expireIfDue, ownRequest, secretsOf } from '../services/secrets.ts'
+import { askSecret, cancelSecret, expireIfDue, ownRequest, ownSecretsOf, secretsOf } from '../services/secrets.ts'
 
 export const SECRET_USAGE = `board secret request --title "<what for>" [--sink <id>] [--field <name>[:shown][:once]]... [--param <name>=<value>]... [--global | --profile <id>] [--expires 30m] [--no-wait]
 board secret status <id> [--wait] | cancel <id> | requests | sinks`
@@ -130,9 +130,10 @@ export async function secretCmd(argv: string[], ctx: SecretContext): Promise<num
           params[p.slice(0, at)] = p.slice(at + 1)
         }
         if (args.length) throw new Usage(`unexpected: ${args.join(' ')}`)
-        // no --sink: the board's own store, when it is the one sink there is
+        // no --sink: the board's own store, when it is the one sink of config.json's there is (the
+        // calendar's own, #328, is not one of them)
         const conf = secretsOf(ctx.cfg)
-        const sink = given || onlyStore(conf) || ''
+        const sink = given || onlyStore(ownSecretsOf(ctx.cfg)) || ''
         if (!sink) throw new Usage('--sink <id> names where the values go (board secret sinks)')
         // --global and --profile: the store's scope, as `board secret set` has them
         if (global || profile !== undefined) {

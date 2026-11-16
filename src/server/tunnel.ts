@@ -11,10 +11,10 @@
 //   must be there;
 // - it carries the cookie of a live login;
 // - it does not act on this computer's screen (desktopOnly), nor manage the remote mode, Remote
-//   access or wake (localOnly), in either spelling of its path, nor the owner's secrets for the
-//   agents, Settings → Backup…, Settings → Time tracking… and Settings → Sleep and wake… but in
-//   server mode (core/remote.ts secretsPath, ownServerSettings); pairing and peers are not here at
-//   all.
+//   access, wake or the team (localOnly; the owner's part of the team and threads it may), in
+//   either spelling of its path, nor the owner's secrets for the agents, Settings → Backup…,
+//   Settings → Time tracking… and Settings → Sleep and wake… but in server mode (core/remote.ts
+//   secretsPath, ownServerSettings); pairing and peers are not here at all.
 // The routes' own guards apply as for the web board, with the domain's origin as the board's own,
 // and the routes that read by a path refuse the board's own files (ownFiles). WebAuthn expects
 // that origin too; its relying party is the domain alone, so passkeys outlive a port change.
@@ -61,9 +61,11 @@ import {
 } from '../core/on-server.ts'
 import { qrMatrix, qrPath } from '../core/qr.ts'
 import { REMOTE_API } from '../core/remote.ts'
+import { teamConfig } from '../core/team.ts'
 import { boardPorts, publicHosts, publicOrigin, tunnelConfig, tunnelPort, tunnelProblems } from '../core/tunnel.ts'
 import type { Config } from '../core/types.ts'
 import { vaultAdminPath, vaultPath, vaultRegisterPath, vaultSocketPath } from '../core/vault.ts'
+import { threadsConfig } from '../core/work-threads.ts'
 import type { Access, SignIn, Who } from '../services/access.ts'
 import type { FirstLogin } from '../services/first-login.ts'
 import type { Probes } from '../services/tunnel.ts'
@@ -318,6 +320,10 @@ export function createTunnelListener(o: TunnelListenerOptions): TunnelListener {
         auth: 'login',
         signedIn,
         language: o.cfg.language ?? null,
+        // The Team panel (#355), while the team is on; else hello is as it was.
+        ...(signedIn && teamConfig(o.cfg.team) !== null && { team: true }),
+        // Threads (#392): the tunnel's login is the owner's own, while threads are on.
+        ...(signedIn && threadsConfig(o.cfg.threads) && { threads: true }),
       })
       return signedIn ? res : clearedFor(res, cookie)
     }
@@ -446,7 +452,11 @@ export function createTunnelListener(o: TunnelListenerOptions): TunnelListener {
       if (NOT_HERE.test(raw) || NOT_HERE.test(path)) return json(404, { error: 'not found' })
       // On the board's own server this login is the way in, its page the owner's own: the secrets,
       // Backup…, Time tracking… and Sleep and wake… there; through a PC's tunnel not.
-      const refused = remoteRefusal(raw, path, { ownServer: mode() !== null })
+      const refused = remoteRefusal(raw, path, {
+        ownServer: mode() !== null,
+        teamOwner: teamConfig(o.cfg.team) !== null,
+        owner: true,
+      })
       if (refused) return refused
       if (req.method === 'POST' && raw === '/api/logout') {
         o.access.endToken(token)

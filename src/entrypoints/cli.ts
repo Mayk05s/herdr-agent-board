@@ -76,10 +76,18 @@
 //   board secret get <NAME>  prints the value this session gets (its session's, profile's or the
 //                            global one); for the calling session only
 //   board secret file <NAME> the same in a file of the session's own (0600, in memory), its path printed
-//   board todo add [--mine] "<text>" | done <id> | list   tasks (#202, core/todos.ts): what the
-//                            agent hands the user to do, or (--mine) a promise of its own it defers;
-//                            done closes its own; list shows this session's open ones. Only while
-//                            config.json turns tasks on with agents (`"todos": true`)
+//   board todo add [--mine] [--ref <r>] [--why <w>] "<text>" | done <key> [--why <w>] | list
+//                            tasks (#202, core/todos.ts): what the agent hands the user to do, or
+//                            (--mine) a promise of its own it defers, printed with its key
+//                            (<lane>-<session>-<n>, #319); done closes its own, and on the user's
+//                            proposes it done for them to confirm (closes it with autoClose); list
+//                            shows this session's open ones. Only while config.json turns tasks on
+//                            with agents (`"todos": true`)
+//   board compact [--at <300k|60%|never>] [--note "<what to keep>" | --note none] [--clear]
+//                            auto-compact (#378, entrypoints/compact-cli.ts): once this session's
+//                            context reaches the limit, the board types /compact into it between
+//                            turns (with the instructions for its summary); never: not even
+//                            Settings' default; --clear: Settings' default applies; no flags: shows it
 //   board resume <session id> [--profile <id>]   resumes that session here, in the profile its
 //                            card says it ran in (else the one named): what herdr types into a
 //                            restored pane for a session in another profile than the default one
@@ -128,6 +136,13 @@
 //   board time add | edit | move | rm | restore | show | list | day | projects | import   time
 //                            entries in the board's database (#233, entrypoints/time-cli.ts, where
 //                            each is spelled out), written as this session, its lane the client
+//   board cal list | sources | sync | add | edit | rm | push   the owner's calendar (#328,
+//                            entrypoints/cal-cli.ts, where each is spelled out): every source's events,
+//                            the board's own changed as this session; while config.json turns it on
+//   board thread new | post | done | ask | set | show | list | changes | watch | unwatch | link | open | import
+//                            threads (#379, entrypoints/thread-cli.ts, where each is spelled out):
+//                            written as this session (or --session's), its watchers told in one line;
+//                            while config.json turns them on
 //   board db restore [--target folder|server] [--snapshot <name>] [--file <path>]
 //                            [--passphrase-file <file> | --passphrase-stdin] [--replace-file]   the database back as a
 //                            snapshot has it (the newest of the target when none is named); without
@@ -178,7 +193,7 @@ import { type ProfileSet, profileSet, resolveProfileDir, sessionProfile } from '
 import { deskSteps, type RemoteView, remoteConfig } from '../core/remote.ts'
 import { parseResume, projectFolderName, resumeDir, resumePlan } from '../core/resume.ts'
 import { MAX_REPORT, promptOf, type ScheduleEntry, type SessionRef } from '../core/schedule-rules.ts'
-import { sortTodos, todosConfig, todosOf } from '../core/todos.ts'
+import { findTodo, numberTodos, sortTodos, type Todo, todoKey, todosConfig, todosOf } from '../core/todos.ts'
 import { boardPorts, publicOrigin, type TestStep, tunnelChecks, tunnelConfig, tunnelProblems } from '../core/tunnel.ts'
 import type { Item } from '../core/types.ts'
 import { wakeConfig } from '../core/wake/config.ts'
@@ -203,8 +218,10 @@ import { defaultDeps } from '../services/deps.ts'
 import { type MoveOutcome, moveMany } from '../services/move.ts'
 import { type SleepOutcome, sessionsFor, sleepMany } from '../services/sleep.ts'
 import { currentWakeMode } from '../services/wake/mode.ts'
+import { compactCli } from './compact-cli.ts'
+import type { ThreadCmdContext } from './thread-cli.ts'
 
-const USAGE = `board [cat <id> ["<Title>"] | doing <text> | wait <text> | ask <question> | done [text] | clear | favorite [off] | list | cats | remind <when> "<text>" [--idle] | every "<cron>" "<text>" [--idle] | restart ["<note for after>"] | archive --session <id|name|pane> | sleep <id|name|pane>... [--when-free] [--self] | move <id|name|pane>... --profile <id> [--when-free] | fork [--name "<Name>"] ["<note>"] | schedule [--all | --move <id>] | unschedule <id|all> | call-report --session <id> --file <report.md> [--report-id <stable-id>] | remote [on | off | pwa on|off | approve <id> | deny <id> | revoke <id> | desk <id> [off]] | tunnel [on | off | test] | login [link | reset] | doctor | update [--ref <ref>] | presence [here | away | call] | todo add [--mine] "<text>" | todo done <id> | todo list | away [on | off] | resume <session id> [--profile <id>] | resume --pi <pi session id> | browser ask <text> | browser profile [<name>] | browser open <url> [--ask <text>] | browser run [--ask <text>] -- <program> [args...] | browser login [--fields username,password,totp] [--enter] [--username <name>] [--site <domain>] [--no-wait] | secret request --title "<what for>" [--sink <id>] [--field <name>[:shown][:once]]... [--param <name>=<value>]... [--global | --profile <id>] [--expires 30m] [--no-wait] | secret status <id> [--wait] | secret cancel <id> | secret requests | secret sinks | secret set|list|rm|get|file [<NAME>] [--profile <id>] | launch <program> [args...] | backup now|status|list|passphrase|folder <path>|test <target> | db restore [--target <t>] [--snapshot <name>] [--file <path>]] [--session <id|name|pane>]`
+const USAGE = `board [cat <id> ["<Title>"] | doing <text> | wait <text> | ask <question> | done [text] | clear | favorite [off] | list | cats | remind <when> "<text>" [--idle] | every "<cron>" "<text>" [--idle] | restart ["<note for after>"] | archive --session <id|name|pane> | sleep <id|name|pane>... [--when-free] [--self] | move <id|name|pane>... --profile <id> [--when-free] | fork [--name "<Name>"] ["<note>"] | schedule [--all | --move <id>] | unschedule <id|all> | call-report --session <id> --file <report.md> [--report-id <stable-id>] | remote [on | off | pwa on|off | approve <id> | deny <id> | revoke <id> | desk <id> [off]] | tunnel [on | off | test] | login [link | reset] | doctor | update [--ref <ref>] | presence [here | away | call] | team join <invite> --hub <ws://host:7443> --name <name> | team roster | team draft <name|peer-id> "<text>" | team post <name|peer-id|team> [--new "<title>"] [--link <url>] "<text>" | team reply <thread> "<text>" | team thread <thread> | team assign <thread> <session> | team release <thread> | team listen [off] | team loop <name|peer-id|team> [<1-100>|default] | todo add [--mine] [--ref <r>] [--why "<w>"] "<text>" | todo done <key> [--why "<w>"] | todo list | compact [--at <300k|60%|never>] [--note "<what to keep>" | --note none] [--clear] | away [on | off] | resume <session id> [--profile <id>] | resume --pi <pi session id> | browser ask <text> | browser profile [<name>] | browser open <url> [--ask <text>] | browser run [--ask <text>] -- <program> [args...] | browser login [--fields username,password,totp] [--enter] [--username <name>] [--site <domain>] [--no-wait] | secret request --title "<what for>" [--sink <id>] [--field <name>[:shown][:once]]... [--param <name>=<value>]... [--global | --profile <id>] [--expires 30m] [--no-wait] | secret status <id> [--wait] | secret cancel <id> | secret requests | secret sinks | secret set|list|rm|get|file [<NAME>] [--profile <id>] | launch <program> [args...] | cal list [--day <d> | --from <t> --to <t>] [--json] | cal add|edit|rm|sources|sync|push (board cal --help) | thread new|post|done|ask|set|show|list|changes|watch|unwatch|link|open|import|share (board thread --help) | mcp | backup now|status|list|passphrase|folder <path>|test <target> | db restore [--target <t>] [--snapshot <name>] [--file <path>]] [--session <id|name|pane>]`
 const MIN_REPEAT_MS = 5 * 60_000
 const WHEN_HELP = 'in 30m, in 2h, at 15:30, tomorrow 9:00, fri 17:00, 2026-10-20 14:00 (local time)'
 
@@ -494,41 +511,76 @@ function line(key: string, cwd: string): string {
 }
 
 /**
- * `board todo add [--mine] "<text>" | done <id> | list` (#202): the agent's side of the tasks, on
- * this session's card, under its lock (adapters/cards.ts changeTodos). Refused while tasks are off,
- * or on for the user's pins only.
+ * `board todo add [--mine] [--ref <r>] [--why <w>] "<text>" | done <key> [--why <w>] | list` (#202,
+ * #319): the agent's side of the tasks, on this session's card, under its lock (adapters/cards.ts
+ * changeTodos). A task is named by its key, its number or its id. Done on the user's own task
+ * proposes it done for the user to confirm, or closes it where config.json's `autoClose` says so.
+ * Refused while tasks are off, or on for the user's pins only.
  */
 function todo(key: string): void {
-  const usage = 'usage: board todo add [--mine] "<text>" | board todo done <id> | board todo list'
+  const usage =
+    'usage: board todo add [--mine] [--ref <ticket|file|link>] [--why "<what it waits on>"] "<text>" | board todo done <key> [--why "<what settled it>"] | board todo list'
   const conf = todosConfig(cfg.todos)
   if (!conf) throw new Error(t('todo.err.off'))
   if (!conf.agents) throw new Error(t('todo.err.agentsOff'))
   const [sub = 'list', ...args] = rest
+  // --ref and --why with their values, --mine; the rest is the text (add) or the task (done).
+  const flags: Record<string, string> = {}
+  const words: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? ''
+    if ((a === '--ref' || a === '--why') && i + 1 < args.length) flags[a.slice(2)] = args[++i] ?? ''
+    else if (a !== '--mine') words.push(a)
+  }
+  const card = () => readCard(key)
+  const listed = (): Todo[] => {
+    const c = card()
+    return numberTodos(todosOf(c?.todos), Number(c?.todoSeq) || 0).list
+  }
+  const keyOf = (x: Todo): string => todoKey(card() ?? {}, x)
   if (sub === 'list') {
-    const open = sortTodos(todosOf(readCard(key)?.todos)).filter(x => !x.done)
+    const open = sortTodos(listed()).filter(x => !x.done)
     if (!open.length) {
       console.log('no open tasks for this session')
       return
     }
-    for (const x of open) console.log(`${x.id} · ${x.owner === 'agent' ? 'yours' : "the user's"} · ${x.text}`)
+    for (const x of open) {
+      const whose = x.owner === 'agent' ? 'yours' : x.proposed ? "the user's, proposed done" : "the user's"
+      console.log([keyOf(x), whose, x.text, ...(x.ref ? [`ref ${x.ref}`] : [])].join(' · '))
+    }
     return
   }
   if (sub === 'add') {
     const mine = args.includes('--mine')
-    const words = args
-      .filter(a => a !== '--mine')
-      .join(' ')
-      .trim()
-    if (!words) throw new Error(usage)
-    const r = changeTodos(key, { op: 'add', text: words, owner: mine ? 'agent' : 'user', by: 'agent' })
+    const text = words.join(' ').trim()
+    if (!text) throw new Error(usage)
+    const r = changeTodos(key, {
+      op: 'add',
+      text,
+      owner: mine ? 'agent' : 'user',
+      by: 'agent',
+      ...(flags.ref !== undefined && { ref: flags.ref }),
+      ...(flags.why !== undefined && { why: flags.why }),
+    })
     if (!r.ok) throw new Error(t(r.error))
-    console.log(`ok · task ${r.todo?.id} · ${mine ? 'yours' : "the user's"}`)
+    console.log(`ok · task ${r.todo ? keyOf(r.todo) : ''} · ${mine ? 'yours' : "the user's"}`)
     return
   }
-  if (sub === 'done' && args[0]) {
-    const r = changeTodos(key, { op: 'done', id: args[0], by: 'agent' })
+  if (sub === 'done' && words[0]) {
+    const found = findTodo(listed(), words[0])
+    if (!found) throw new Error(t('todo.err.gone'))
+    const r = changeTodos(key, {
+      op: 'done',
+      id: found.id,
+      by: 'agent',
+      ...(flags.why !== undefined && { why: flags.why }),
+      ...(conf.autoClose && { auto: true }),
+    })
     if (!r.ok) throw new Error(t(r.error))
-    console.log(`ok · task ${args[0]} done`)
+    const x = r.todo ?? found
+    console.log(
+      x.done ? `ok · task ${keyOf(x)} done` : `ok · task ${keyOf(x)} proposed done: the user confirms it on the board`,
+    )
     return
   }
   throw new Error(usage)
@@ -568,6 +620,217 @@ function presence(): void {
   }
   const { presence: p, changed } = setPresence(state, 'user', process.env.HERDR_PANE_ID ? 'agent' : 'cli')
   console.log(`ok · ${changed ? '' : 'already '}${p.state}`)
+}
+
+const TEAM_USAGE =
+  'usage: board team join <invite> --hub <ws://host:7443> --name <name> | board team roster | board team draft <name|peer-id> "<text>" | board team post <name|peer-id|team> [--new "<title>"] [--link <url>] [--file <path>] "<text>" | board team reply <thread> [--to <message>] [--file <path>] "<text>" | board team thread <thread> [--json] [--read] | board team drafts | board team inbox [--unread] [--json] | board team watch [--json] [--every <seconds>] | board team assign <thread> <session> | board team release <thread> | board team listen [off] | board team loop <name|peer-id|team> [<1-100>|default]'
+/** The `board team` ops of agents talking through the hub (#216), in entrypoints/team-agents-cli.ts. */
+const TEAM_AGENT_OPS = ['post', 'reply', 'thread', 'drafts', 'assign', 'release', 'listen', 'loop']
+/** What came in, read only (#355), in entrypoints/team-inbox-cli.ts. */
+const TEAM_INBOX_OPS = ['inbox', 'watch']
+
+/**
+ * When the board's port answered, but not as this install's board would (#356): the process that
+ * holds it, in a line (pid, folder, when it started, what /api/hello says). Null when it is this
+ * install's board after all, or the system does not say.
+ */
+async function strangerOnPort(port: number): Promise<string | null> {
+  const { whoHoldsPort } = await import('../adapters/port-owner.ts')
+  const { describeOwner } = await import('../core/board-port.ts')
+  const { ROOT } = await import('../adapters/paths.ts')
+  const { owner, says, why } = await whoHoldsPort(port, ROOT)
+  if (!owner || !why) return null
+  const who = describeOwner(owner, says, why, Date.now())
+  return `port ${port} is held by a process that is not this install's board (${ROOT}): ${who}. Stop it (often an old board server from another checkout) and open the board again`
+}
+
+/**
+ * `board team draft <name|peer-id> "<text>"`: leaves a draft in the Team panel for the person to
+ * send. The name is looked up in the roster the running board has (a name that fits two people, or
+ * none, is an error that lists the names); nothing is sent from here.
+ */
+async function draftTo(
+  T: typeof import('../core/team.ts'),
+  webPort: number,
+  roster: unknown[],
+  who: string,
+  text: string,
+): Promise<void> {
+  const peers = roster.filter(isRecord).filter(p => typeof p.peer === 'string' && typeof p.name === 'string')
+  const names = peers.map(p => T.printable(String(p.name))).join(', ') || 'nobody yet'
+  const byId = peers.filter(p => p.peer === who)
+  const exact = peers.filter(p => p.name === who)
+  const loose = peers.filter(p => String(p.name).toLowerCase() === who.toLowerCase())
+  const hit = byId.length ? byId : exact.length ? exact : loose
+  if (hit.length > 1)
+    throw new Error(
+      `${T.printable(who)} fits more than one person (${names}): use the peer id from \`board team roster\``,
+    )
+  const target = hit[0]
+  if (!target) throw new Error(`nobody called ${T.printable(who)} on the team. On it: ${names}`)
+  let res: Response
+  try {
+    res = await fetch(`http://127.0.0.1:${webPort}/api/team/draft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-board': '1' },
+      body: JSON.stringify({ to: target.peer, text }),
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch {
+    throw new Error('the board does not run: open it first (herdr plugin action invoke agent-board.open)')
+  }
+  const reply: unknown = await res.json().catch(() => null)
+  if (!res.ok || !isRecord(reply) || reply.ok !== true) {
+    const why = isRecord(reply) ? String(reply.error ?? res.status) : String(res.status)
+    const text_ =
+      why === 'full'
+        ? 'too many drafts are waiting: send or discard some in the Team panel first'
+        : why === 'text'
+          ? `the text is empty or longer than ${T.MAX_TEXT} characters`
+          : why === 'peer'
+            ? 'that person is not on the team any more'
+            : why
+    throw new Error(`no draft made: ${text_}`)
+  }
+  console.log(
+    `ok · draft for ${T.printable(String(target.name))} is in the Team panel; nothing is sent until a person presses Send`,
+  )
+}
+
+/**
+ * `board team join <invite> --hub <url> --name <name>` and `board team roster` (#231). Join makes
+ * this board's key (kept only once the hub has said welcome), joins with the invite and writes
+ * `team` into config.json; the running board connects within seconds. --name is read off the
+ * global parse above (forkName): fork's flag, the same word. Roster asks the running board; with
+ * `team` off it says so and touches nothing.
+ */
+async function team(): Promise<void> {
+  const [op, ...more] = rest
+  // Loaded here: no other command of the board command pays for the peer network.
+  const T = await import('../core/team.ts')
+  const store = await import('../adapters/team-store.ts')
+  if (op === 'join') {
+    const hi = more.indexOf('--hub')
+    const given = hi >= 0 ? more[hi + 1] : undefined
+    if (hi >= 0) more.splice(hi, 2)
+    const invite = more[0]
+    const have = isRecord(cfg.team) ? cfg.team : {}
+    const hub = T.normalizeHub(given ?? have.hub) ?? ''
+    const name = forkName ?? (typeof have.name === 'string' ? have.name : '')
+    if (!invite || more.length !== 1 || !hub || !T.validName(name)) throw new Error(TEAM_USAGE)
+    const saved = store.readKey()
+    const key = saved ?? (await T.generateKey())
+    const { joinHub, TRIES, TRY_MS } = await import('../services/team-join.ts')
+    const { probeHub } = await import('../adapters/hub-reach.ts')
+    const { pause } = await import('../adapters/pacing.ts')
+    // From the moment a join goes out the hub may take the invite for this key, so a new key is
+    // saved first: an interrupt between tries, or no answer at all, must not lose it. It is taken
+    // back once the hub has settled that the join did not land.
+    let wrote = false
+    const r = await joinHub(
+      { hub, invite, name, key, keyWasSaved: saved !== null },
+      {
+        tryMs: Number(process.env.BOARD_TEAM_JOIN_MS) || TRY_MS,
+        tries: TRIES,
+        probe: probeHub,
+        say: line => console.error(`board: ${line}`),
+        pause,
+        beforeJoin: async () => {
+          if (saved || wrote) return
+          await store.keepJoinedKey(key)
+          wrote = true
+        },
+      },
+    )
+    if (!r.ok) {
+      if (!r.unanswered) {
+        if (wrote) store.forgetKey(key.pub)
+        throw new Error(r.error)
+      }
+      throw new Error(
+        `${r.error}. The join went out and may have reached the hub: this board keeps its key, so the same command again finds out`,
+      )
+    }
+    await store.keepJoinedKey(key)
+    const w = (await import('../adapters/config-file.ts')).joinTeam({ hub, name })
+    if (!w.ok) throw new Error(w.error)
+    const late = r.via === 'auth' ? ' (the hub knew this key already)' : ''
+    return console.log(
+      `ok · joined ${hub} as ${name}${late} · your key ${T.fingerprint(key.pub)} · the running board connects in a few seconds`,
+    )
+  }
+  const agentOp = TEAM_AGENT_OPS.includes(op ?? '')
+  const inboxOp = TEAM_INBOX_OPS.includes(op ?? '')
+  if (op === 'draft' ? more.length !== 2 : !agentOp && !inboxOp && (op !== 'roster' || more.length))
+    throw new Error(TEAM_USAGE)
+  if (!T.teamConfig(cfg.team)) {
+    return console.log(
+      'team is off (no "team" in config.json; `board team join <invite> --hub <url> --name <name>` turns it on)',
+    )
+  }
+  const webPort = Number(cfg.port) || 12422
+  let res: Response
+  try {
+    res = await fetch(`http://127.0.0.1:${webPort}/api/team`, { signal: AbortSignal.timeout(3000) })
+  } catch {
+    throw new Error('the board does not run: open it first (herdr plugin action invoke agent-board.open)')
+  }
+  const view: unknown = await res.json().catch(() => undefined)
+  if (!isRecord(view) || !Array.isArray(view.roster))
+    throw new Error(
+      (await strangerOnPort(webPort)) ??
+        (view === undefined
+          ? 'the board does not run: open it first (herdr plugin action invoke agent-board.open)'
+          : 'the board does not run the team: restart it'),
+    )
+  if (inboxOp) {
+    const I = await import('./team-inbox-cli.ts')
+    const ctx = { webPort, roster: view.roster }
+    if (op === 'inbox') return console.log(await I.teamInbox(more, ctx))
+    const words = more.filter((a, i) => a !== '--json' && a !== '--every' && more[i - 1] !== '--every')
+    if (words.length) throw new Error(TEAM_USAGE)
+    return await I.teamWatch(ctx, { json: more.includes('--json'), everyMs: I.everyMs(more), out: l => console.log(l) })
+  }
+  if (agentOp) {
+    const A = await import('./team-agents-cli.ts')
+    const line = await A.teamAgents(op ?? '', more, {
+      webPort,
+      roster: view.roster,
+      self: async () => {
+        const s = await resolveSession()
+        return { key: s.key, ...(s.name && { name: s.name }), ...(target && { claimed: true }) }
+      },
+      find: async word => {
+        if (UUID.test(word)) return { key: word }
+        const t = word.toLowerCase()
+        const item = (await collect(deps)).find(i =>
+          [i.name, i.autoName, i.pane, i.session, i.key].some(v => v && v.toLowerCase() === t),
+        )
+        if (!item) throw new Error(`no session "${T.printable(word)}" on the board`)
+        return { key: item.key, ...(item.name && { name: item.name }) }
+      },
+    })
+    return console.log(line)
+  }
+  const me = isRecord(view.me) ? view.me : {}
+  console.log(
+    T.printable(
+      `${String(view.hub)} · ${String(view.state)} · you: ${String(me.name ?? '')} ${String(me.fingerprint ?? '')}`,
+    ),
+  )
+  if (op === 'draft') return draftTo(T, webPort, view.roster, more[0] ?? '', more[1] ?? '')
+  if (!view.roster.length) return console.log('nobody else on the team yet')
+  const now = Date.now()
+  for (const p of view.roster) {
+    if (!isRecord(p)) continue
+    const seen = p.online
+      ? 'online'
+      : typeof p.lastSeen === 'number'
+        ? `last seen ${fromNow(p.lastSeen, now)}`
+        : 'not seen yet'
+    const flag = p.pin === 'changed' ? '  KEY CHANGED: trust it in the board' : ''
+    console.log(T.printable(`${p.online ? '●' : '○'} ${String(p.name)}  ${String(p.fingerprint)}  ${seen}${flag}`))
+  }
 }
 
 async function main(): Promise<void> {
@@ -644,6 +907,15 @@ async function main(): Promise<void> {
     // The secret sinks' config (#273), once config.json has `secrets`.
     const { secretsChecks } = await import('../services/secrets.ts')
     checks.push(...secretsChecks(cfg, t))
+    // Who holds the board's port (#356): the system is asked only when something listens there.
+    const port = await import('../adapters/port-owner.ts')
+    if (await port.listening(webPort)) {
+      const { portCheck } = await import('../core/board-port.ts')
+      const { ROOT } = await import('../adapters/paths.ts')
+      const { owner, says, why } = await port.whoHoldsPort(webPort, ROOT)
+      const c = portCheck(webPort, owner, says, why, ROOT, Date.now(), t)
+      if (c) checks.push(c)
+    }
     return console.log(report(checks, t))
   }
 
@@ -678,6 +950,9 @@ async function main(): Promise<void> {
   }
   if (cmd === 'backup') return backupCmd()
   if (cmd === 'time') return timeCommand()
+  if (cmd === 'cal') return calCommand()
+  if (cmd === 'thread') return threadCommand()
+  if (cmd === 'mcp') return mcpCommand()
   if (cmd === 'db') return dbCmd()
   if (cmd === 'archive') return archive()
   if (cmd === 'sleep') return sleep()
@@ -690,6 +965,7 @@ async function main(): Promise<void> {
   if (cmd === 'browser') return browser()
   if (cmd === 'secret') return secret()
   if (cmd === 'launch') return launch()
+  if (cmd === 'team') return team()
 
   // schedule --move <id>: a parked entry to this session (or --session's, which must be on the board).
   const mv = cmd === 'schedule' ? rest.indexOf('--move') : -1
@@ -800,6 +1076,8 @@ async function main(): Promise<void> {
     }
     case 'todo':
       return todo(s.key)
+    case 'compact':
+      return console.log(compactCli(s.key, rest, cfg))
     case 'unschedule': {
       // An id is removed above, whoever set it; here only "all" of this session's, parked ones too.
       if (rest[0]?.toLowerCase() !== 'all') throw new Error('usage: board unschedule <id|all>')
@@ -1532,6 +1810,135 @@ async function timeCommand(): Promise<void> {
   const { timeCmd } = await import('./time-cli.ts')
   // under --json an error is printed as JSON, and the exit code says it failed
   process.exitCode = await timeCmd(rest, { cfg, actor: own ? { key: own.key, name: own.name ?? '' } : 'user', lane })
+}
+
+/** `board cal …` (#328, entrypoints/cal-cli.ts): the owner's calendar, changed as the session that runs it. */
+async function calCommand(): Promise<void> {
+  const own = await ownSession()
+  const { calCmd } = await import('./cal-cli.ts')
+  process.exitCode = await calCmd(rest, { cfg, actor: own ? { key: own.key, name: own.name ?? '' } : 'user' })
+}
+
+/**
+ * `board thread …` (#379, entrypoints/thread-cli.ts): written as the session that runs it, or the one
+ * --session names (MokuPilot's day session), its lane the card's; outside a session, as the owner.
+ */
+async function threadCommand(): Promise<void> {
+  const { threadCmd } = await import('./thread-cli.ts')
+  process.exitCode = await threadCmd(rest, await threadContext())
+}
+
+/**
+ * `board mcp` (#394, entrypoints/mcp.ts): the threads' two tools on stdio, each call `board thread`
+ * as the session that started the server (or the one --session names), with config.json read again
+ * for each call. Stdout carries the protocol only.
+ */
+async function mcpCommand(): Promise<void> {
+  const { createMcpServer, serve } = await import('./mcp.ts')
+  const { threadCmd } = await import('./thread-cli.ts')
+  const { ROOT } = await import('../adapters/paths.ts')
+  let version = ''
+  try {
+    version = String(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version ?? '')
+  } catch {}
+  const server = createMcpServer({
+    version,
+    run: async argv => {
+      const out: string[] = []
+      const err: string[] = []
+      try {
+        const code = await threadCmd(argv, {
+          ...(await threadContext(loadConfig())),
+          idle: false,
+          out: l => out.push(l),
+          err: l => err.push(l),
+        })
+        return { code, out, err }
+      } catch (e) {
+        return { code: 1, out, err: [...err, messageOf(e)] }
+      }
+    },
+  })
+  await serve(server, process.stdin, line => process.stdout.write(line))
+}
+
+/** What `board thread` runs with: who writes (the session, --session's, or the owner), its lane, and how it finds sessions. */
+async function threadContext(c: typeof cfg = cfg): Promise<ThreadCmdContext> {
+  let s: { key: string; name?: string | undefined; cwd?: string } | null = target
+    ? await resolveSession()
+    : await ownSession()
+  // The board's sessions, asked of herdr once, and only by what needs them.
+  let board: ReturnType<typeof collect> | null = null
+  const sessions = (): ReturnType<typeof collect> => {
+    board ??= collect(deps)
+    return board
+  }
+  // --session by the id of MokuPilot's running day session, which has no pane (#393): its card on
+  // the board gives its name and folder, so its lane is the day's, not the folder MokuPilot runs the
+  // command in. Any other session goes as before.
+  const { threadsConfig } = await import('../core/work-threads.ts')
+  if (s && target && UUID.test(target) && !s.cwd && threadsConfig(c.threads)) {
+    const { runningDay } = await import('../adapters/mokupilot-day.ts')
+    if (runningDay()?.session === s.key) {
+      const item = (await sessions().catch(() => [])).find(i => i.key === s?.key && i.day)
+      if (item) s = { key: item.key, name: item.name || s.name, cwd: item.cwd }
+    }
+  }
+  const key = s?.key
+  const name = s ? s.name || (target ? liveSessions().get(s.key)?.session.name : '') || s.key.slice(0, 8) : ''
+  const card = key ? readCard(key) : null
+  const cwd = s && typeof s.cwd === 'string' && s.cwd ? s.cwd : process.cwd()
+  const lane = key ? (typeof card?.category === 'string' && card.category) || categoryFor(c, cwd) || null : null
+  return {
+    cfg: c,
+    actor: key ? { kind: 'session', key, name } : { kind: 'owner' },
+    lane,
+    idle,
+    findSession: async word => {
+      const w = word.toLowerCase()
+      const items = (await sessions()).filter(i =>
+        [i.name, i.autoName, i.pane, i.session, i.key].some(v => v && v.toLowerCase() === w),
+      )
+      if (items.length > 1)
+        throw new Error(
+          `"${word}" names ${items.length} sessions (${items.map(i => i.pane || i.key).join(', ')}): give its pane`,
+        )
+      const [item] = items
+      if (item) return { kind: 'session', key: item.key, name: item.name || item.autoName || item.key.slice(0, 8) }
+      return UUID.test(word) || /^pane-\S+$/.test(word) ? { kind: 'session', key: word, name: word.slice(0, 8) } : null
+    },
+    sessionByKey: async word => {
+      const item = (await sessions()).find(i => i.key === word || i.session === word)
+      return item ? { kind: 'session', key: item.key, name: item.name || item.autoName || item.key.slice(0, 8) } : null
+    },
+    setAsk: question => {
+      if (key) writeCard(key, { ask: question, askSince: Date.now(), by: 'agent' })
+    },
+    openBoard: async key => {
+      const { openWeb } = await import('../services/web-open.ts')
+      const r = await openWeb(c, { thread: key })
+      return r.ok ? { ok: true, url: r.url } : { ok: false, error: r.error }
+    },
+    // An entry of a shared thread (#394): the running board sends it (as the session's post, or the
+    // owner's behind the passkey); without a board it waits in the database and goes when one runs.
+    sendOut: async (thread, entry) => {
+      const webPort = Number(c.port) || 12422
+      try {
+        const res = await fetch(`http://127.0.0.1:${webPort}/api/threads/${encodeURIComponent(thread)}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-board': '1' },
+          body: JSON.stringify({ op: 'send', entry }),
+          signal: AbortSignal.timeout(20_000),
+        })
+        if (res.status === 428) return { out: 'confirm' }
+        const body = (await res.json().catch(() => null)) as Record<string, unknown> | null
+        if (body && typeof body.out === 'string') return body as unknown as { out: string }
+        return res.status === 409 ? { out: 'queued', why: 'sharing is off on the board' } : null
+      } catch {
+        return null
+      }
+    },
+  }
 }
 
 /** `board secret request|status|cancel|requests|sinks` (#273, entrypoints/secret-cli.ts): the request goes on this session's card. */

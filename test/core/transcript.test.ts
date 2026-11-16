@@ -8,6 +8,7 @@ import {
   parseConversation,
   parseTranscriptTail,
   saidIn,
+  tailComplete,
   toolDetail,
   toolLabel,
   toolPath,
@@ -242,6 +243,46 @@ test('a session never compacted keeps its context: lines that only name a compac
     line({ type: 'system', subtype: 'compact_boundary', isSidechain: true, compactMetadata: { postTokens: 900 } }),
   ]
   assert.equal(parseTranscriptTail(lines).context, 153012)
+})
+
+test('a compaction in the conversation (#378): a line of its own only where asked for; otherwise as before', () => {
+  const lines = [
+    line({ type: 'user', message: { content: 'review the branch' }, timestamp: '2026-11-12T09:00:00.000Z' }),
+    ...compaction(
+      { trigger: 'manual', preTokens: 161754, postTokens: 13853 },
+      { timestamp: '2026-11-12T09:05:00.000Z' },
+    ),
+    ...compaction({ trigger: 'auto', postTokens: 900 }, { isSidechain: true }),
+  ]
+  const plain = parseConversation(lines)
+  assert.equal(
+    plain.some(m => m.role === 'notice'),
+    false,
+  )
+  const conv = parseConversation(lines, 40, { compactions: true })
+  // The same conversation, with the compaction's line where it came; a subagent's own is not the session's.
+  assert.deepEqual(
+    conv.filter(m => m.role !== 'notice'),
+    plain,
+  )
+  assert.deepEqual(
+    conv.filter(m => m.role === 'notice'),
+    [
+      {
+        role: 'notice',
+        kind: 'compact',
+        status: 'event',
+        name: '',
+        note: '',
+        detail: '',
+        trigger: 'manual',
+        pre: 161754,
+        post: 13853,
+        at: Date.parse('2026-11-12T09:05:00.000Z'),
+      },
+    ],
+  )
+  assert.equal(conv.indexOf(conv.find(m => m.role === 'notice') as never), 1)
 })
 
 test('updates kept as thinking (thinkingDisplay "updates") are said like any message; other thinking is not', () => {
@@ -494,4 +535,95 @@ test("another session's message counts toward the budget and is cut like the res
     tiny.map(t => ('text' in t ? t.text : '')),
     ['…', '…', '…'],
   )
+})
+
+// Claude Code's recap (#321): a system line it writes a few minutes after a turn while the terminal is away.
+const recapLine = (content: string, timestamp: string, extra: Record<string, unknown> = {}) =>
+  line({ type: 'system', subtype: 'away_summary', content, timestamp, isMeta: false, ...extra })
+
+test('transcript tail: the newest recap and its time, without the line on how to turn recaps off (#321)', () => {
+  const lines = [
+    line({ type: 'ai-title', aiTitle: 'Receipts' }),
+    recapLine('Older recap.', '2026-11-03T10:00:00.000Z'),
+    line({ type: 'last-prompt', lastPrompt: 'go on' }),
+    line({ type: 'user', timestamp: '2026-11-03T10:05:00.000Z', message: { content: 'go on' } }),
+    line({
+      type: 'assistant',
+      timestamp: '2026-11-03T10:06:00.000Z',
+      message: { content: [{ type: 'text', text: 'Imported.' }] },
+    }),
+    recapLine('Importing receipts; next: the 10/24 file. (disable recaps in /config)', '2026-11-03T10:09:00.000Z'),
+    recapLine('A helper’s recap.', '2026-11-03T10:10:00.000Z', { isSidechain: true }),
+  ]
+  const info = parseTranscriptTail(lines)
+  assert.equal(info.recap, 'Importing receipts; next: the 10/24 file.')
+  assert.equal(info.recapAt, Date.parse('2026-11-03T10:09:00.000Z'))
+  assert.equal(info.lastText, 'Imported.')
+  assert.equal(info.title, 'Receipts')
+})
+
+test('transcript tail: no recap, none on the card; the tail is complete without one (#321)', () => {
+  const lines = [
+    line({ type: 'ai-title', aiTitle: 'T' }),
+    line({ type: 'last-prompt', lastPrompt: 'p' }),
+    line({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] },
+    }),
+    line({ type: 'assistant', message: { content: [{ type: 'text', text: 'Done.' }] } }),
+  ]
+  const info = parseTranscriptTail(lines)
+  assert.equal('recap' in info, false)
+  assert.equal('recapAt' in info, false)
+  assert.equal(tailComplete(info), true)
+  // Other alphabets and % come through as written; only the trailing hint goes.
+  const ru = parseTranscriptTail([
+    recapLine('Чиню 100% карточек (disable recaps in /config)  ', '2026-11-03T10:00:00Z'),
+  ])
+  assert.equal(ru.recap, 'Чиню 100% карточек')
+  // A recap of only the hint is no recap.
+  assert.equal(
+    parseTranscriptTail([recapLine(' (disable recaps in /config)', '2026-11-03T10:00:00Z')]).recap,
+    undefined,
+  )
+})
+
+test('transcript tail: a recap older than all the rest is still found in the window read (#321)', () => {
+  const lines = [
+    recapLine('Imported the receipts; next: the 10/24 file.', '2026-11-03T10:00:00.000Z'),
+    line({ type: 'ai-title', aiTitle: 'Receipts' }),
+    line({ type: 'last-prompt', lastPrompt: 'go on' }),
+    line({ type: 'user', timestamp: '2026-11-03T10:05:00.000Z', message: { content: 'go on' } }),
+    line({
+      type: 'assistant',
+      timestamp: '2026-11-03T10:06:00.000Z',
+      message: {
+        content: [
+          { type: 'text', text: 'Reading it.' },
+          { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'C:/a/10-24.csv' } },
+        ],
+      },
+    }),
+  ]
+  const info = parseTranscriptTail(lines)
+  assert.equal(info.title, 'Receipts') // everything else came before the recap was reached
+  assert.equal(info.recap, 'Imported the receipts; next: the 10/24 file.')
+  assert.equal(info.recapAt, Date.parse('2026-11-03T10:00:00.000Z'))
+})
+
+test('transcript tail: no recap from a fork’s copied line, from content that is no text; one without a time has none (#321)', () => {
+  const forked = { forkedFrom: { sessionId: '5e550000-0000-4000-8000-000000000001' } }
+  assert.equal(parseTranscriptTail([recapLine('The source’s recap.', '2026-11-03T10:00:00Z', forked)]).recap, undefined)
+  const own = parseTranscriptTail([
+    recapLine('The source’s recap.', '2026-11-03T10:00:00Z', forked),
+    recapLine('The fork’s own.', '2026-11-03T11:00:00Z'),
+  ])
+  assert.equal(own.recap, 'The fork’s own.')
+  assert.equal(
+    parseTranscriptTail([line({ type: 'system', subtype: 'away_summary', content: ['x'] })]).recap,
+    undefined,
+  )
+  const untimed = parseTranscriptTail([recapLine('No time.', 'not a time')])
+  assert.equal(untimed.recap, 'No time.')
+  assert.equal('recapAt' in untimed, false)
 })

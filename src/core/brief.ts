@@ -4,9 +4,10 @@ import { languageName } from './lang.ts'
 import { type Presence, presenceBrief } from './presence.ts'
 import { type TodosConfig, todosBrief } from './todos.ts'
 import type { Card, Config } from './types.ts'
+import { type ThreadsConfig, threadsBrief } from './work-threads.ts'
 
 // Bump when the brief says something new: every running session gets it again on its next prompt.
-export const BRIEF_VERSION = 5
+export const BRIEF_VERSION = 6
 
 type Env = Record<string, string | undefined>
 
@@ -43,6 +44,10 @@ export function brief(
   sinks: readonly string[] = [],
   /** Of those, the board's own store's (kind store): where it is the only one, the store's line. */
   stores: readonly string[] = [],
+  /** The calendar is on (#328): agents hear of `board cal`. */
+  calendar = false,
+  /** Threads (#379, core/work-threads.ts), only where config.json turned them on; agents hear of them only with agents on. */
+  threads: ThreadsConfig | null = null,
 ): string {
   const cat = card?.category
   const guess = categoryFor(cfg, cwd)
@@ -59,7 +64,7 @@ export function brief(
     `[agent-board] The user watches every ${agent} session on a kanban board in herdr: lanes by category; columns working, needs the user, waiting on someone else, done, idle.`,
     "Working, done and terminal dialogs are detected automatically. Keep the rest of this session's card current with the `board` shell command (Bash or PowerShell; it prints one line; no need to tell the user):",
     `- board cat <id>: this session's lane. Now: ${now}. Known: ${known}. For a client that has none yet: board cat <new-id> "<Title>" adds it.`,
-    '- board doing "<3-8 words>": when you start a distinct task.',
+    '- board doing "<3-8 words>": when you start a distinct task, and again when you move to its next step.',
     '- board ask "<the question, short>": before ending a turn that needs the user\'s answer or decision (approve a draft, pick an option, give data). Puts the card under "needs the user"; cleared by itself when the user replies.',
     '- board wait "<who/what>": before ending a turn blocked on something outside this chat (client reply, CI, another session, a date). The card stays in "waiting" until you run doing or done.',
     '- board done ["<result>"]: task finished; clears doing, wait and ask.',
@@ -68,6 +73,8 @@ export function brief(
       "  More reliable than CronCreate or ScheduleWakeup: those live in this Claude process and die when the idle session is put to sleep; the board's entries survive sleep and restarts. Use it for anything due later than a few minutes.",
     agent === 'Claude' && todos?.agents && todosBrief(),
     agent === 'Claude' && sinks.length > 0 && secretsBrief(sinks, stores),
+    agent === 'Claude' && calendar && calendarBrief(),
+    agent === 'Claude' && threads?.agents && threadsBrief(),
     `Card texts in ${languageName()}, short. Call it only when the state changes, not every turn.${state ? ` Card now: ${state}.` : ''}`,
     presence && presenceBrief(presence),
     herdrLine(env, agent),
@@ -88,6 +95,11 @@ export function secretsBrief(sinks: readonly string[], stores: readonly string[]
     ? ` ${stores.join(', ')}: the board's own store, --field <NAME> a variable for this session (--global, --profile <id>), read with board secret get <NAME>.`
     : ''
   return `- board secret request --title "<what for>" --sink <id> [--field <name>[:shown]]... [--param <name>=<value>]...: a token, a password or keys you must never see. The owner types them into a form on the board and the board writes them where the sink says; you get back only ok, declined or expired (run it in the background: it waits). Never ask for a secret in the chat or with a script of your own. Sinks: ${sinks.join(', ')} (board secret sinks says what each takes).${store}`
+}
+
+/** The owner's calendar for agents (#328), while it is on. */
+export function calendarBrief(): string {
+  return `- board cal list [--day <d> | --from <t> --to <t>] [--json]: the owner's schedule across every calendar (each line says whose); read it before planning around the owner's time. board cal add --title "<t>" --start <t> --minutes <n> puts an event of yours on the board's own calendar (edit, rm too). A real meeting in a provider's calendar only when the owner asked for that event: --source <id> --asked "<their words>". board cal --help.`
 }
 
 export function waitReminder(card: Pick<Card, 'wait'>): string {

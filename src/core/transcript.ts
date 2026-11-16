@@ -3,7 +3,7 @@
 
 import { type FormQuestion, questionsOf } from './dialogs/question-form.ts'
 import { t } from './lang.ts'
-import { boardNotice, isNotice, type Notice, taskNotice } from './notices.ts'
+import { boardNotice, compactNotice, isNotice, type Notice, taskNotice } from './notices.ts'
 import { DEFAULT_PROMPT_FILTERS, type PromptFilter } from './prompt-filters.ts'
 import {
   type CallLinks,
@@ -176,7 +176,40 @@ export function trailingQuestion(text: unknown): string {
   return clip(q.replace(/\s+/g, ' ').trim(), 300)
 }
 
-/** True once the tail holds everything a card needs; the reader widens its window until then. */
+/**
+ * A recap's text for a card (#321): Claude Code ends a session's first recaps with how to turn them
+ * off, which is not about the session.
+ */
+const recapText = (content: unknown): string =>
+  clip(
+    str(content)
+      .replace(/\s*\(disable recaps in \/config\)\s*$/, '')
+      .trim(),
+    700,
+  )
+
+/**
+ * Whether `line` is one of Claude Code's recaps (#321), written a few minutes after a turn while
+ * the terminal is away; the first one met, the newest, goes into `info`. A fork's copy of its
+ * source's recap (`forkedFrom`) is about the other session.
+ */
+function isRecap(line: string | undefined, info: TranscriptInfo): boolean {
+  if (!line?.includes('"away_summary"')) return false
+  const o = parse(line)
+  if (o?.type !== 'system' || o.subtype !== 'away_summary' || o.isSidechain) return false
+  const recap = info.recap === undefined && !o.forkedFrom ? recapText(o.content) : ''
+  if (recap) {
+    info.recap = recap
+    const at = Date.parse(str(o.timestamp))
+    if (at) info.recapAt = at
+  }
+  return true
+}
+
+/**
+ * True once the tail holds everything a card needs; the reader widens its window until then. Not
+ * a recap: many sessions never get one.
+ */
 export const tailComplete = (info: TranscriptInfo): boolean =>
   !!(info.title && info.prompt && info.lastText && info.tool)
 
@@ -189,6 +222,7 @@ export const tailComplete = (info: TranscriptInfo): boolean =>
  *             result yet, questions = an AskUserQuestion call's questions
  *   question  the agent's last words end in a question; replied: the user wrote after them
  *   lastAt    the time of the newest user or assistant line
+ *   recap     Claude Code's newest recap of the session (away_summary), recapAt its time
  *   context   the tokens the last request carried, cached parts included; after a compaction
  *             with no request since, Claude Code's own count of what is left (postTokens)
  */
@@ -196,7 +230,8 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
   const info: TranscriptInfo = { title: '', prompt: '', lastText: '', question: '', replied: false, tool: null }
   const results = new Set<string>() // tool_use ids that already have a result (seen later in the file)
   let compacted = false // a compaction came after every request still to be read: they say nothing of the context now
-  for (let i = lines.length - 1; i >= 0 && !tailComplete(info); i--) {
+  let i = lines.length - 1
+  for (; i >= 0 && !tailComplete(info); i--) {
     const line = lines[i]
     if (!line) continue
     // A /compact (or an auto one) put a summary in place of the conversation. Until the next
@@ -212,6 +247,7 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
         continue
       }
     }
+    if (isRecap(line, info)) continue
     if (line.includes('"type":"ai-title"')) {
       if (!info.title) info.title = str(parse(line)?.aiTitle)
       continue
@@ -285,6 +321,8 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
       }
     }
   }
+  // The window read for the rest can hold an older recap still: looked for without reading more.
+  for (; i >= 0 && info.recap === undefined; i--) isRecap(lines[i], info)
   return info
 }
 
@@ -369,6 +407,11 @@ export function fitThread(turns: ConversationTurn[], budget = THREAD_TEXT_BUDGET
 export interface ConversationOptions {
   /** A helper's own transcript (adapters/helpers.ts), whose lines are all sidechain lines. */
   sidechain?: boolean
+  /**
+   * Compactions as lines of their own (#378): for a session auto-compact is in force for, so its
+   * conversation says when it was compacted and what that left. Off, the conversation is as before.
+   */
+  compactions?: boolean
 }
 
 /** What tells one notice from another: the copy a queued notice leaves when it is sent again matches. */
@@ -413,7 +456,7 @@ function askAnswers(ask: readonly { question: string }[], result: unknown): stri
 export function parseConversation(
   lines: string[],
   limit = 40,
-  { sidechain = false }: ConversationOptions = {},
+  { sidechain = false, compactions = false }: ConversationOptions = {},
 ): ConversationTurn[] {
   const items: ConversationTurn[] = []
   const tools = new Map<string, ToolTurn>() // tool_use id -> item
@@ -452,11 +495,18 @@ export function parseConversation(
       !(
         line.includes('"type":"user"') ||
         line.includes('"type":"assistant"') ||
-        line.includes('"type":"queued_command"')
+        line.includes('"type":"queued_command"') ||
+        (compactions && line.includes('"compact_boundary"'))
       )
     )
       continue
     const o = parse(line)
+    // A compaction (#378): a line of its own, with what it left.
+    const compacted = compactions && o?.type === 'system' ? compactNotice(o) : null
+    if (compacted) {
+      notice(compacted, Date.parse(str(o?.timestamp)) || 0)
+      continue
+    }
     // Claude Code keeps another session's message, and in a helper's transcript a task reporting
     // back, as a meta line: they are shown all the same.
     const kind = rec(o?.origin)?.kind

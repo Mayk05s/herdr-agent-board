@@ -25,6 +25,11 @@
 // `launch.claude` (no profile command of its own) goes through `board launch`, which starts Claude
 // with the session's secrets in its env for its MCP servers; a profile's own command (an alias)
 // calls `board launch` itself, if the owner set it so. Without secrets, the line is as it was.
+//
+// --model starts the session on that model (#380): `--model <id>` after the start command and the
+// profile's arguments, Claude's and pi's alike, never written to the profile's settings. Its card
+// says so (`modelWant`), so a start with it gets a session id of its own when none was given. A
+// resume without it leaves the card as it was: Claude goes on with the model the session last ran.
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -33,6 +38,7 @@ import { readCard, removeCard, writeCard } from '../../adapters/cards.ts'
 import { createClaudeHome } from '../../adapters/claude-home.ts'
 import { herdr, herdrText, tabCreateRoot } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
+import { pause } from '../../adapters/pacing.ts'
 import { secretStoreFile } from '../../adapters/paths.ts'
 import {
   forgetProfilePane,
@@ -45,6 +51,7 @@ import { boardOnPath } from '../../adapters/resume-report.ts'
 import { anySecrets } from '../../adapters/secret-store.ts'
 import { importsDialog, keyTowardYes, ownImports, sameFolder, trustDialog } from '../../core/dialogs/trust.ts'
 import { t } from '../../core/lang.ts'
+import { modelArgs } from '../../core/launch/model.ts'
 import { sameDir, slugName, ticketSlugName, uniqueSlug } from '../../core/launch/names.ts'
 import {
   choosesSession,
@@ -65,7 +72,6 @@ export function absoluteDir(p: string): string {
   return resolve(/^~([\\/]|$)/.test(s) ? homedir() + s.slice(1) : s)
 }
 
-const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 const isFolder = (path: string): boolean => {
   try {
@@ -96,11 +102,11 @@ async function answerStartup(pane: string, cwd: string, home: string, claudeDirs
     if (key === null) return false
     if (key === '') {
       await herdr(['pane', 'send-keys', pane, 'enter'])
-      await sleep(1500)
+      await pause(1500)
       return true
     }
     await herdr(['pane', 'send-keys', pane, key])
-    await sleep(300)
+    await pause(300)
   }
   return false
 }
@@ -228,15 +234,15 @@ export interface SpawnResult {
 }
 
 // A card the start wrote before it knew the agent, with nothing on it but what a start writes.
-const START_ONLY = ['key', 'category', 'updatedAt', 'profileWant', 'forkOf', 'forkAt']
+const START_ONLY = ['key', 'category', 'updatedAt', 'profileWant', 'modelWant', 'forkOf', 'forkAt']
 
 /**
  * pi's session is keyed by its file, not by the id the start gave it: the profile it is meant for
  * goes on that card, and the card written under the id before pi was up goes when it holds
  * nothing else.
  */
-function movePiCard(carded: string, file: string, profile: string): void {
-  writeCard(file, { profileWant: profile })
+function movePiCard(carded: string, file: string, profile: string | undefined, model: string | undefined): void {
+  writeCard(file, { ...(profile && { profileWant: profile }), ...(model && { modelWant: model }) })
   if (Object.keys(readCard(carded) ?? {}).every(k => START_ONLY.includes(k))) removeCard(carded)
 }
 
@@ -299,14 +305,18 @@ export async function spawnAgent(
   if (o.fork && choosesSession(program))
     throw new Error(`launch.claude picks its own session (${program.join(' ')}), so it cannot fork ${o.fork}`)
   // A fork is a new session: its id is the one given, else one of its own, so its card is known.
-  const sessionId = o.fork ? (o.sessionId ?? randomUUID()) : o.sessionId
+  // So is a start on a model of its own, whose card says so; not one whose line picks its session.
+  const ownId = !!o.fork || (!!o.model && !o.resume && !choosesSession(program))
+  const sessionId = ownId ? (o.sessionId ?? randomUUID()) : o.sessionId
+  // The model goes after the profile's arguments: of two --model, Claude and pi take the last.
+  const line = [...program, ...modelArgs(o.model)]
   const argv = o.resume
-    ? [...program, '--resume', o.resume]
+    ? [...line, '--resume', o.resume]
     : o.fork
-      ? [...program, '--resume', o.fork, '--fork-session', '--session-id', String(sessionId)]
+      ? [...line, '--resume', o.fork, '--fork-session', '--session-id', String(sessionId)]
       : sessionId && !choosesSession(program)
-        ? [...program, '--session-id', sessionId]
-        : program
+        ? [...line, '--session-id', sessionId]
+        : line
   // With the owner's secrets here, Claude started with `launch.claude` gets them in its env through `board launch`.
   const throughBoard =
     o.agent !== 'pi' &&
@@ -355,7 +365,13 @@ export async function spawnAgent(
   // start that leaves the env as herdr makes it too, as herdr's env may point elsewhere; a resume too.
   const carded = sessionId ?? o.resume
   // A fork's card says whose fork it is, and since when: its copied lines are older (core/links.ts).
-  if (profile && carded) writeCard(carded, { profileWant: profile.id, ...(o.fork && forkCard(o.fork)) })
+  // The model it starts on, when one was asked for.
+  if (carded && (profile || o.model))
+    writeCard(carded, {
+      ...(profile && { profileWant: profile.id }),
+      ...(o.model && { modelWant: o.model }),
+      ...(o.fork && forkCard(o.fork)),
+    })
   await herdr(['pane', 'run', pane, command])
 
   const deadline = Date.now() + o.timeoutSec * 1000
@@ -366,7 +382,7 @@ export async function spawnAgent(
   let kind = 'claude'
   let session: string | null = null
   while (Date.now() < deadline) {
-    await sleep(1500)
+    await pause(1500)
     let p: Awaited<ReturnType<typeof paneInfo>>
     try {
       p = await paneInfo(pane, 10_000)
@@ -397,7 +413,8 @@ export async function spawnAgent(
     }
   }
   if (!ready) throw new Error(`Claude did not get ready in ${pane} within ${o.timeoutSec} s`)
-  if (kind === PI_AGENT && profile && carded && isPiSessionFile(session)) movePiCard(carded, session, profile.id)
+  if (kind === PI_AGENT && (profile || o.model) && carded && isPiSessionFile(session))
+    movePiCard(carded, session, profile?.id, o.model)
 
   const agent = await nameInHerdr(pane, o.name, ticketNames)
 
@@ -412,7 +429,7 @@ export async function spawnAgent(
       if (!stalled(err)) log(`${line.split(' ')[0]} in ${pane}: ${messageOf(err)}`)
     }
     for (let i = 0; i < 10; i++) {
-      await sleep(500)
+      await pause(500)
       const shown = await screen(pane)
       if (naming.done.test(shown)) break
       // pi's first Enter on a slash command with an argument can take its completion instead:
@@ -428,7 +445,7 @@ export async function spawnAgent(
   if (text) {
     let sent = false
     for (let i = 1; i <= 3 && !sent; i++) {
-      await sleep(800)
+      await pause(800)
       try {
         await prompt(pane, text)
         sent = true

@@ -9,9 +9,10 @@
 // - it carries the token of a device paired from that very Tailscale device, for anything but
 //   /api/hello and the pairing itself;
 // - it does not act on this computer's screen (desktopOnly), nor approve pairings, set up Remote
-//   access or work wake (localOnly: /api/remote, /api/access, /api/wake, for the board on this
-//   computer only), nor read or change the owner's secret store for the agents (/api/secrets). A
-//   desk (RemoteDevice.desk) may focus herdr and answer the phones that ask.
+//   access, work wake or write to the team (localOnly: /api/remote, /api/access, /api/wake,
+//   /api/team, for the board on this computer only), nor read or change the owner's secret store
+//   for the agents (/api/secrets). A desk (RemoteDevice.desk) may focus herdr and answer the
+//   phones that ask.
 // The routes' own guards apply as for the web board (X-Board on POSTs, fresh herdr data, the file
 // token).
 //
@@ -37,6 +38,7 @@ import {
   allowedLogin,
   bearerOf,
   DESK_REMOTE_OPS,
+  isOwnerLogin,
   type PwaView,
   REMOTE_API,
   type RemoteConfig,
@@ -46,8 +48,10 @@ import {
   statusVerdict,
   WHOIS_GRACE_MS,
 } from '../core/remote.ts'
+import { teamConfig } from '../core/team.ts'
 import type { Config } from '../core/types.ts'
 import { vaultPath } from '../core/vault.ts'
+import { threadsConfig } from '../core/work-threads.ts'
 import type { Remote } from '../services/remote.ts'
 import { dispatch, type GuardState, json, peerOf, type Route, readBody } from './http.ts'
 import { decoded, endsWhenGone, remoteRefusal } from './streams.ts'
@@ -150,6 +154,10 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
     return who
   }
 
+  /** The team's routes (#355): a device of the owner's own login, not a desk, while the team is on. */
+  const teamOwnerOf = (device: { desk?: boolean | undefined }, who: { login: string }): boolean =>
+    !device.desk && isOwnerLogin(who.login, owner) && teamConfig(o.cfg.team) !== null
+
   function hello(): Hello {
     return {
       board: 'agent-board',
@@ -216,6 +224,13 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
           desk: !!known?.desk,
           device: known?.id ?? null,
           language: o.cfg.language ?? null,
+          // The Team panel (#355): only for the owner's own phone, while the team is on; else hello is as it was.
+          ...(known && teamOwnerOf(known, who) && { team: true }),
+          // Threads (#392): the owner's own phone, while threads are on; else hello is as it was.
+          ...(known &&
+            !known.desk &&
+            isOwnerLogin(who.login, owner) &&
+            threadsConfig(o.cfg.threads) && { threads: true }),
         })
       }
       if (req.method === 'POST' && raw === '/api/remote/pair') {
@@ -256,7 +271,11 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
       // computer is refused in both spellings, or an encoded letter (/api/fs/%6Fpen) would get by.
       const path = decoded(raw)
       if (path === null) return json(400, { error: 'path' })
-      const refused = remoteRefusal(raw, path, { desk: !!device.desk })
+      const refused = remoteRefusal(raw, path, {
+        desk: !!device.desk,
+        teamOwner: teamOwnerOf(device, who),
+        owner: !device.desk && isOwnerLogin(who.login, owner),
+      })
       if (refused) return refused
       if (req.method === 'POST' && raw === '/api/remote') {
         // A body that is not a JSON object (null, a string, a broken or oversized one) is no op

@@ -7,6 +7,8 @@
 //   a card that heard of presence reads it, so a setup that never turned it on reads nothing).
 //   Every event: the card says which Claude profile the session runs in (its CLAUDE_CONFIG_DIR,
 //   unset: ~/.claude), written only when that changed.
+//   UserPromptSubmit with source poll_event (Code Mode's background code reporting back, #424): not
+//   the user, so nothing of the above; only the profile, as on every event.
 //   PreToolUse (AskUserQuestion only): the call's id and questions go on the card (card.asking),
 //   for when Claude Code holds them back from the transcript (core/held-question.ts); nothing
 //   else, and the call goes on as it would without the hook.
@@ -36,12 +38,14 @@ import { presenceForBrief, presenceNews } from '../adapters/presence-store.ts'
 import { inheritedProfileDir, loadProfiles } from '../adapters/profiles.ts'
 import { readStdin } from '../adapters/stdin.ts'
 import { BRIEF_VERSION, brief, waitReminder } from '../core/brief.ts'
+import { calendarConfig } from '../core/calendar.ts'
 import { heldQuestionOf } from '../core/held-question.ts'
 import { isNotice } from '../core/notices.ts'
 import { type Profile, profileReport } from '../core/profiles.ts'
 import { secretsConfig, usableSinks, withDefaultStore } from '../core/secrets.ts'
-import { todosConfig } from '../core/todos.ts'
+import { todosConfig, todosNews } from '../core/todos.ts'
 import type { Config } from '../core/types.ts'
+import { threadsConfig } from '../core/work-threads.ts'
 
 const text = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
 
@@ -130,6 +134,12 @@ async function main(): Promise<void> {
   const dir = inheritedProfileDir()
   const profiles = loadProfiles()
   const patch: CardPatch = profileReport(card, dir, profiles)
+  // Code Mode runs UserPromptSubmit on its background code's output too, with source poll_event
+  // (#424): nobody wrote, so the ask and the pin stay, and no brief or line goes in.
+  if (event === 'UserPromptSubmit' && input.source === 'poll_event') {
+    if (Object.keys(patch).length) writeCard(sid, patch)
+    return
+  }
   // The user wrote to the session: whatever it asked them is answered. A reminder from the board's
   // scheduler or a background task reporting back is not the user, so its ask stays. A column the
   // user dragged the card to has done its job either way: the session works again, which drops
@@ -168,6 +178,8 @@ async function main(): Promise<void> {
         : withDefaultStore(secretsConfig(cfg.secrets, { home: homedir() }))
     const sinks = conf ? usableSinks(conf) : []
     const stores = sinks.filter(id => conf?.sinks.get(id)?.kind === 'store')
+    // The calendar (#328), only while config.json turns it on: else the brief is as it was.
+    const calendar = calendarConfig(cfg.calendar) !== null
     context = brief(
       cfg,
       card,
@@ -178,6 +190,9 @@ async function main(): Promise<void> {
       todosConfig(cfg.todos),
       sinks,
       stores,
+      calendar,
+      // Threads (#379), only while config.json turns them on: else the brief is as it was.
+      threadsConfig(cfg.threads),
     )
     Object.assign(patch, { briefedAt: Date.now(), briefV: BRIEF_VERSION })
     if (presence) patch.presenceSeen = presence.since
@@ -189,6 +204,18 @@ async function main(): Promise<void> {
     if (news) {
       context = context ? `${context}\n${news.line}` : news.line
       patch.presenceSeen = news.seen
+    }
+  }
+  // Its open tasks changed since it was told (#319): their keys, so it closes what it sees done; on
+  // a start (a resume, a compaction) again, as its context lost them. Only a card with tasks, or
+  // one told of some before, reads config.json for it.
+  const start = event === 'SessionStart'
+  if ((start || event === 'UserPromptSubmit') && (card?.todos !== undefined || card?.todosSeen !== undefined)) {
+    cfg ??= loadConfig()
+    const tasks = todosConfig(cfg.todos)?.agents ? todosNews(start && card ? { ...card, todosSeen: '' } : card) : null
+    if (tasks) {
+      if (tasks.line) context = context ? `${context}\n${tasks.line}` : tasks.line
+      patch.todosSeen = tasks.seen
     }
   }
   if (Object.keys(patch).length) writeCard(sid, patch)

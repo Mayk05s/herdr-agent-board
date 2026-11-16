@@ -3,7 +3,20 @@
 import { test } from 'bun:test'
 import assert from 'node:assert/strict'
 import { type QueueWindow, queuedPrompts } from '../../src/core/queue.ts'
-import { absorbed, busy, call, jsonl, type Line, q, result, said, system, T0, user } from '../support/queue-fixtures.ts'
+import {
+  absorbed,
+  busy,
+  call,
+  jsonl,
+  type Line,
+  q,
+  result,
+  said,
+  system,
+  T0,
+  ts,
+  user,
+} from '../support/queue-fixtures.ts'
 
 const queued = (lines: Line[], opts?: QueueWindow) => queuedPrompts(jsonl(lines), opts).map(m => m.text)
 
@@ -37,6 +50,54 @@ test('a message sent while the session works waits in its queue until the turn t
   assert.deepEqual(queued([...busy, sent, q(12, 'popAll', 'also check the logs')]), [])
   // Only the dequeue so far: its user line comes a moment later, it still waits.
   assert.deepEqual(queued([...busy, sent, q(60, 'dequeue')]), ['also check the logs'])
+})
+
+// Code Mode (#424): background code's result goes through the queue as an <event nonce=…> envelope
+// and reaches Claude as a tool result (the Poll tool), never as a user line.
+const event = (n: number, kind = 'repl-eval') =>
+  `<event nonce="nX${n}" kind="${kind}" at="${ts(n)}" eval="${n}" ms="1683" status="settled">\n<result>${n} files</result>\n</event>`
+const polled = (s: number, envelope: string): Line => ({
+  type: 'attachment',
+  isSidechain: false,
+  timestamp: ts(s),
+  attachment: { type: 'poll_events', envelopes: [envelope], kinds: ['repl-eval'] },
+})
+
+test("Code Mode's background results are not the user's queued messages", () => {
+  const real = q(15, 'enqueue', 'also check the logs')
+  // Waiting, taken into the running turn (remove) or at its end (dequeue): only the real one shows.
+  assert.deepEqual(queued([...busy, q(10, 'enqueue', event(10)), real, q(20, 'enqueue', event(20, 'monitor'))]), [
+    'also check the logs',
+  ])
+  assert.deepEqual(
+    queued([...busy, q(10, 'enqueue', event(10)), real, q(11, 'remove', event(10)), polled(11, event(10))]),
+    ['also check the logs'],
+  )
+  const dequeued = [
+    ...busy,
+    q(10, 'enqueue', event(10)),
+    q(10, 'dequeue'),
+    polled(10, event(10)),
+    result(10, 'p1'),
+    real,
+  ]
+  assert.deepEqual(queued(dequeued), ['also check the logs'])
+  // The event's dequeue owes no user line: the real one goes only when its own comes.
+  assert.deepEqual(queued([...dequeued, q(60, 'dequeue'), user(60, 'also check the logs')]), [])
+  // Nor does a line typed otherwise take the waiting one in its stead.
+  assert.deepEqual(queued([...dequeued, user(20, 'typed elsewhere')]), ['also check the logs'])
+  const slash = [
+    ...busy,
+    q(10, 'enqueue', event(10)),
+    q(10, 'dequeue'),
+    result(10, 'p1'),
+    q(15, 'enqueue', '/rename probe'),
+    q(16, 'enqueue', 'then this'),
+  ]
+  assert.deepEqual(queued(slash), ['/rename probe', 'then this'])
+  // A typed line that only looks like one (no nonce) is still the user's.
+  for (const typed of ['<event kind="x"> is the tag', '<event-log nonce="x"> too'])
+    assert.deepEqual(queued([...busy, q(10, 'enqueue', typed)]), [typed])
 })
 
 test('a dequeue takes the one its user line names, whatever else waits', () => {

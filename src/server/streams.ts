@@ -1,7 +1,15 @@
 // What the board's remote listeners share (server/remote.ts: Tailscale and serve; server/tunnel.ts:
 // the owner's domain): a path decoded, what they refuse whoever calls, and event streams that end
 // the moment the caller's pairing or login does.
-import { deskFocus, desktopOnly, localOnly, ownServerSettings, secretsPath } from '../core/remote.ts'
+import {
+  deskFocus,
+  desktopOnly,
+  localOnly,
+  ownerTeam,
+  ownerThreads,
+  ownServerSettings,
+  secretsPath,
+} from '../core/remote.ts'
 import { vaultOwnerPath } from '../core/vault.ts'
 import { json } from './http.ts'
 import { namedEvent } from './sse.ts'
@@ -30,16 +38,25 @@ export function decoded(raw: string): string | null {
 export function remoteRefusal(
   raw: string,
   path: string,
-  { desk = false, ownServer = false }: { desk?: boolean; ownServer?: boolean } = {},
+  {
+    desk = false,
+    ownServer = false,
+    teamOwner = false,
+    owner = false,
+  }: { desk?: boolean; ownServer?: boolean; teamOwner?: boolean; owner?: boolean } = {},
 ): Response | null {
   const focus = desk && deskFocus(raw) && deskFocus(path)
   if (!focus && (desktopOnly(raw) || desktopOnly(path))) return json(403, { error: 'desktop' })
   const pairing = desk && raw === '/api/remote' && path === '/api/remote'
   const local = (p: string): boolean => localOnly(p) && !(ownServer && ownServerSettings(p))
-  if (!pairing && (local(raw) || local(path))) return json(403, { error: 'local' })
   if (!ownServer && (secretsPath(raw) || secretsPath(path))) return json(403, { error: 'local' })
   // the owner's password vault and the answers to a login fill: the board's own server's domain only
   if (!ownServer && (vaultOwnerPath(raw) || vaultOwnerPath(path))) return json(403, { error: 'local' })
+  // The owner's own login, with the team on, reads and writes the team as on the computer (#355).
+  const team = teamOwner && ownerTeam(raw) && ownerTeam(path)
+  // The owner's own login reads and writes threads as on the computer (#392).
+  const threads = owner && ownerThreads(raw) && ownerThreads(path)
+  if (!pairing && !team && !threads && (local(raw) || local(path))) return json(403, { error: 'local' })
   return null
 }
 

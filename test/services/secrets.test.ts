@@ -349,6 +349,23 @@ test('no sinks in config.json: a request goes to the board’s own store, for th
   ])
 })
 
+test('the calendar on with an ICS source and no sinks in config.json: a request without --sink still goes to the store; the calendar’s sink is named', async () => {
+  setUp()
+  const cfg = { calendar: { sources: [{ id: 'home', kind: 'ics' }] } } as unknown as Config
+  const lines: string[] = []
+  const ctx = { cfg, session: asker, out: (l: string) => lines.push(l), pollMs: 20 }
+  assert.equal(await secretCmd(['request', '--title', 'GitHub', '--field', 'GH_TOKEN', '--no-wait'], ctx), 2)
+  assert.match(lines[0] ?? '', /^pending · [0-9a-f]{12} · store · until /)
+  const [r] = requestsOf(readCard(SID)?.secrets)
+  assert.equal(r?.sink, 'store')
+  lines.length = 0
+  assert.equal(await secretCmd(['sinks'], { ...ctx, session: null }), 0)
+  assert.deepEqual(
+    lines.map(l => l.split(' · ')[0]),
+    ['store', 'calendar'],
+  )
+})
+
 test('the store’s scope: --global for every session, --profile for one of the board’s profiles, a pane-keyed session asks for one of those', async () => {
   setUp()
   const cfg = {} as Config

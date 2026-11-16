@@ -137,10 +137,6 @@ export interface MiniRect {
 }
 
 /** What layout says of an element: the test sets it. */
-export const layout = {
-  scrollHeight: (_el: MiniElement): number => 0,
-  rect: (_el: MiniElement): MiniRect => ({ left: 0, top: 0, width: 0, height: 0 }),
-}
 
 /**
  * An inline style: its properties as fields, and, unseen by a spread, the calls react-dom makes for
@@ -163,6 +159,15 @@ function miniStyle(): Record<string, string> {
 
 /** One part of a selector: a tag, an #id, .classes and an [attr], each optional (`button`, `.sheet`, `[data-act]`). */
 const SIMPLE = /^\s*([a-z][a-z0-9-]*)?((?:[#.][\w-]+)*)(?:\[([\w-]+)\])?\s*$/i
+export const layout = {
+  scrollHeight: (_el: MiniElement): number => 0,
+  rect: (_el: MiniElement): MiniRect => ({ left: 0, top: 0, width: 0, height: 0 }),
+  /** A scroller's visible height and an element's top in its scroller (#370's conversation). */
+  clientHeight: (_el: MiniElement): number => 0,
+  offsetTop: (_el: MiniElement): number => 0,
+  /** Told when an element is scrolled into view. */
+  intoView: (_el: MiniElement): void => {},
+}
 
 export class MiniElement extends MiniNode {
   readonly attributes = new Map<string, string>()
@@ -225,13 +230,25 @@ export class MiniElement extends MiniNode {
       if (at instanceof MiniElement && at.matches(selector)) return at
     return null
   }
+  get clientHeight(): number {
+    return layout.clientHeight(this)
+  }
+  get offsetTop(): number {
+    return layout.offsetTop(this)
+  }
+  scrollTop = 0
+  scrollTo(to: { top?: number }): void {
+    if (to.top !== undefined) this.scrollTop = to.top
+  }
   focus(): void {
     if (this.ownerDocument) this.ownerDocument.activeElement = this
   }
   blur(): void {
     if (this.ownerDocument?.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body
   }
-  scrollIntoView(): void {}
+  scrollIntoView(): void {
+    layout.intoView(this)
+  }
   /** The elements under it that match one of `selector`'s parts: `tag`, `[attr]` or `tag[attr]`. */
   querySelectorAll(selector: string): MiniElement[] {
     const parts = selector.split(',').map(s => /^\s*([a-z]*)(?:\[([a-z-]+)\])?\s*$/.exec(s))
