@@ -1,13 +1,14 @@
 // A message with a picture sent from the board while the session works (server/routes/session.ts):
 // the message route keeps what it sent, and the session's detail gives the picture's path back to
 // the thread, in its queue and once Claude took it into the running turn; the rest of the thread
-// is as it was. The transcript is the owner's (Claude Code 2.1.308), moved to the test's time.
+// is as it was; Send now on it finds it in the queue as the page shows it. The transcript is the
+// owner's (Claude Code 2.1.308), moved to the test's time.
 import { expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isSessionDetail, type SessionDetail } from '../../web/src/api/client.ts'
 import { serveBoard } from '../support/board-server.ts'
-import { type Sandbox, sandbox } from '../support/sandbox.ts'
+import { type Sandbox, sandbox, until } from '../support/sandbox.ts'
 
 const FIXTURE = readFileSync(new URL('../fixtures/queued-picture.jsonl', import.meta.url), 'utf8')
 const rule = '─'.repeat(40)
@@ -37,6 +38,7 @@ async function board(box: Sandbox) {
     'agent get': { result: { agent: { agent: 'claude', agent_session: { value: 's1' }, agent_status: 'working' } } },
     'agent read': { text: [rule, '❯ ', rule, '  esc to interrupt'].join('\n') },
     'agent prompt': { result: {} },
+    'agent send-keys': { result: { type: 'ok' } },
   })
   const { url } = await serveBoard(box, { language: 'ru' })
   for (const deadline = Date.now() + 8000; ; ) {
@@ -114,6 +116,33 @@ test('a picture sent while the session works: its path in the queue and in the t
     'спасибо',
   ])
   expect(taken.conversation.map(m => m.role)).toEqual(['user', 'notice', 'user', 'user'])
+}, 20_000)
+
+test('Send now on a queued message with a picture: the text the page shows is the one in the queue, and the key goes', async () => {
+  const box = await sandbox()
+  transcript(box, '', Date.now())
+  const url = await board(box)
+  const upload = join(box.env.LOCALAPPDATA ?? '', 'herdr', 'plugins', 'agent-board', 'uploads', '2026-10-31')
+  expect(await post(url, [join(upload, '070429-screenshot-090429.png')])).toEqual({ ok: true })
+  const at = Date.now() + 1000
+  const lines = FIXTURE.trim().split('\n')
+  transcript(box, `${lines.slice(0, 6).join('\n')}\n`, at)
+  const queued = (await detail(url)).queued?.[0]
+  expect(queued?.text).toContain('070429-screenshot-090429.png')
+  const pressed = () => box.calls().filter(a => a[0] === 'agent' && a[1] === 'send-keys')
+  let answer: unknown
+  const sent = fetch(`${url}/api/session/s1/sendnow`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-board': '1' },
+    body: JSON.stringify({ text: queued?.text }),
+  })
+    .then(r => r.json())
+    .then(a => (answer = a))
+  // the key into p0, and then Claude takes it into its turn (not "already": not found in the queue)
+  await until(() => pressed().length > 0 || answer !== undefined, 5000)
+  transcript(box, `${lines.join('\n')}\n`, at)
+  expect(await sent).toEqual({ ok: true })
+  expect(pressed().map(a => a[2])).toEqual(['p0'])
 }, 20_000)
 
 test('without a picture among the files nothing is kept, and the thread is as Claude Code keeps it', async () => {

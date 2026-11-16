@@ -8,6 +8,7 @@
 // <ref> --read`) or sends anything. Muted threads count nothing, so watch says nothing of them.
 // Loaded only by `board team`.
 import { isRecord } from '../adapters/json-store.ts'
+import type { LocalFetch } from '../adapters/local-key.ts'
 import { printable } from '../core/team.ts'
 import { TEAM, threadRef } from '../core/team-agents.ts'
 import { call } from './team-agents-cli.ts'
@@ -32,14 +33,16 @@ export interface InboxThread {
 
 interface Ctx {
   webPort: number
+  /** fetch for the board's port: adapters/local-key.ts localFetch, its key on its own server; fetch itself by default. */
+  ask?: LocalFetch
   /** The roster as the running board has it. */
   roster: unknown[]
 }
 
 /** The threads of the board with their unread counts, the latest first. */
 export async function inboxOf(ctx: Ctx): Promise<InboxThread[]> {
-  const threads = await call(ctx.webPort, '/api/team/threads')
-  const unread = await call(ctx.webPort, '/api/team/unread')
+  const threads = await call(ctx, '/api/team/threads')
+  const unread = await call(ctx, '/api/team/unread')
   if (!isRecord(threads.reply) || !Array.isArray(threads.reply.threads))
     throw new Error(`the board answered ${threads.status}`)
   const counts = isRecord(unread.reply) && isRecord(unread.reply.threads) ? unread.reply.threads : {}

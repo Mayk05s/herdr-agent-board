@@ -8,6 +8,7 @@ import { connect } from 'node:net'
 import { win32 } from 'node:path'
 import { type PortOwner, type ServerSays, type Stranger, saysRoot, strangerOf } from '../core/board-port.ts'
 import { isRecord } from './json-store.ts'
+import type { LocalFetch } from './local-key.ts'
 import { boardFile } from './paths.ts'
 import { run } from './process.ts'
 
@@ -28,9 +29,9 @@ export function listening(port: number, ms = 1000): Promise<boolean> {
   })
 }
 
-async function getJson(port: number, path: string): Promise<Record<string, unknown> | null> {
+async function getJson(port: number, path: string, fetchFn: LocalFetch): Promise<Record<string, unknown> | null> {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(1500) })
+    const res = await fetchFn(`http://127.0.0.1:${port}${path}`, { signal: AbortSignal.timeout(1500) })
     const body: unknown = await res.json()
     return isRecord(body) && body.board === 'agent-board' ? body : null
   } catch {
@@ -38,9 +39,15 @@ async function getJson(port: number, path: string): Promise<Record<string, unkno
   }
 }
 
-/** What the server on the port says of itself: /api/hello's version and /api/process's folder. */
-export async function serverSays(port: number): Promise<ServerSays> {
-  const [hello, proc] = await Promise.all([getJson(port, '/api/hello'), getJson(port, '/api/process')])
+/**
+ * What the server on the port says of itself: /api/hello's version and /api/process's folder.
+ * `fetchFn`: adapters/local-key.ts localFetch, the board's key on its own server.
+ */
+export async function serverSays(port: number, fetchFn: LocalFetch = fetch): Promise<ServerSays> {
+  const [hello, proc] = await Promise.all([
+    getJson(port, '/api/hello', fetchFn),
+    getJson(port, '/api/process', fetchFn),
+  ])
   return {
     version: hello ? String(hello.version ?? '') : null,
     root: proc && typeof proc.root === 'string' ? proc.root : null,
@@ -169,8 +176,9 @@ export async function portOwner(
 export async function whoHoldsPort(
   port: number,
   root: string,
+  fetchFn: LocalFetch = fetch,
 ): Promise<{ owner: PortOwner | null; says: ServerSays; why: Stranger | null }> {
-  const says = await serverSays(port)
+  const says = await serverSays(port, fetchFn)
   const saved = savedBoardPid()
   const owner = await portOwner(port, pid => pid === saved || saysRoot(says, root, process.platform))
   return { owner, says, why: owner && strangerOf(owner, says, root, saved, process.platform) }

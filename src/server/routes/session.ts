@@ -89,8 +89,10 @@ function queueWindow(deps: Deps, item: Item): QueueWindow {
 /** The user's messages still in a running Claude session's queue, as its detail shows them (Send now, #330). */
 function queueOf(deps: Deps, item: Item): QueuedPrompt[] {
   if (!item.alive || isCodexItem(item) || isPiItem(item)) return []
-  // As far back as the detail reads it, so both see the same queue.
-  return deps.claude.sessionThread(item.transcript ?? '', 60, queueWindow(deps, item)).queued
+  // As far back as the detail reads it, so both see the same queue, a sent picture's path given back
+  // as there: Send now names a message by the text the page shows.
+  const { queued } = deps.claude.sessionThread(item.transcript ?? '', 60, queueWindow(deps, item))
+  return item.session ? queued.map(picturesBackFor(item.session)) : queued
 }
 
 /** The compactions the board's auto-compact made (#378, their times on the card) marked as the board's in the conversation. */
@@ -152,19 +154,24 @@ function withPicturesBack<T extends { conversation: ConversationTurn[]; queued: 
   thread: T,
   session: string,
 ): T {
+  const back = picturesBackFor(session)
+  return {
+    ...thread,
+    conversation: thread.conversation.map(m => (m.role === 'user' ? back(m) : m)),
+    queued: thread.queued.map(back),
+  }
+}
+
+/** A message of `session` with its sent pictures' paths back (withPicturesBack); the record read once, for the first with a mark left. */
+function picturesBackFor(session: string): <M extends { text: string; at: number }>(m: M) => M {
   let sent: SentPictures[] | null = null
   const records = (): SentPictures[] => {
     sent ??= picturesSentTo(session)
     return sent
   }
-  const back = <M extends { text: string; at: number }>(m: M): M => {
+  return m => {
     const text = picturesBack(m.text, m.at, records)
     return text === m.text ? m : { ...m, text }
-  }
-  return {
-    ...thread,
-    conversation: thread.conversation.map(m => (m.role === 'user' ? back(m) : m)),
-    queued: thread.queued.map(back),
   }
 }
 

@@ -70,7 +70,7 @@ export async function reminderClick(
     return { ok: false, error: t('cal.err.usage') }
   let answer: unknown
   try {
-    const res = await fetch(`${url}api/calendar-reminders`, {
+    const res = await localFetch(cfg)(`${url}api/calendar-reminders`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-board': '1' },
       body: JSON.stringify({ id, act, desktop: true }),
@@ -103,7 +103,7 @@ export async function teamClick(
   if (!isThreadKey(thread)) return { ok: false, error: 'usage: web-open.ts --team <thread key>' }
   let answer: unknown
   try {
-    const res = await fetch(`${url}api/team/focus`, {
+    const res = await localFetch(cfg)(`${url}api/team/focus`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-board': '1' },
       body: JSON.stringify({ thread }),

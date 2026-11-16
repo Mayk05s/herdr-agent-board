@@ -10,6 +10,7 @@
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { isRecord } from '../adapters/json-store.ts'
+import type { LocalFetch } from '../adapters/local-key.ts'
 import { isMessageId, printable } from '../core/team.ts'
 import {
   DEFAULT_LIMITS,
@@ -36,6 +37,8 @@ const asSession = (s: SessionWord): { key: string; name?: string } => ({ key: s.
 
 interface Ctx {
   webPort: number
+  /** fetch for the board's port: adapters/local-key.ts localFetch, its key on its own server; fetch itself by default. */
+  ask?: LocalFetch
   /** The roster as the running board has it. */
   roster: unknown[]
   /** The session running this command (--session: the caller's word). */
@@ -46,10 +49,14 @@ interface Ctx {
 
 const BOARD_DOWN = 'the board does not run: open it first (herdr plugin action invoke agent-board.open)'
 
-export async function call(webPort: number, path: string, body?: unknown): Promise<{ status: number; reply: unknown }> {
+export async function call(
+  ctx: Pick<Ctx, 'webPort' | 'ask'>,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; reply: unknown }> {
   let res: Response
   try {
-    res = await fetch(`http://127.0.0.1:${webPort}${path}`, {
+    res = await (ctx.ask ?? fetch)(`http://127.0.0.1:${ctx.webPort}${path}`, {
       method: body === undefined ? 'GET' : 'POST',
       headers: { 'content-type': 'application/json', 'x-board': '1' },
       ...(body !== undefined && { body: JSON.stringify(body) }),
@@ -68,7 +75,7 @@ const peersOf = (roster: unknown[]): { peer: string; name: string }[] =>
     .map(p => ({ peer: String(p.peer), name: String(p.name) }))
 
 async function threadKeyOf(ctx: Ctx, word: string): Promise<string> {
-  const { reply } = await call(ctx.webPort, '/api/team/threads')
+  const { reply } = await call(ctx, '/api/team/threads')
   const threads = isRecord(reply) && Array.isArray(reply.threads) ? reply.threads.filter(isRecord) : []
   const r = resolveThreadRef(
     word,
@@ -98,7 +105,7 @@ async function messageOf(ctx: Ctx, key: string, ref: string): Promise<string> {
   const word = ref.replace(/^#/, '').toLowerCase()
   if (!/^[0-9a-f-]{6,36}$/.test(word))
     throw new Error('a message is named by its ref as board team thread prints it, such as 1a2b3c4d')
-  const { status, reply } = await call(ctx.webPort, `/api/team/threads/${key}`)
+  const { status, reply } = await call(ctx, `/api/team/threads/${key}`)
   const lines = isRecord(reply) && Array.isArray(reply.lines) ? reply.lines.filter(isRecord) : []
   if (status !== 200 || !isRecord(reply) || !isRecord(reply.thread)) throw new Error('no such thread on this board')
   const hits = lines.filter(
@@ -135,7 +142,7 @@ function whoOf(ctx: Ctx, scope: string): string {
 async function whoOfThread(ctx: Ctx, key: string): Promise<string> {
   const scope = splitKey(key)?.scope ?? ''
   if (scope !== TEAM) return whoOf(ctx, scope)
-  const { reply } = await call(ctx.webPort, '/api/team/threads')
+  const { reply } = await call(ctx, '/api/team/threads')
   const threads = isRecord(reply) && Array.isArray(reply.threads) ? reply.threads.filter(isRecord) : []
   const members = threads.find(t => t.key === key)?.members
   if (!Array.isArray(members)) return 'the team'
@@ -204,7 +211,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'off')) throw new Error(`usage: ${AGENT_USAGE}`)
     const self = await ctx.self()
     const session = rest[0] === 'off' ? null : asSession(self)
-    const { status, reply } = await call(ctx.webPort, '/api/team/listen', { session, caller: asSession(self) })
+    const { status, reply } = await call(ctx, '/api/team/listen', { session, caller: asSession(self) })
     // Becoming the listener widens what agents may do: the owner confirms it with a passkey (#224).
     if (isRecord(reply) && reply.error === 'passkey')
       throw new Error(
@@ -229,7 +236,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     const to = targetOf(ctx, who)
     const self = await ctx.self()
     const thread = title !== undefined ? { title, ...(link !== undefined && { link }) } : undefined
-    const { status, reply } = await call(ctx.webPort, '/api/team/post', {
+    const { status, reply } = await call(ctx, '/api/team/post', {
       to,
       text,
       session: asSession(self),
@@ -245,7 +252,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     const [who = '', n] = rest
     const to = targetOf(ctx, who)
     if (n === undefined) {
-      const { reply } = await call(ctx.webPort, '/api/team/agents')
+      const { reply } = await call(ctx, '/api/team/agents')
       const peers = isRecord(reply) && isRecord(reply.peers) ? reply.peers : {}
       const entry = peers[to]
       const own = isRecord(entry) && validLoop(entry.loop) ? entry.loop : null
@@ -254,7 +261,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     }
     const loop = n === 'default' ? null : /^\d{1,3}$/.test(n) ? Number(n) : Number.NaN
     if (loop !== null && !validLoop(loop)) throw new Error('the loop pause is a whole number from 1 to 100, or default')
-    const { status, reply } = await call(ctx.webPort, '/api/team/agents', { peer: to, loop })
+    const { status, reply } = await call(ctx, '/api/team/agents', { peer: to, loop })
     // A change of the pause widens what agents may do: the owner confirms it with a passkey (#224).
     if (isRecord(reply) && reply.error === 'passkey')
       throw new Error(
@@ -282,7 +289,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     // One message in particular (#373), by the ref `board team thread` prints for it.
     const replyTo = to === undefined ? undefined : await messageOf(ctx, key, to)
     const self = await ctx.self()
-    const { status, reply } = await call(ctx.webPort, '/api/team/post', {
+    const { status, reply } = await call(ctx, '/api/team/post', {
       to: parts.scope,
       text,
       session: asSession(self),
@@ -301,12 +308,12 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     const key = await threadKeyOf(ctx, words[0] ?? '')
     // Read up to when the lines were asked for: what lands after is not marked unseen.
     const asked = Date.now()
-    const { status, reply } = await call(ctx.webPort, `/api/team/threads/${key}`)
+    const { status, reply } = await call(ctx, `/api/team/threads/${key}`)
     // Nothing written in it yet comes back with only an agent's draft waiting there (#370): no thread.
     const none = status === 404 || (isRecord(reply) && reply.thread === null)
     if (!isRecord(reply) || !isRecord(reply.thread) || !Array.isArray(reply.lines))
       throw new Error(none ? 'no such thread on this board' : `the board answered ${status}`)
-    const agents = await call(ctx.webPort, '/api/team/agents')
+    const agents = await call(ctx, '/api/team/agents')
     // A channel (#355) is with its members, by this board's names for them.
     const members = Array.isArray(reply.thread.members) ? reply.thread.members.map(String) : null
     const who = members
@@ -319,7 +326,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     // Marked read only when asked, and only after the thread was read out. A thread with a message
     // held back (its key changed) is left for the owner, who alone can trust the key and read it.
     const held = lines.some(l => l.held === true)
-    const marked = read && !held ? await call(ctx.webPort, '/api/team/read', { thread: key, upTo: asked }) : null
+    const marked = read && !held ? await call(ctx, '/api/team/read', { thread: key, upTo: asked }) : null
     if (marked && (!isRecord(marked.reply) || marked.reply.ok !== true))
       throw new Error(`not marked read: the board answered ${marked.status}`)
     if (json) return JSON.stringify(threadData(key, reply.thread, lines, who, marked !== null))
@@ -333,7 +340,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     // Read only (#415): which drafts wait, so a session can point the owner at the exact one.
     // Sending or discarding one stays the owner's step, in the Team panel.
     if (rest.length) throw new Error(`usage: ${AGENT_USAGE}`)
-    const { status, reply } = await call(ctx.webPort, '/api/team/threads')
+    const { status, reply } = await call(ctx, '/api/team/threads')
     if (!isRecord(reply) || !Array.isArray(reply.threads)) throw new Error(`the board answered ${status}`)
     const threads = reply.threads.filter(isRecord)
     const drafts = Array.isArray(reply.drafts) ? reply.drafts.filter(isRecord) : []
@@ -343,7 +350,7 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     if (rest.length !== (op === 'assign' ? 2 : 1)) throw new Error(`usage: ${AGENT_USAGE}`)
     const key = await threadKeyOf(ctx, rest[0] ?? '')
     const session = op === 'assign' ? await ctx.find(rest[1] ?? '') : null
-    const { status, reply } = await call(ctx.webPort, `/api/team/threads/${key}/${op}`, session ? { session } : {})
+    const { status, reply } = await call(ctx, `/api/team/threads/${key}/${op}`, session ? { session } : {})
     if (isRecord(reply) && reply.ok === true)
       return op === 'assign'
         ? printable(`ok · ${session?.name ?? session?.key ?? ''} handles that thread now`)

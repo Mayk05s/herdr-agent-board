@@ -638,7 +638,7 @@ async function strangerOnPort(port: number): Promise<string | null> {
   const { whoHoldsPort } = await import('../adapters/port-owner.ts')
   const { describeOwner } = await import('../core/board-port.ts')
   const { ROOT } = await import('../adapters/paths.ts')
-  const { owner, says, why } = await whoHoldsPort(port, ROOT)
+  const { owner, says, why } = await whoHoldsPort(port, ROOT, localFetch(cfg))
   if (!owner || !why) return null
   const who = describeOwner(owner, says, why, Date.now())
   return `port ${port} is held by a process that is not this install's board (${ROOT}): ${who}. Stop it (often an old board server from another checkout) and open the board again`
@@ -670,7 +670,7 @@ async function draftTo(
   if (!target) throw new Error(`nobody called ${T.printable(who)} on the team. On it: ${names}`)
   let res: Response
   try {
-    res = await fetch(`http://127.0.0.1:${webPort}/api/team/draft`, {
+    res = await localFetch(cfg)(`http://127.0.0.1:${webPort}/api/team/draft`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-board': '1' },
       body: JSON.stringify({ to: target.peer, text }),
@@ -771,7 +771,7 @@ async function team(): Promise<void> {
   const webPort = Number(cfg.port) || 12422
   let res: Response
   try {
-    res = await fetch(`http://127.0.0.1:${webPort}/api/team`, { signal: AbortSignal.timeout(3000) })
+    res = await localFetch(cfg)(`http://127.0.0.1:${webPort}/api/team`, { signal: AbortSignal.timeout(3000) })
   } catch {
     throw new Error('the board does not run: open it first (herdr plugin action invoke agent-board.open)')
   }
@@ -785,7 +785,7 @@ async function team(): Promise<void> {
     )
   if (inboxOp) {
     const I = await import('./team-inbox-cli.ts')
-    const ctx = { webPort, roster: view.roster }
+    const ctx = { webPort, roster: view.roster, ask: localFetch(cfg) }
     if (op === 'inbox') return console.log(await I.teamInbox(more, ctx))
     const words = more.filter((a, i) => a !== '--json' && a !== '--every' && more[i - 1] !== '--every')
     if (words.length) throw new Error(TEAM_USAGE)
@@ -796,6 +796,7 @@ async function team(): Promise<void> {
     const line = await A.teamAgents(op ?? '', more, {
       webPort,
       roster: view.roster,
+      ask: localFetch(cfg),
       self: async () => {
         const s = await resolveSession()
         return { key: s.key, ...(s.name && { name: s.name }), ...(target && { claimed: true }) }
@@ -912,7 +913,7 @@ async function main(): Promise<void> {
     if (await port.listening(webPort)) {
       const { portCheck } = await import('../core/board-port.ts')
       const { ROOT } = await import('../adapters/paths.ts')
-      const { owner, says, why } = await port.whoHoldsPort(webPort, ROOT)
+      const { owner, says, why } = await port.whoHoldsPort(webPort, ROOT, localFetch(cfg))
       const c = portCheck(webPort, owner, says, why, ROOT, Date.now(), t)
       if (c) checks.push(c)
     }
@@ -1924,7 +1925,7 @@ async function threadContext(c: typeof cfg = cfg): Promise<ThreadCmdContext> {
     sendOut: async (thread, entry) => {
       const webPort = Number(c.port) || 12422
       try {
-        const res = await fetch(`http://127.0.0.1:${webPort}/api/threads/${encodeURIComponent(thread)}`, {
+        const res = await localFetch(c)(`http://127.0.0.1:${webPort}/api/threads/${encodeURIComponent(thread)}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-board': '1' },
           body: JSON.stringify({ op: 'send', entry }),
