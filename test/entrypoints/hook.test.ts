@@ -128,6 +128,30 @@ test('a board reminder does not count as the user answering the session', async 
   assert.equal(cardOf(box, 's1')?.ask, undefined)
 })
 
+// Code Mode (#424): background code's output runs UserPromptSubmit too, marked source poll_event.
+const POLL_EVENT =
+  '<event nonce="kcxdYBtG" kind="repl-eval" at="2026-11-16T08:35:57.928Z" eval="10" ms="1683" status="settled">\n<result>ok</result>\n</event>'
+
+test("Code Mode's background output is not the user: ask, pin and wait stay, nothing is said", async () => {
+  const box = await sandbox()
+  englishConfig(box)
+  const card = { key: 's1', ask: 'Ship it?', askSince: 1, pin: 'me', pinAt: 1, wait: 'the CI', briefV: 1 }
+  putCard(box, card)
+  const input = { hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: box.dir, prompt: POLL_EVENT }
+  assert.equal(await runHook(box, { ...input, source: 'poll_event' }), '')
+  // Only the profile, as on every event.
+  const { profile, profileDir, updatedAt, ...rest } = cardOf(box, 's1') ?? {}
+  assert.deepEqual(rest, card)
+  assert.equal(profile, 'default')
+  // Under pi's bridge too: herdr is asked nothing for it.
+  assert.equal(await runHook(box, { ...input, source: 'poll_event' }, 'w6:p1', { PI_CODING_AGENT: 'true' }), '')
+  expect(box.calls()).toEqual([])
+  // The owner's own prompt still answers.
+  assert.notEqual(await runHook(box, { ...input, prompt: 'yes, ship it' }), '')
+  const after = cardOf(box, 's1')
+  assert.deepEqual([after?.ask, after?.pin, after?.briefV], [undefined, undefined, BRIEF_VERSION])
+})
+
 // A pi session runs Claude Code through its bridge: the hook hears of the bridge's Claude session,
 // the board shows pi's (herdr's agent_session of the pane, the session's file), where `board ask` went.
 const PI_KEY = '/home/me/.pi/agent/sessions/--home-me--/2026-10-20T05-10-02-695Z_01a1.jsonl'

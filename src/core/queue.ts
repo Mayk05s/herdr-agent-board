@@ -1,7 +1,7 @@
 // The user's messages waiting in Claude Code's queue, read from the transcript (Claude Code logs
 // the queue there): the session's detail shows them at the foot of its thread until Claude takes
 // them in. Pure: the file reading lives with the adapter (adapters/claude-home.ts sessionThread).
-import { boardNotice, taskNotice } from './notices.ts'
+import { boardNotice, codeModeEvent, taskNotice } from './notices.ts'
 import { userText } from './transcript.ts'
 
 /** A message still in the queue, oldest first; `at`: when it was queued (ms). */
@@ -63,7 +63,8 @@ interface Pending {
  * message comes next as a user line of its own, which says which one went), `remove` (taken
  * into the running turn, absorbed_mid_turn, and kept as a queued_command attachment), or `popAll`
  * (pulled back into the input box). Task notifications, other sessions' messages, board
- * reminders and scheduled prompts go the same way; they are left out. A queue goes with its
+ * reminders, scheduled prompts and Code Mode's background results go the same way; they are
+ * left out. A queue goes with its
  * Claude process: nothing from before `since` (when it started), nor from before `idleSince`
  * (when it last said its turn was over, which empties the queue).
  */
@@ -76,7 +77,13 @@ export function queuedPrompts(text: unknown, { since = 0, idleSince = 0 }: Queue
     if (i >= 0) pending.splice(i, 1)
   }
   const own = (p: Pending): boolean => {
-    if (p.system || scheduled.has(p.content) || SYSTEM_TAG.test(p.content) || p.content.startsWith('[Cross-session '))
+    if (
+      p.system ||
+      scheduled.has(p.content) ||
+      SYSTEM_TAG.test(p.content) ||
+      p.content.startsWith('[Cross-session ') ||
+      codeModeEvent(p.content)
+    )
       return false
     const said = userText(p.content)
     return !!said && !taskNotice(said) && !boardNotice(said)
@@ -89,8 +96,13 @@ export function queuedPrompts(text: unknown, { since = 0, idleSince = 0 }: Queue
       const content = typeof o.content === 'string' ? o.content : ''
       if (o.operation === 'enqueue')
         pending.push({ content, ts: o.timestamp, at: Date.parse(String(o.timestamp)) || 0, system: false })
-      else if (o.operation === 'dequeue') owed++
-      else if (o.operation === 'remove') take(find(content))
+      else if (o.operation === 'dequeue') {
+        // Code Mode's background result (#424) goes to Claude as a tool result, not a user line
+        // that would say which one went: it is the one taken, and nothing is owed.
+        const event = pending.findIndex(p => codeModeEvent(p.content))
+        if (event >= 0) take(event)
+        else owed++
+      } else if (o.operation === 'remove') take(find(content))
       else if (o.operation === 'popAll') {
         // Back into the input box, all at once, their texts joined.
         const back = pending.filter(p => p.content && content.includes(p.content))

@@ -7,6 +7,8 @@
 //   a card that heard of presence reads it, so a setup that never turned it on reads nothing).
 //   Every event: the card says which Claude profile the session runs in (its CLAUDE_CONFIG_DIR,
 //   unset: ~/.claude), written only when that changed.
+//   UserPromptSubmit with source poll_event (Code Mode's background code reporting back, #424): not
+//   the user, so nothing of the above; only the profile, as on every event.
 //   PreToolUse (AskUserQuestion only): the call's id and questions go on the card (card.asking),
 //   for when Claude Code holds them back from the transcript (core/held-question.ts); nothing
 //   else, and the call goes on as it would without the hook.
@@ -112,6 +114,12 @@ async function main(): Promise<void> {
   const dir = inheritedProfileDir()
   const profiles = loadProfiles()
   const patch: CardPatch = profileReport(card, dir, profiles)
+  // Code Mode runs UserPromptSubmit on its background code's output too, with source poll_event
+  // (#424): nobody wrote, so the ask and the pin stay, and no brief or line goes in.
+  if (event === 'UserPromptSubmit' && input.source === 'poll_event') {
+    if (Object.keys(patch).length) writeCard(sid, patch)
+    return
+  }
   // The user wrote to the session: whatever it asked them is answered. A reminder from the board's
   // scheduler or a background task reporting back is not the user, so its ask stays. A column the
   // user dragged the card to has done its job either way: the session works again, which drops
