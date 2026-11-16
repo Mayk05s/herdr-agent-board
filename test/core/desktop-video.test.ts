@@ -15,6 +15,8 @@ import {
   KEY_TEXT,
   readVideoMessage,
   readViewerText,
+  VIDEO_RATES,
+  type VideoRate,
   type VideoUnit,
   videoMessage,
 } from '../../src/core/desktop-video.ts'
@@ -72,6 +74,34 @@ test('ffmpeg’s arguments: the display grabbed with its pointer, x264 for laten
   expect(after('-colorspace')).toBe('bt709')
   // nothing of the shell: one argument each, no quoting
   expect(args.every(a => !/[\s'"]/.test(a))).toBe(true)
+})
+
+test('the rates the video steps down through for a slow link: 8M as it always was, then halves to 500k, each with a quarter second’s buffer; ffmpeg’s arguments at each', () => {
+  expect(VIDEO_RATES.map(r => [r.maxrate, r.bufsize, r.crf])).toEqual([
+    ['8M', '2M', 23],
+    ['4M', '1M', 23],
+    ['2M', '500k', 23],
+    ['1M', '250k', 23],
+    ['500k', '125k', 26],
+  ])
+  // the best is what it ran at before, with no rate given
+  expect(ffmpegArgs({ display: 104, zscale: true, rate: VIDEO_RATES[0] as VideoRate })).toEqual(
+    ffmpegArgs({ display: 104, zscale: true }),
+  )
+  for (const rate of VIDEO_RATES) {
+    const args = ffmpegArgs({ display: 104, zscale: true, rate })
+    const after = (flag: string) => args[args.indexOf(flag) + 1]
+    expect([after('-crf'), after('-maxrate'), after('-bufsize')]).toEqual([
+      String(rate.crf),
+      rate.maxrate,
+      rate.bufsize,
+    ])
+    // all else as at the best
+    const best = ffmpegArgs({ display: 104, zscale: true })
+    expect(args.filter((_, i) => !['-crf', '-maxrate', '-bufsize'].includes(args[i - 1] as string))).toEqual(
+      best.filter((_, i) => !['-crf', '-maxrate', '-bufsize'].includes(best[i - 1] as string)),
+    )
+  }
 })
 
 test('ffmpeg’s own FLV (4.4, x264 as the board runs it): a key frame with its SPS and PPS ahead, then the deltas, in Annex B', () => {

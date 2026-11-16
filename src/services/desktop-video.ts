@@ -9,11 +9,28 @@
 // unanswered is behind (its link is slower than the picture changes): it gets no more until the
 // ones in flight are down to LOW_AHEAD, then a key frame, so it never sees seconds-old frames. One
 // that asks for a key frame starts over: what it was sent before is not waited for (its decoder
-// went with them, and they would hold it behind for good). The
+// went with them, and they would hold it behind for good).
+//
+// The rate follows the slowest viewer's link (core/desktop-video.ts VIDEO_RATES): a viewer behind
+// has the encoder start again for its key frame at the next rate down (one step for each start,
+// however many fall behind on it); no viewer behind for STEP_UP_MS, the encoder starts again one
+// step up; behind again within that time, the step up did not hold and the next one waits twice as
+// long (at most MAX_STEP_UP_MS), one that held makes it STEP_UP_MS again. A desktop's rate is kept
+// for its next view within RATE_KEPT_MS (the page shown again, its socket opened again). While a
+// desktop's video runs at a lower rate or something happened to it, the board's log has a line on
+// it each minute (VIDEO_LOG_MS). The
 // encoder is the board's child: the board gone, its stdout is closed and it ends. Where there is no
 // ffmpeg, no viewer is taken (the route says so) and the page shows the VNC picture instead.
 import { closeSync, openSync, readFileSync } from 'node:fs'
-import { ffmpegArgs, flvUnits, readViewerText, type VideoUnit, videoMessage } from '../core/desktop-video.ts'
+import {
+  ffmpegArgs,
+  flvUnits,
+  readViewerText,
+  VIDEO_RATES,
+  type VideoRate,
+  type VideoUnit,
+  videoMessage,
+} from '../core/desktop-video.ts'
 
 export interface VideoProc {
   pid: number
@@ -71,6 +88,13 @@ export const MAX_AHEAD_BYTES = 3 << 20
 export const LOW_AHEAD = 2
 /** The encoder starts again (for a key frame) at most this often. */
 export const MIN_RESTART_MS = 1500
+/** No viewer behind this long: one step up the rates; twice as long after each step up that did not hold, at most MAX_STEP_UP_MS. */
+export const STEP_UP_MS = 25_000
+export const MAX_STEP_UP_MS = 240_000
+/** A desktop's rate is where its next view starts, within this long after its video ended. */
+export const RATE_KEPT_MS = 5 * 60_000
+/** A line in the board's log on a desktop's video this often, while it has something to say. */
+export const VIDEO_LOG_MS = 60_000
 /** A viewer's socket closed as the video ended (the encoder failed, its display gone): the page shows VNC. */
 export const VIDEO_ENDED = 4011
 /** Closed: the video cannot be made here (no ffmpeg). */
@@ -131,6 +155,24 @@ interface Stream {
   /** A start again waits for its turn (MIN_RESTART_MS). */
   again: unknown
   ending: boolean
+  rate: Rate
+  /** The step (of VIDEO_RATES) the current encoder was started at. */
+  started: number
+  /** This minute's: viewers fallen behind, encoder starts, steps down and up; the timer of its line. */
+  minute: { behind: number; starts: number; down: number; up: number }
+  logTimer: unknown
+}
+
+/** Where a desktop's video is on VIDEO_RATES, and how its steps up have gone. */
+interface Rate {
+  /** The step the next start of the encoder runs at (0 the best). */
+  step: number
+  /** No viewer behind since then (or the step changed then). */
+  calmSince: number
+  /** How long calm before a step up. */
+  upWait: number
+  /** The last step up, until a viewer fell behind (it did not hold) or the next step up (it did). */
+  upAt: number | null
 }
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -148,18 +190,69 @@ export function createDesktopVideo(o: { log(line: string): void; system?: VideoS
   const sys = o.system ?? realVideoSystem
   const streams = new Map<string, Stream>()
   const zscales = new Map<string, Promise<boolean>>()
+  /** The rates of desktops whose video ended, by pane: where a view that comes back soon starts. */
+  const kept = new Map<string, { rate: Rate; at: number }>()
+
+  const last = VIDEO_RATES.length - 1
+  const rateOf = (step: number) => VIDEO_RATES[step] as VideoRate
+
+  /** A viewer fell behind: the next start of the encoder (its key frame) a step down, once for this start. */
+  function fellBehind(st: Stream): void {
+    const now = sys.now()
+    const r = st.rate
+    st.minute.behind++
+    // a step up that did not hold: the next one waits longer
+    if (r.upAt !== null && now - r.upAt < r.upWait) r.upWait = Math.min(r.upWait * 2, MAX_STEP_UP_MS)
+    r.upAt = null
+    r.calmSince = now
+    if (r.step === st.started && r.step < last) {
+      r.step++
+      st.minute.down++
+    }
+  }
+
+  /** No viewer behind for its wait, each one steady: a step up, the encoder started again for it. */
+  function maybeUp(st: Stream): void {
+    const r = st.rate
+    if (r.step === 0 || r.step !== st.started || !st.keyed || st.again !== undefined) return
+    const now = sys.now()
+    if (now - r.calmSince < r.upWait) return
+    for (const seat of st.viewers.values()) if (seat.behind || seat.waitKey) return
+    // the last step up held as long: the next as soon as the first
+    if (r.upAt !== null) r.upWait = STEP_UP_MS
+    r.step--
+    r.upAt = now
+    r.calmSince = now
+    st.minute.up++
+    keyFrame(st)
+  }
+
+  /** The minute's line, while there is something to say; the next minute's timer. */
+  function minuteLine(st: Stream): void {
+    st.logTimer = undefined
+    if (st.ending || streams.get(st.src.pane) !== st) return
+    const m = st.minute
+    if (m.behind || m.down || m.up || st.started > 0)
+      o.log(
+        `desktop :${st.src.display}: video, last minute: behind ${m.behind}, starts ${m.starts}, down ${m.down}, up ${m.up}; now ${rateOf(st.started).maxrate} (step ${st.started + 1} of ${last + 1})`,
+      )
+    st.minute = { behind: 0, starts: 0, down: 0, up: 0 }
+    st.logTimer = sys.setTimeout(() => minuteLine(st), VIDEO_LOG_MS)
+  }
 
   const inFlight = (s: Seat) => s.flight.reduce((n, f) => n + f.bytes, 0)
 
   function deliver(st: Stream, unit: VideoUnit): void {
     st.seq = (st.seq + 1) >>> 0
     if (unit.key) st.keyed = true
+    maybeUp(st)
     const msg = videoMessage(st.seq, unit)
     for (const [viewer, seat] of st.viewers) {
       if (seat.behind && seat.flight.length > LOW_AHEAD) continue
       if (seat.waitKey && !unit.key) continue
       if (!unit.key && (seat.flight.length >= MAX_AHEAD || inFlight(seat) >= MAX_AHEAD_BYTES)) {
-        // its link backs up: nothing more until it catches up, then a key frame
+        // its link backs up: nothing more until it catches up, then a key frame, at a lower rate
+        fellBehind(st)
         seat.behind = true
         seat.waitKey = true
         continue
@@ -177,6 +270,8 @@ export function createDesktopVideo(o: { log(line: string): void; system?: VideoS
     const gen = ++st.gen
     st.keyed = false
     st.startedAt = sys.now()
+    st.started = st.rate.step
+    st.minute.starts++
     const ffmpeg = sys.which('ffmpeg')
     if (!ffmpeg) return end(st, gen, 'no ffmpeg')
     let zscale = zscales.get(ffmpeg)
@@ -189,7 +284,7 @@ export function createDesktopVideo(o: { log(line: string): void; system?: VideoS
     let proc: VideoProc
     try {
       proc = sys.spawn(
-        [ffmpeg, ...ffmpegArgs({ display: st.src.display, zscale: z })],
+        [ffmpeg, ...ffmpegArgs({ display: st.src.display, zscale: z, rate: rateOf(st.started) })],
         {
           DISPLAY: `:${st.src.display}`,
           XAUTHORITY: st.src.auth,
@@ -230,6 +325,11 @@ export function createDesktopVideo(o: { log(line: string): void; system?: VideoS
     st.gen++
     sys.clearTimeout(st.again)
     st.again = undefined
+    sys.clearTimeout(st.logTimer)
+    st.logTimer = undefined
+    const now = sys.now()
+    for (const [pane, k] of kept) if (now - k.at >= RATE_KEPT_MS) kept.delete(pane)
+    kept.set(st.src.pane, { rate: st.rate, at: now })
     st.proc?.kill('SIGKILL')
     st.proc = null
     if (streams.get(st.src.pane) === st) streams.delete(st.src.pane)
@@ -256,6 +356,13 @@ export function createDesktopVideo(o: { log(line: string): void; system?: VideoS
     join(src, viewer) {
       let st = streams.get(src.pane)
       if (!st) {
+        const now = sys.now()
+        const was = kept.get(src.pane)
+        kept.delete(src.pane)
+        const rate: Rate =
+          was && now - was.at < RATE_KEPT_MS
+            ? { ...was.rate, calmSince: now, upAt: null }
+            : { step: 0, calmSince: now, upWait: STEP_UP_MS, upAt: null }
         st = {
           src,
           viewers: new Map(),
@@ -266,7 +373,13 @@ export function createDesktopVideo(o: { log(line: string): void; system?: VideoS
           startedAt: 0,
           again: undefined,
           ending: false,
+          rate,
+          started: rate.step,
+          minute: { behind: 0, starts: 0, down: 0, up: 0 },
+          logTimer: undefined,
         }
+        const s = st
+        st.logTimer = sys.setTimeout(() => minuteLine(s), VIDEO_LOG_MS)
         streams.set(src.pane, st)
         st.viewers.set(viewer, { waitKey: true, behind: false, flight: [] })
         o.log(`desktop :${src.display}: video for its viewers`)

@@ -8,13 +8,17 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ffmpegArgs, readVideoMessage } from '../../src/core/desktop-video.ts'
+import { ffmpegArgs, readVideoMessage, VIDEO_RATES, type VideoRate } from '../../src/core/desktop-video.ts'
 import {
   createDesktopVideo,
   LOW_AHEAD,
   MAX_AHEAD,
+  MAX_STEP_UP_MS,
   MIN_RESTART_MS,
+  RATE_KEPT_MS,
+  STEP_UP_MS,
   VIDEO_ENDED,
+  VIDEO_LOG_MS,
   type VideoSource,
   type VideoSystem,
   type VideoViewer,
@@ -252,6 +256,200 @@ test('a viewer that does not keep up: no more frames past MAX_AHEAD unanswered, 
   await settle()
   const after = slow.got.slice(MAX_AHEAD)
   expect(after.map(f => f.key)).toEqual([true, false])
+})
+
+/** The step of VIDEO_RATES an encoder was started at, read from its arguments. */
+const stepOf = (e: Encoder | undefined) => {
+  const argv = e?.argv ?? []
+  return VIDEO_RATES.findIndex(r => r.maxrate === argv[argv.indexOf('-maxrate') + 1])
+}
+
+/** A desktop's video with viewers that answer what they got when told to (`answer`), and falls behind (`fall`). */
+async function rated() {
+  const t = setup()
+  const answer = (v: ReturnType<typeof viewer>) => {
+    const last = v.got.at(-1)
+    if (last) t.video.message(t.src.pane, v, `a${last.seq}`)
+  }
+  /** The newest encoder's header and key frame, answered. */
+  const keyed = async (...vs: ReturnType<typeof viewer>[]) => {
+    const enc = t.encoders.at(-1)
+    enc?.write(head())
+    enc?.write(keyFrame())
+    await settle()
+    for (const v of vs) answer(v)
+  }
+  /** These viewers fall behind on the newest encoder (nothing answered past MAX_AHEAD), then catch up: the encoder starts again. */
+  const fall = async (...vs: ReturnType<typeof viewer>[]) => {
+    const enc = t.encoders.at(-1)
+    for (let i = 0; i < MAX_AHEAD + 2; i++) enc?.write(delta())
+    await settle()
+    for (const v of vs) answer(v)
+    await t.advance(MIN_RESTART_MS)
+    await keyed(...vs)
+  }
+  /** A frame from the newest encoder, answered; what it starts runs. */
+  const frame = async (...vs: ReturnType<typeof viewer>[]) => {
+    t.encoders.at(-1)?.write(delta())
+    await settle()
+    for (const v of vs) answer(v)
+    await t.advance(0)
+  }
+  return { ...t, answer, keyed, fall, frame }
+}
+
+test('a viewer falling behind steps the video down: the encoder started again for its key frame at the next rate, one step for each start however many fall behind on it, no lower than the last', async () => {
+  const { video, src, encoders, keyed, fall } = await rated()
+  const slow = viewer()
+  const slower = viewer()
+  video.join(src, slow)
+  video.join(src, slower)
+  await settle()
+  await keyed(slow, slower)
+  expect(stepOf(encoders[0])).toBe(0)
+  for (let n = 1; n <= VIDEO_RATES.length; n++) {
+    await fall(slow, slower)
+    expect(encoders).toHaveLength(n + 1)
+    expect(stepOf(encoders.at(-1))).toBe(Math.min(n, VIDEO_RATES.length - 1))
+    expect(encoders.at(-1)?.argv).toEqual([
+      '/usr/bin/ffmpeg',
+      ...ffmpegArgs({
+        display: 104,
+        zscale: true,
+        rate: VIDEO_RATES[Math.min(n, VIDEO_RATES.length - 1)] as VideoRate,
+      }),
+    ])
+  }
+})
+
+test('no viewer behind for STEP_UP_MS: one step back up, the encoder started again; behind again within it: back down, and the next step up waits twice as long (at most MAX_STEP_UP_MS); one that held: the next after STEP_UP_MS again', async () => {
+  const { video, src, encoders, advance, keyed, fall, frame } = await rated()
+  const a = viewer()
+  video.join(src, a)
+  await settle()
+  await keyed(a)
+  await fall(a)
+  await fall(a)
+  expect(stepOf(encoders.at(-1))).toBe(2)
+  /** Steady for `ms` after the last fall or step: no step up before it, one then. */
+  const upAfter = async (ms: number) => {
+    const before = encoders.length
+    await advance(ms - MIN_RESTART_MS - 1)
+    await frame(a)
+    expect(encoders).toHaveLength(before)
+    await advance(1)
+    await frame(a)
+    expect(encoders).toHaveLength(before + 1)
+    await keyed(a)
+  }
+  // the second fall was MIN_RESTART_MS before its encoder started
+  await upAfter(STEP_UP_MS)
+  expect(stepOf(encoders.at(-1))).toBe(1)
+  // it does not hold: behind again at once, back down; each such step up waits twice as long as the last
+  let wait = STEP_UP_MS
+  for (let i = 0; i < 6; i++) {
+    await fall(a)
+    expect(stepOf(encoders.at(-1))).toBe(2)
+    wait = Math.min(wait * 2, MAX_STEP_UP_MS)
+    await upAfter(wait)
+    expect(stepOf(encoders.at(-1))).toBe(1)
+  }
+  expect(wait).toBe(MAX_STEP_UP_MS)
+  // this one holds: up again after as long, steady from the step up itself
+  await advance(MIN_RESTART_MS)
+  await upAfter(MAX_STEP_UP_MS)
+  expect(stepOf(encoders.at(-1))).toBe(0)
+  // the best: no step past it; fallen behind long after, the next step up after STEP_UP_MS
+  await advance(MAX_STEP_UP_MS * 2)
+  await frame(a)
+  expect(stepOf(encoders.at(-1))).toBe(0)
+  await fall(a)
+  expect(stepOf(encoders.at(-1))).toBe(1)
+  await upAfter(STEP_UP_MS)
+  expect(stepOf(encoders.at(-1))).toBe(0)
+})
+
+test('a viewer still behind, or waiting for a key frame, holds the step up back; one that never falls behind never moves the rate', async () => {
+  const { video, src, encoders, advance, keyed, fall, frame } = await rated()
+  const a = viewer()
+  video.join(src, a)
+  await settle()
+  await keyed(a)
+  await fall(a)
+  expect(stepOf(encoders.at(-1))).toBe(1)
+  // behind again, not caught up: no step up however long
+  for (let i = 0; i < MAX_AHEAD + 2; i++) encoders.at(-1)?.write(delta())
+  await settle()
+  await advance(STEP_UP_MS * 2)
+  encoders.at(-1)?.write(delta())
+  await settle()
+  await advance(0)
+  expect(encoders).toHaveLength(2)
+
+  const other = await rated()
+  const b = viewer()
+  other.video.join(other.src, b)
+  await settle()
+  await other.keyed(b)
+  for (let i = 0; i < 10; i++) {
+    await other.advance(STEP_UP_MS)
+    await other.frame(b)
+  }
+  expect(other.encoders).toHaveLength(1)
+  expect(stepOf(other.encoders[0])).toBe(0)
+  void frame
+})
+
+test('a desktop’s rate kept for its next view within RATE_KEPT_MS (its page shown again, its socket opened again): it starts there; after that at the best', async () => {
+  const { video, src, encoders, advance, keyed, fall } = await rated()
+  const a = viewer()
+  video.join(src, a)
+  await settle()
+  await keyed(a)
+  await fall(a)
+  expect(stepOf(encoders.at(-1))).toBe(1)
+  video.leave(src.pane, a)
+  await advance(RATE_KEPT_MS - 1)
+  const b = viewer()
+  video.join(src, b)
+  await settle()
+  expect(encoders).toHaveLength(3)
+  expect(stepOf(encoders.at(-1))).toBe(1)
+  video.leave(src.pane, b)
+  await advance(RATE_KEPT_MS)
+  video.join(src, viewer())
+  await settle()
+  expect(stepOf(encoders.at(-1))).toBe(0)
+  // another desktop's is its own
+  video.join({ ...src, pane: 'w0:p2', display: 105 }, viewer())
+  await settle()
+  expect(stepOf(encoders.at(-1))).toBe(0)
+})
+
+test('the board’s log: a line a minute on a desktop’s video while there is something to say (viewers fallen behind, encoder starts, steps down and up, the rate now); none at the best with nothing to say', async () => {
+  const { video, src, logs, advance, keyed, fall, frame } = await rated()
+  const a = viewer()
+  video.join(src, a)
+  await settle()
+  await keyed(a)
+  const minutes = () => logs.filter(l => l.includes('last minute'))
+  await advance(VIDEO_LOG_MS)
+  await frame(a)
+  expect(minutes()).toEqual([])
+  await fall(a)
+  await advance(VIDEO_LOG_MS)
+  expect(minutes()).toEqual([
+    'desktop :104: video, last minute: behind 1, starts 1, down 1, up 0; now 4M (step 2 of 5)',
+  ])
+  // at a lower rate: a line each minute, saying so
+  await advance(VIDEO_LOG_MS)
+  expect(minutes().at(-1)).toBe(
+    'desktop :104: video, last minute: behind 0, starts 0, down 0, up 0; now 4M (step 2 of 5)',
+  )
+  // gone with the video
+  video.leave(src.pane, a)
+  await advance(VIDEO_LOG_MS * 3)
+  expect(minutes()).toHaveLength(2)
 })
 
 test('a decoder that starts again asks for a key frame: it gets none of the frames before it, and two asks make one start', async () => {

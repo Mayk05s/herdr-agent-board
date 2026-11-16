@@ -1,7 +1,8 @@
 // An agent's display as H.264 video (services/desktop-video.ts on the server, models/desk-video.ts
 // in the page), the way a remote desktop's app shows one: ffmpeg grabs the X display (x11grab, its
 // pointer drawn in) and libx264 encodes it for latency (ultrafast, zerolatency: no B-frames, no
-// lookahead, each frame out as soon as it is made), 30 frames a second, at most 8 Mbit/s. One
+// lookahead, each frame out as soon as it is made), 30 frames a second, at most 8 Mbit/s, less
+// for a link that does not keep up (VIDEO_RATES; services/desktop-video.ts steps through them). One
 // key frame, at the start: the link is TCP and loses nothing, so the next one is made only when a
 // viewer needs one (a new viewer, a decoder that starts again), by starting the encoder again.
 //
@@ -19,22 +20,46 @@ import { SCREEN } from './desktop.ts'
 
 /** Frames a second: 60 does not keep up on one core (the grab, the colours and x264 take their turn). */
 export const VIDEO_FPS = 30
-/** x264's quality (lower is better): text crisp once still; while it moves the ceiling below sets it. */
-export const VIDEO_CRF = 23
-/** At most this many bits a second, and in a quarter second's buffer: a frame never much more than 250 KB. */
-export const VIDEO_MAXRATE = '8M'
-export const VIDEO_BUFSIZE = '2M'
+/**
+ * A rate the encoder runs at: x264's quality (`crf`, lower is better: text crisp once still), and
+ * at most `maxrate` bits a second with a quarter second's of them as its buffer (`bufsize`: no frame
+ * much more than that), which sets the picture while it moves.
+ */
+export interface VideoRate {
+  crf: number
+  maxrate: string
+  bufsize: string
+}
+
+/**
+ * The rates, best first: 8 Mbit/s as it always was, then halves down to 500 kbit/s, for a link that
+ * does not keep up. A page scrolling at 1440x900 needs 2 to 8 Mbit/s at its best; below that it
+ * blurs while it moves instead of standing still. Once still, each comes back to text as crisp
+ * (SSIM 0.9995 to the screen, a page's text scrolled and stopped, on ffmpeg 4.4's x264): at once at
+ * 8 and 4M, in half a second at 2M, 2 s at 1M, 4.5 s at 500k, where crf 26 (rather than 23) is
+ * there 0.7 s sooner and as readable. A key frame: 130 KB at the best, 10 KB at the last.
+ */
+export const VIDEO_RATES: readonly VideoRate[] = [
+  { crf: 23, maxrate: '8M', bufsize: '2M' },
+  { crf: 23, maxrate: '4M', bufsize: '1M' },
+  { crf: 23, maxrate: '2M', bufsize: '500k' },
+  { crf: 23, maxrate: '1M', bufsize: '250k' },
+  { crf: 26, maxrate: '500k', bufsize: '125k' },
+]
+const BEST = VIDEO_RATES[0] as VideoRate
 /** x264's threads (slices of a frame, each on a core of its own: no frame waits for another). */
 export const VIDEO_THREADS = 4
 
 /**
- * ffmpeg's arguments for the display `:display` (its cookie in XAUTHORITY): x11grab at VIDEO_FPS,
+ * ffmpeg's arguments for the display `:display` (its cookie in XAUTHORITY), at `rate` (the best by
+ * default): x11grab at VIDEO_FPS,
  * the whole screen and the pointer; its colours made BT.709 4:2:0 by zimg where ffmpeg has it
  * (`zscale`: three times swscale's speed, which does not keep 30 a second at this size on an arm64
  * core), else by swscale; libx264 constrained baseline (any decoder, Safari's hardware too), one
  * key frame; FLV on stdout, each frame written out as it is made.
  */
-export function ffmpegArgs(o: { display: number; zscale: boolean }): string[] {
+export function ffmpegArgs(o: { display: number; zscale: boolean; rate?: VideoRate }): string[] {
+  const rate = o.rate ?? BEST
   return [
     '-hide_banner',
     '-nostdin',
@@ -73,11 +98,11 @@ export function ffmpegArgs(o: { display: number; zscale: boolean }): string[] {
     '-x264-params',
     'keyint=infinite:scenecut=0',
     '-crf',
-    String(VIDEO_CRF),
+    String(rate.crf),
     '-maxrate',
-    VIDEO_MAXRATE,
+    rate.maxrate,
     '-bufsize',
-    VIDEO_BUFSIZE,
+    rate.bufsize,
     '-threads',
     String(VIDEO_THREADS),
     '-colorspace',
