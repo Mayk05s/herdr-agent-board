@@ -66,6 +66,46 @@ describe('the conversation scroll', () => {
     expect(box.top).toBe(500)
   })
 
+  test('on a phone, the box getting shorter (the keyboard up, the message growing) keeps the newest in sight; scrolled up, it stays put', () => {
+    const box = { height: 1000, client: 400, top: 0, writes: 0 }
+    const view: ScrollBox = {
+      get scrollTop() {
+        return box.top
+      },
+      set scrollTop(value: number) {
+        box.writes++
+        box.top = Math.max(0, Math.min(value, box.height - box.client))
+      },
+      get scrollHeight() {
+        return box.height
+      },
+      get clientHeight() {
+        return box.client
+      },
+    }
+    const scroll = new ConversationScroll()
+    scroll.opened()
+    scroll.rendered(view, from(DETAIL))
+    expect(box.top).toBe(600)
+    // The keyboard comes up: the box is half as tall, the newest messages stay above the message box.
+    box.client = 200
+    scroll.resized(view)
+    expect(box.top).toBe(800)
+    // At the bottom already (it got taller, the browser kept it there): nothing to write, no scroll.
+    const writes = box.writes
+    box.client = 400
+    box.top = 600
+    scroll.resized(view)
+    expect(box.writes).toBe(writes)
+    // Scrolled up to read: the keyboard leaves it where the reader is.
+    view.scrollTop = 300
+    scroll.scrolled(view)
+    box.client = 150
+    scroll.resized(view)
+    expect(box.top).toBe(300)
+    scroll.resized(null)
+  })
+
   test('a menu opened with the sheet open and its body overflowing stays open through the re-render', async () => {
     const side = reactMenuSide()
     try {

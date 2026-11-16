@@ -23,6 +23,7 @@ import { useGoToSession } from '../../hooks/useGoToSession.ts'
 import type { HelpersUi } from '../../hooks/useHelpers.ts'
 import { useKeepFocus } from '../../hooks/useKeepFocus.ts'
 import { type OpenLaunch, useNewSession } from '../../hooks/useNewSession.ts'
+import { usePhoneKeyboard } from '../../hooks/usePhoneKeyboard.ts'
 import { useSessionActions } from '../../hooks/useSessionActions.ts'
 import { type DetailSnapshot, useSessionDetail } from '../../hooks/useSessionDetail.ts'
 import { useT } from '../../i18n/I18nProvider.tsx'
@@ -186,6 +187,18 @@ export function Sheet(slots: SheetSlots) {
   useLayoutEffect(() => {
     if (composer.outbox.foot) scroll.opened()
   }, [scroll, composer.outbox.foot])
+  // A phone's keyboard (the sheet then takes what shows above it, styles/pwa.css): the conversation
+  // getting shorter, as the keyboard comes up or the message box grows, keeps the newest messages
+  // in sight when they were. Elsewhere its height changes nothing, as before.
+  const phone = usePhoneKeyboard()
+  // biome-ignore lint/correctness/useExhaustiveDependencies: moved beside the browser or back, the conversation is a new box
+  useLayoutEffect(() => {
+    const box = body.current
+    if (!phone || !box || typeof ResizeObserver === 'undefined') return
+    const watch = new ResizeObserver(() => scroll.resized(box))
+    watch.observe(box)
+    return () => watch.disconnect()
+  }, [phone, scroll, chatHost])
   // The helpers window lists what the open session's detail says.
   const fed = open !== null && detail.value.key === open ? detail.value.data : null
   useLayoutEffect(() => helpers?.engine.feed({ key: open, data: fed }), [helpers, open, fed])

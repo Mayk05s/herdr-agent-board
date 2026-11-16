@@ -172,3 +172,40 @@ body {
 .login-form .phone-action { margin-top: 6px; }
 .login-form .login-other { margin-top: 0; }
 .phone-action + .login-form { margin-top: 20px; }
+
+/* ------------------------------------------------------------ typing on a phone */
+/* A phone in the hand only (a narrow screen and a finger): not a tablet, not the computer. */
+@media (max-width: 760px) and (pointer: coarse) {
+  /* iOS zooms the page into a field whose text is under 16px as it takes the focus, and leaves
+     it zoomed and slid sideways after: every field is 16px here (the login's keep their 17px),
+     outranking the sizes the other sheets give theirs, important ones too. Pinching still zooms. */
+  :root input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="button"], [type="submit"], [type="reset"], [type="image"], .login-input),
+  :root textarea,
+  :root select { font-size: 16px !important; }
+
+  /* The message box: its text across the box's whole width, its buttons on a row under it.
+     Beside them the text had a third of the width, starting far from the box's left edge. */
+  #sheet .composer-box { flex-wrap: wrap; row-gap: 2px; padding: 6px; }
+  #sheet .composer textarea { order: -1; flex: 1 0 100%; min-width: 0; margin: 3px 0 4px; padding: 0 8px; }
+  #sheet .composer-box .attach,
+  #sheet .composer-box .aside-toggle { margin-left: 0; }
+  #sheet .composer-box > .draft-clear,
+  #sheet .composer-box > .draft-clear[hidden] + .send { margin-left: auto; }
+
+  /* The keyboard up (hooks/usePhoneKeyboard.ts): the sheet takes what shows above it, from where
+     the browser slid what shows to. Nothing of it is under the keyboard, so the browser has
+     nothing to slide into sight as the text grows. */
+  :root[data-keyboard] .sheet {
+    top: calc(var(--vv-top, 0px) + 8px + env(safe-area-inset-top));
+    bottom: auto;
+    height: calc(var(--vv-height, 100dvh) - 16px - env(safe-area-inset-top));
+  }
+  /* Typing in the message box: the conversation keeps the room. Until the keyboard goes, what is
+     neither the conversation, the box nor the session's name and pills gives way: the actions,
+     the meter, the facts under the name, the card's fields, the helpers. */
+  :root[data-keyboard] #sheet:has(.composer textarea:focus) :is(.composer-actions, .session-meter, .sheet-meta, .sheet-fold, .sheet-card, .sheet-helpers) { display: none; }
+  /* What else stands over the conversation keeps to a share of what shows, not of the screen. */
+  :root[data-keyboard] #sheet .sheet-question { max-height: calc(var(--vv-height, 100dvh) * 0.24); }
+  :root[data-keyboard] #sheet .aside-deck { max-height: calc(var(--vv-height, 100dvh) * 0.3); }
+  :root[data-keyboard] #sheet .composer textarea { max-height: calc(var(--vv-height, 100dvh) * 0.3); }
+}

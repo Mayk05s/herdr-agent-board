@@ -3,6 +3,8 @@
 // anew while the reader is near the bottom. A render that does not draw it anew (a menu opening,
 // the composer growing) leaves it where it is: a scroll then would close the menu just opened
 // (components/menu/menu-engine.ts closes every menu on a scroll outside it, as upstream's does).
+// On a phone only, the box getting another height (the keyboard, the message box growing) keeps it
+// at the bottom when it was there (`resized`, which the sheet calls there alone).
 
 /** The conversation's scroll box. */
 export interface ScrollBox {
@@ -29,6 +31,14 @@ export class ConversationScroll {
   /** The reader scrolled: near the bottom it stays there. */
   scrolled(box: ScrollBox): void {
     this.stick = box.scrollHeight - box.scrollTop - box.clientHeight < NEAR
+  }
+
+  /**
+   * The box itself got another height (on a phone: the keyboard came up, the message box grew a
+   * line): at the bottom it stays there, so the newest messages stay above the message box.
+   */
+  resized(box: ScrollBox | null): void {
+    if (box && this.stick && box.scrollHeight - box.scrollTop - box.clientHeight > 0) box.scrollTop = box.scrollHeight
   }
 
   /**
