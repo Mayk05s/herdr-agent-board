@@ -1714,6 +1714,9 @@ test('a board ask that is not the browser’s: the panel’s "needs you" as befo
 describe('the picture as H.264 video, where the page decodes it (WebCodecs)', () => {
   const KEY = [...[0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x28, 0xda], ...[0, 0, 0, 1, 0x68, 0xce], ...[0, 0, 0, 1, 0x65, 0x88]]
   const keyFrame = (seq: number) => [...videoMessage(seq, { key: true, data: Uint8Array.from(KEY) })]
+  const deltaFrame = (seq: number) => [
+    ...videoMessage(seq, { key: false, data: Uint8Array.of(0, 0, 0, 1, 0x41, 0x9a) }),
+  ]
   type Decoder = { state: string; init: VideoDecoderInit; chunks: { type: string; timestamp: number }[] }
   let decoders: Decoder[] = []
   /** WebCodecs as the page has it, the decoder the test's own; `supported`: what it says of the codec. */
@@ -1869,10 +1872,8 @@ describe('the picture as H.264 video, where the page decodes it (WebCodecs)', ()
     }
   })
 
-  test('the video stops after it drew (no frame, no error, as on the owner’s iPad): a key frame asked for, then its socket opened again, then, stuck again within a minute, the VNC picture; each said in the board’s log', async () => {
-    const STALL_MS: number = Reflect.get(await import('../../web/src/models/desk-video.ts'), 'STALL_MS') ?? 3000
-    const calls = answers()
-    // the page's seconds, run here; its clock moved on by the test
+  /** The page's seconds, run by the test: its clock moved on by `later`, each second's work done then. */
+  function pageClock() {
     const real = { now: Date.now, setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval }
     const every = new Map<number, () => void>()
     let ids = 1 << 20
@@ -1884,12 +1885,25 @@ describe('the picture as H.264 video, where the page decodes it (WebCodecs)', ()
       return ids
     }) as unknown as typeof setInterval
     globalThis.clearInterval = ((id: number) => every.delete(id)) as unknown as typeof clearInterval
-    const later = (ms: number) => {
-      shift += ms
-      flush(() => {
-        for (const fn of [...every.values()]) fn()
-      })
+    return {
+      later(ms: number) {
+        shift += ms
+        flush(() => {
+          for (const fn of [...every.values()]) fn()
+        })
+      },
+      restore() {
+        Date.now = real.now
+        globalThis.setInterval = real.setInterval
+        globalThis.clearInterval = real.clearInterval
+      },
     }
+  }
+
+  test('the video stops after it drew (frames given, none out, no error, as on the owner’s iPad): a key frame asked for, then, nothing out of it either, its socket opened again, then, stuck again within a minute, the VNC picture; each said in the board’s log', async () => {
+    const STALL_MS: number = Reflect.get(await import('../../web/src/models/desk-video.ts'), 'STALL_MS') ?? 3000
+    const calls = answers()
+    const { later, restore } = pageClock()
     try {
       render({ desktop: desktop(), open: true })
       const [vnc, video] = FakeSocket.made
@@ -1897,12 +1911,15 @@ describe('the picture as H.264 video, where the page decodes it (WebCodecs)', ()
       video?.serve(keyFrame(1))
       await settle()
       decoded(1)
+      video?.serve(deltaFrame(2))
       later(STALL_MS - 1)
       expect(texts(video)).toEqual(['a1'])
       later(1)
       expect(texts(video)).toEqual(['a1', 'k'])
       expect(video?.closed).toBe(false)
-      // no key frame came: the video's socket opened again; no VNC picture meanwhile
+      // the key frame came, and nothing out of it either: the video's socket opened again; no VNC picture meanwhile
+      video?.serve(keyFrame(3))
+      await settle()
       later(STALL_MS)
       expect(video?.closed).toBe(true)
       expect(FakeSocket.made).toHaveLength(3)
@@ -1914,8 +1931,11 @@ describe('the picture as H.264 video, where the page decodes it (WebCodecs)', ()
       await settle()
       decoded(5)
       expect(texts(again)).toEqual(['a5'])
+      again?.serve(deltaFrame(6))
       later(STALL_MS)
       expect(texts(again)).toEqual(['a5', 'k'])
+      again?.serve(keyFrame(7))
+      await settle()
       later(STALL_MS)
       expect(again?.closed).toBe(true)
       expect(FakeSocket.made).toHaveLength(3)
@@ -1925,15 +1945,52 @@ describe('the picture as H.264 video, where the page decodes it (WebCodecs)', ()
       expect(logged(calls)).toEqual([
         'browser view a b%: h264 avc1.42C028',
         'browser view a b%: h264 started again (no frame in 3 s)',
+        'browser view a b%: h264 avc1.42C028',
         'browser view a b%: h264 opened again (no frame in 3 s after a key frame was asked for)',
         'browser view a b%: h264 avc1.42C028',
         'browser view a b%: h264 started again (no frame in 3 s)',
+        'browser view a b%: h264 avc1.42C028',
         'browser view a b%: VNC picture (no frame in 3 s after a key frame was asked for)',
       ])
     } finally {
-      Date.now = real.now
-      globalThis.setInterval = real.setInterval
-      globalThis.clearInterval = real.clearInterval
+      restore()
+    }
+  })
+
+  test('nothing comes on the video for seconds at a time (a slow link: the board holds frames back, then sends a key frame), again and again: the video stays, nothing asked, no VNC picture; no frame at all for SILENT_MS: its socket opened again', async () => {
+    const mod = await import('../../web/src/models/desk-video.ts')
+    const STALL_MS: number = Reflect.get(mod, 'STALL_MS') ?? 3000
+    const SILENT_MS: number = Reflect.get(mod, 'SILENT_MS') ?? 10_000
+    const calls = answers()
+    const { later, restore } = pageClock()
+    try {
+      render({ desktop: desktop(), open: true })
+      const [vnc, video] = FakeSocket.made
+      vncHello(vnc)
+      video?.serve(keyFrame(1))
+      await settle()
+      decoded(1)
+      for (let n = 2; n <= 5; n++) {
+        later(STALL_MS + 1000)
+        video?.serve(deltaFrame(n))
+        decoded(n)
+      }
+      expect(texts(video)).toEqual(['a1', 'a2', 'a3', 'a4', 'a5'])
+      expect(video?.closed).toBe(false)
+      expect(FakeSocket.made).toHaveLength(2)
+      expect(askedPicture(vnc)).toBe(false)
+      expect(byClass('desk-meter')?.textContent).toContain('h264')
+      later(SILENT_MS)
+      expect(video?.closed).toBe(true)
+      expect(FakeSocket.made).toHaveLength(3)
+      expect(askedPicture(vnc)).toBe(false)
+      await settle()
+      expect(logged(calls)).toEqual([
+        'browser view a b%: h264 avc1.42C028',
+        `browser view a b%: h264 opened again (no frame came in ${SILENT_MS / 1000} s)`,
+      ])
+    } finally {
+      restore()
     }
   })
 

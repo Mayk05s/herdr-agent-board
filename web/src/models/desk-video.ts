@@ -5,11 +5,13 @@
 // the decoder before it is set up; each frame decoded is answered with its number, so the board
 // sends no more than the page takes. A decoder that fails after it worked starts again from a key
 // frame, which it asks the board for; one that never decoded a frame, a codec it does not take, or
-// three failures in a minute, and the view falls back to the VNC picture (`failed`). The board's
-// encoder makes 30 frames a second however still the screen is, so a decoder that drew and then
-// gives nothing out for STALL_MS (Safari's on an iPad did, with no error) has stopped: it starts
-// again the same way (`check`, each second), and, no frame STALL_MS after that either, the view
-// opens its video again (`stalled`).
+// three failures in a minute, and the view falls back to the VNC picture (`failed`). A decoder that
+// drew and then gives nothing out of a frame it was given for STALL_MS (Safari's on an iPad did,
+// with no error) has stopped: it starts again the same way (`check`, each second), and, nothing out
+// of the key frame it gets either, the view opens its video again (`stalled`). A decoder that was
+// given nothing has not stopped: on a slow link the board holds frames back until the link catches
+// up and then sends a key frame, seconds later, and that is waited for; no frame at all for
+// SILENT_MS, and the view opens its video again too.
 import { ackText, avcCodec, KEY_TEXT, readVideoMessage } from '../../../src/core/desktop-video.ts'
 
 /** WebCodecs as the page has it; tests hand in their own. */
@@ -44,8 +46,14 @@ export interface DeskVideoEvents {
 /** Failures a decoder may have in a minute (it starts again after each) before the view gives up on video. */
 const MAX_FAILURES = 3
 const FAILURES_MS = 60_000
-/** No frame out of a decoder that drew this long: it has stopped (the board's encoder makes 30 a second, a still screen too). */
+/** No frame out of a decoder that drew, this long after it was given one: it has stopped. */
 export const STALL_MS = 3000
+/**
+ * No frame drawn this long, whatever the reason: the view opens its video again. The board's encoder
+ * makes 30 a second, a still screen too; a link that does not keep up has it hold them back, then
+ * send a key frame: seconds without a frame, never this many.
+ */
+export const SILENT_MS = 10_000
 
 type Message = NonNullable<ReturnType<typeof readVideoMessage>>
 
@@ -59,8 +67,10 @@ export class DeskVideo {
   private decoded = 0
   private failures: number[] = []
   private over = false
-  /** When a frame last came out (or the decoder last started again for want of one). */
+  /** When a frame last came out. */
   private lastOut = 0
+  /** The frames given to the decoder that have not come out of it, by number, each with when. */
+  private given: { seq: number; at: number }[] = []
   /** It started again for want of a frame and none came since: when. */
   private askedAt: number | null = null
 
@@ -82,28 +92,26 @@ export class DeskVideo {
   }
 
   /**
-   * Each second or so while the video is on: a decoder that drew and has given nothing out for
-   * STALL_MS starts again from a key frame it asks for; still nothing STALL_MS after that, `stalled`.
-   * Before its first frame the view's own wait applies.
+   * Each second or so while the video is on: a decoder that drew and has given nothing out of a frame
+   * it was given STALL_MS ago starts again from a key frame it asks for; nothing out of that one
+   * either, `stalled`. Given nothing, it waits (the link, not the decoder); no frame at all for
+   * SILENT_MS, `stalled` too. Before its first frame the view's own wait applies.
    */
   check(): void {
     if (this.over || !this.decoded) return
     const at = this.now()
-    if (at - this.lastOut < STALL_MS) return
-    const secs = STALL_MS / 1000
-    if (this.askedAt === null) {
+    const oldest = this.given[0]
+    if (oldest && at - oldest.at >= STALL_MS) {
+      const secs = STALL_MS / 1000
+      if (this.askedAt !== null) {
+        this.stall(`no frame in ${secs} s after a key frame was asked for`)
+        return
+      }
       this.askedAt = at
-      this.lastOut = at
       this.again(`no frame in ${secs} s`)
       return
     }
-    const why = `no frame in ${secs} s after a key frame was asked for`
-    if (!this.events.stalled) {
-      this.fail(why)
-      return
-    }
-    this.close()
-    this.events.stalled(why)
+    if (at - this.lastOut >= SILENT_MS) this.stall(`no frame came in ${SILENT_MS / 1000} s`)
   }
 
   /** The view closed (or went to VNC): the decoder let go. */
@@ -133,6 +141,7 @@ export class DeskVideo {
       decoder.decode(
         new this.codecs.EncodedVideoChunk({ type: m.key ? 'key' : 'delta', timestamp: m.seq, data: m.data }),
       )
+      this.given.push({ seq: m.seq, at: this.now() })
     } catch (err) {
       this.broken(err)
     }
@@ -183,6 +192,8 @@ export class DeskVideo {
     this.lastOut = this.now()
     this.askedAt = null
     const seq = frame.timestamp
+    // out in order: what was given before it is out too, or dropped
+    this.given = this.given.filter(g => g.seq > seq)
     try {
       this.events.draw(frame)
     } finally {
@@ -214,6 +225,16 @@ export class DeskVideo {
     this.events.restarted?.(why)
   }
 
+  /** No frames to be had this way: the view opens its video again (`stalled`), or, where it does not, gives it up. */
+  private stall(why: string): void {
+    if (!this.events.stalled) {
+      this.fail(why)
+      return
+    }
+    this.close()
+    this.events.stalled(why)
+  }
+
   private fail(why: string): void {
     if (this.over) return
     this.close()
@@ -223,6 +244,7 @@ export class DeskVideo {
   private release(): void {
     const d = this.decoder
     this.decoder = null
+    this.given = []
     if (d && d.state !== 'closed')
       try {
         d.close()

@@ -194,7 +194,7 @@ test('the decoder failing before it decoded a frame: given up (the device cannot
   expect(failed).toEqual(['the decoder failed: and again'])
 })
 
-test('a decoder that drew and then gives nothing out, with no error (Safari’s on the owner’s iPad): STALL_MS on it starts again from a key frame it asks for, said; still nothing as long after: stalled', async () => {
+test('a decoder that drew and then gives nothing out of what it is given, with no error (Safari’s on the owner’s iPad): STALL_MS on a frame it has starts again from a key frame it asks for, said; the key frame given and nothing out of it either: stalled', async () => {
   const STALL_MS: number = Reflect.get(await import('../../web/src/models/desk-video.ts'), 'STALL_MS') ?? 3000
   const fake = fakeCodecs()
   const sent: string[] = []
@@ -218,7 +218,7 @@ test('a decoder that drew and then gives nothing out, with no error (Safari’s 
   video.check()
   expect(sent).toEqual([])
   fake.decoders[0]?.out(1)
-  // frames out: nothing to do; then none for STALL_MS
+  // frames out: nothing to do; then a frame given and none out for STALL_MS
   video.receive(delta(2))
   clock += STALL_MS - 1
   video.check()
@@ -237,14 +237,21 @@ test('a decoder that drew and then gives nothing out, with no error (Safari’s 
   await settle()
   expect(fake.decoders).toHaveLength(2)
   fake.decoders[1]?.out(3)
+  video.receive(delta(4))
   clock += STALL_MS - 1
   video.check()
   expect(said).toHaveLength(1)
-  // stuck again, and no key frame comes after the ask either: stalled (the view opens its video again)
+  // stuck again on what it was given: a key frame asked for; it comes, and nothing comes out of it either: stalled
   clock += 1
   video.check()
   expect(sent.at(-1)).toBe(KEY_TEXT)
-  clock += STALL_MS
+  video.receive(key(5))
+  await settle()
+  expect(fake.decoders[2]?.chunks.map(c => c.timestamp)).toEqual([5])
+  clock += STALL_MS - 1
+  video.check()
+  expect(said.filter(s => s.startsWith('stalled'))).toEqual([])
+  clock += 1
   video.check()
   expect(said.at(-1)).toBe(`stalled: no frame in ${STALL_MS / 1000} s after a key frame was asked for`)
   // said once; nothing more from it
@@ -252,6 +259,84 @@ test('a decoder that drew and then gives nothing out, with no error (Safari’s 
   video.check()
   expect(said.filter(s => s.startsWith('stalled'))).toHaveLength(1)
   expect(said.filter(s => s.startsWith('failed'))).toEqual([])
+})
+
+test('nothing comes for a while (a slow link: the board holds its frames back until the link catches up, or a key frame crosses it): a decoder with nothing to decode has not stopped: no key frame asked, not started again, such waits not counted against it; what comes then is drawn', async () => {
+  const STALL_MS: number = Reflect.get(await import('../../web/src/models/desk-video.ts'), 'STALL_MS') ?? 3000
+  const fake = fakeCodecs()
+  const sent: string[] = []
+  const said: string[] = []
+  let clock = 0
+  const video = new DeskVideo(
+    fake.codecs,
+    text => sent.push(text),
+    {
+      draw() {},
+      failed: why => said.push(`failed: ${why}`),
+      restarted: why => said.push(`restarted: ${why}`),
+      stalled: why => said.push(`stalled: ${why}`),
+    },
+    () => clock,
+  )
+  video.receive(key(1))
+  await settle()
+  fake.decoders[0]?.out(1)
+  // four waits in a minute, each longer than STALL_MS, all it was given out of it
+  for (let n = 2; n <= 5; n++) {
+    clock += STALL_MS + 1000
+    video.check()
+    video.receive(delta(n))
+    fake.decoders[0]?.out(n)
+  }
+  expect(said).toEqual([])
+  expect(sent).toEqual(['a1', 'a2', 'a3', 'a4', 'a5'])
+  expect(fake.decoders).toHaveLength(1)
+  expect(fake.decoders[0]?.state).toBe('configured')
+  // after a key frame it asked for (its decoder failed): the frames sent before it still come (answered,
+  // not decoded) and the key frame takes its time over the link: nothing asked again meanwhile
+  fake.decoders[0]?.fail('Decoding error.')
+  expect(sent.at(-1)).toBe(KEY_TEXT)
+  clock += STALL_MS
+  video.receive(delta(6))
+  clock += STALL_MS
+  video.check()
+  expect(sent.slice(-2)).toEqual([KEY_TEXT, 'a6'])
+  video.receive(key(7))
+  await settle()
+  fake.decoders[1]?.out(7)
+  expect(said).toEqual(['restarted: the decoder failed: Decoding error.'])
+  expect(sent.at(-1)).toBe('a7')
+})
+
+test('no frame at all for SILENT_MS, though the decoder had nothing to stop on (the video’s socket brings none): stalled (the view opens its video again); without that, given up', async () => {
+  const mod = await import('../../web/src/models/desk-video.ts')
+  const SILENT_MS: number = Reflect.get(mod, 'SILENT_MS') ?? 10_000
+  for (const opens of [true, false]) {
+    const fake = fakeCodecs()
+    const said: string[] = []
+    let clock = 0
+    const video = new DeskVideo(
+      fake.codecs,
+      () => {},
+      {
+        draw() {},
+        failed: why => said.push(`failed: ${why}`),
+        restarted: why => said.push(`restarted: ${why}`),
+        ...(opens ? { stalled: (why: string) => said.push(`stalled: ${why}`) } : {}),
+      },
+      () => clock,
+    )
+    video.receive(key(1))
+    await settle()
+    fake.decoders[0]?.out(1)
+    clock += SILENT_MS - 1
+    video.check()
+    expect(said).toEqual([])
+    clock += 1
+    video.check()
+    expect(said).toEqual([`${opens ? 'stalled' : 'failed'}: no frame came in ${SILENT_MS / 1000} s`])
+    expect(fake.decoders[0]?.state).toBe('closed')
+  }
 })
 
 test('the decoder failing after it drew is said too (the board’s log), as it starts again', async () => {
