@@ -412,10 +412,11 @@ function codexPermission(lines: string[]): PermissionDialog | null {
   if (choices.length === 3 && !/^\s*(?:›\s+)?2\. Yes, and don't ask again.+\(p\)$/.test(choices[1] ?? '')) return null
   // Require the entire command and the choices to fit in the card.
   if (body.length > BODY_LINES || body.some(line => line.length > LINE)) return null
+  // "Yes" alone, so the sheet draws it as a one-time yes, not as "don't ask again" (permissionTone).
   const options = [
     {
       n: 1,
-      label: 'Yes, proceed (y)',
+      label: 'Yes',
       text: 'Yes, proceed (y)',
       checked: null,
       cursor: /^\s*›/.test(choices[0] ?? ''),

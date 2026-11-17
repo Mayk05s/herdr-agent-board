@@ -2,7 +2,7 @@ import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createCodexHome } from '../../src/adapters/codex-home.ts'
+import { cachedCodexModels, createCodexHome } from '../../src/adapters/codex-home.ts'
 
 const ID = '01a15a8a-bd97-7701-a7f7-401e4bec3147'
 const said = (role: string, text: string) =>
@@ -65,4 +65,39 @@ test('reads the rollout header folder, including Cyrillic, quotes and percent si
   const home = createCodexHome(root)
   expect(await home.cwdOf(ID.toUpperCase())).toBe(cwd)
   expect(await home.cwdOf('missing')).toBeNull()
+})
+
+test('the models of models_cache.json Codex lists, with the efforts each takes (#426); none when it is missing or broken', async () => {
+  const { root } = fixture()
+  expect(await cachedCodexModels(root)).toEqual({})
+  writeFileSync(join(root, 'models_cache.json'), '{"models": [')
+  expect(await cachedCodexModels(root)).toEqual({})
+  const level = (effort: unknown) => ({ effort, description: '' })
+  writeFileSync(
+    join(root, 'models_cache.json'),
+    JSON.stringify({
+      models: [
+        {
+          slug: 'gpt-6.1-sol',
+          visibility: 'list',
+          supported_reasoning_levels: [level('low'), level('high'), level('low')],
+        },
+        { slug: 'gpt-6-luna', visibility: 'list' },
+        // Hidden ones, names a command line would not take, efforts that are no word: left out.
+        { slug: 'gpt-internal', visibility: 'hide', supported_reasoning_levels: [level('low')] },
+        { slug: 'two words', visibility: 'list' },
+        {
+          slug: 'gpt-6-astra',
+          visibility: 'list',
+          supported_reasoning_levels: [level('x"; rm'), level(3), level('max')],
+        },
+        'gpt-5',
+      ],
+    }),
+  )
+  expect(await cachedCodexModels(root)).toEqual({
+    'gpt-6.1-sol': ['low', 'high'],
+    'gpt-6-luna': [],
+    'gpt-6-astra': ['max'],
+  })
 })
