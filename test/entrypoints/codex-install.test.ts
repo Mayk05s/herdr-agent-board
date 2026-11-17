@@ -140,6 +140,8 @@ test('--codex --codex-home puts hooks, links and skills in the dedicated folder 
   expect(readFileSync(join(global, 'hooks.json'), 'utf8')).toBe(globalHooks)
   expect(existsSync(join(global, 'hooks.json.bak-agent-board'))).toBe(false)
   expect(existsSync(join(global, 'skills/agent-board-threads'))).toBe(false)
+  expect(existsSync(join(global, 'rules'))).toBe(false)
+  expect(readFileSync(join(dir, 'rules/agent-board.rules'), 'utf8')).toContain('prefix_rule')
   // The board is told where the rollouts of these sessions are.
   const config = JSON.parse(
     readFileSync(join(box.env.APPDATA as string, 'herdr/plugins/config/agent-board/config.json'), 'utf8'),
@@ -151,7 +153,7 @@ test('--codex --codex-home puts hooks, links and skills in the dedicated folder 
   ])
 })
 
-test('--codex-home without a folder takes ~/.config/herdr/codex; without --codex it is refused as unknown', async () => {
+test('--codex-home without a folder takes ~/.config/herdr/codex; a plain --codex stays as it was', async () => {
   const box = await sandbox()
   const home = box.env.USERPROFILE as string
   const result = await install(box, ['--codex', '--codex-home'])
