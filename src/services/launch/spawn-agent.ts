@@ -51,7 +51,7 @@ import {
 } from '../../adapters/profile-panes.ts'
 import { type Env, inheritedProfileDir, loadProfiles } from '../../adapters/profiles.ts'
 import { AGY_AGENT } from '../../core/agy.ts'
-import { CODEX_AGENT, CODEX_NAMING } from '../../core/codex.ts'
+import { CODEX_AGENT, CODEX_NAMING, codexHooksReview, codexInputReady, codexPromptAt } from '../../core/codex.ts'
 import {
   agyTrustDialog,
   importsDialog,
@@ -489,7 +489,14 @@ export async function spawnAgent(
     naming = own
     kind = p.agent
     session = p.session
-    if (p.status === 'idle' || p.status === 'done') {
+    // Codex: herdr calls it idle while its hooks still run and the input takes nothing yet, and a
+    // hooks-review screen is no idle either. Only the field on screen counts.
+    const shown = isCodex ? await screen(pane) : ''
+    if (isCodex && codexHooksReview(shown))
+      throw new Error(
+        `Codex in ${pane} waits for its hooks to be trusted. Trust them in that tab (t, then esc), then: herdr agent prompt ${pane} "${naming.command(o.name)}" and send the brief.`,
+      )
+    if ((p.status === 'idle' || p.status === 'done') && (!isCodex || codexInputReady(shown))) {
       ready = true
       break
     }
@@ -530,13 +537,11 @@ export async function spawnAgent(
     } catch (err) {
       if (!stalled(err)) log(`${line.split(' ')[0]} in ${pane}: ${messageOf(err)}`)
     }
-    for (let i = 0; i < 10; i++) {
+    const named = naming.doneFor?.(o.name) ?? naming.done
+    for (let i = 0; i < 10 && !renamed; i++) {
       await pause(500)
       const shown = await screen(pane)
-      if ((naming.doneFor?.(o.name) ?? naming.done).test(shown)) {
-        renamed = true
-        break
-      }
+      if (named.test(shown)) renamed = true
       // pi/agy's first Enter on a slash command with an argument can take its completion instead:
       // the line still in the editor gets one more.
       if ((kind === PI_AGENT || kind === AGY_AGENT) && i === 1 && stillTyped(shown, line))
@@ -545,6 +550,20 @@ export async function spawnAgent(
       if (kind === 'claude' && (i === 1 || i === 5) && stillTyped(shown, line) && (await renameLeft(pane, line)))
         await herdr(['pane', 'send-keys', pane, 'enter']).catch(() => {})
     }
+    // Codex can drop what arrives before its input takes it: typed again, a few times (a name twice is harmless).
+    for (let again = 0; isCodex && !renamed && again < 2; again++) {
+      const shown = await screen(pane)
+      if (codexPromptAt(shown, line) === 'typed') await herdr(['pane', 'send-keys', pane, 'enter']).catch(() => {})
+      else await prompt(pane, line).catch(() => {})
+      for (let i = 0; i < 6 && !renamed; i++) {
+        await pause(500)
+        renamed = named.test(await screen(pane))
+      }
+    }
+    if (isCodex && !renamed)
+      throw new Error(
+        `The name did not reach Codex in ${pane} (it runs). Send it by hand: herdr agent prompt ${pane} "${line}", then the brief: herdr agent prompt ${pane} "<brief>"`,
+      )
   }
 
   // A brief typed into a box that still holds text goes with it as one: after a /rename Claude did
@@ -569,7 +588,8 @@ export async function spawnAgent(
   // Right after a slash command Claude can drop typed text, and a short turn can end before herdr
   // sees it working: both read as "agent_prompt_stalled". Text still on screen (or a pasted-text
   // chip) gets an Enter; text that vanished is typed again.
-  if (text) {
+  if (text && isCodex) await codexBrief(pane, text)
+  else if (text) {
     let sent = false
     for (let i = 1; i <= 3 && !sent; i++) {
       await pause(800)
@@ -595,6 +615,46 @@ export async function spawnAgent(
   }
   if (isCodex && o.model && text) await cardCodex(pane, o.model)
   return { pane, name: o.name, agent, kind, session }
+}
+
+/**
+ * The brief for Codex, and proof it arrived: in the conversation with the field empty again, or
+ * Codex at work. Typed but not taken gets Enter; dropped gets typed again (twice at most). Nothing
+ * that shows it arrived is ever sent a second time.
+ */
+async function codexBrief(pane: string, text: string): Promise<void> {
+  const where = async (): Promise<'typed' | 'sent' | 'missing'> => {
+    const p = await paneInfo(pane, 5000).catch(() => null)
+    if (p && (p.status === 'working' || p.status === 'blocked')) return 'sent'
+    const at = codexPromptAt(await screen(pane), text)
+    return at === 'missing' && p?.status === 'done' ? 'sent' : at
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await pause(800)
+    try {
+      await prompt(pane, text)
+    } catch (err) {
+      if (!stalled(err))
+        throw new Error(
+          `The brief did not reach Codex in ${pane}: ${messageOf(err)}. Send it by hand: herdr agent prompt ${pane} "<brief>"`,
+        )
+    }
+    for (let i = 0; i < 10; i++) {
+      await pause(500)
+      const at = await where()
+      if (at === 'sent') return
+      if (at === 'typed' && i % 4 === 3) await herdr(['pane', 'send-keys', pane, 'enter']).catch(() => {})
+      if (at === 'missing' && i >= 4) break
+    }
+    // Typed and still not taken after the Enters: sending it again would put it there twice.
+    if ((await where()) !== 'missing') {
+      await herdr(['pane', 'send-keys', pane, 'enter']).catch(() => {})
+      await pause(800)
+      if ((await where()) === 'sent') return
+      break
+    }
+  }
+  throw new Error(`The brief did not reach Codex in ${pane}. Send it by hand: herdr agent prompt ${pane} "<brief>"`)
 }
 
 /** Codex's own options for a start: --effort, --approval and --sandbox as its `-c`, `-a` and `-s`. */

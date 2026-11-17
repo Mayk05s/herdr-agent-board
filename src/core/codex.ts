@@ -189,3 +189,28 @@ export const CODEX_NAMING: Naming = {
   // The first 40 characters: a long name is cut in the status line.
   doneFor: name => new RegExp(`·\\s*${escapeRe(name.trim().slice(0, 40)).replace(/\s+/g, '\\s+')}`),
 }
+
+/** Codex's input field is on screen: its `›` line, and the status line under it. */
+export function codexInputReady(shown: string): boolean {
+  if (codexHooksReview(shown)) return false
+  // A hook still running (SessionStart) holds the first input back.
+  if (/(?:running|starting)\s+[^\n]*\bhooks?\b/i.test(shown)) return false
+  return /^\s*›/m.test(shown) && /^\s*\S.*·.*$/m.test(shown.split(/^\s*›/m).pop() ?? '')
+}
+
+/** The screen Codex stops at when hooks wait for the user to trust them: "N hooks need review …". */
+export const codexHooksReview = (shown: string): boolean => /\bhooks?\s+needs?\s+review\b/i.test(shown)
+
+/**
+ * Where a sent prompt is: `typed` (in the input field, Enter not taken), `sent` (in the
+ * conversation, the field empty again) or `missing` (dropped, nowhere on screen).
+ */
+export function codexPromptAt(shown: string, text: string): 'typed' | 'sent' | 'missing' {
+  const squeeze = (s: string): string => s.replace(/\s+/g, '')
+  const head = squeeze(text.split('\n')[0] ?? '').slice(0, 30)
+  const inputs = shown.split('\n').filter(l => /^\s*›/.test(l))
+  const last = squeeze((inputs.at(-1) ?? '').replace(/^\s*›/, ''))
+  if (/^\[?Pasted/i.test(last) || (head && last.startsWith(head))) return 'typed'
+  if (/esc to interrupt|Worked for/.test(shown) || (head && squeeze(shown).includes(head))) return 'sent'
+  return 'missing'
+}

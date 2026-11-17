@@ -17,6 +17,9 @@ const CODEX = (extra: Record<string, unknown> = {}) => ({
   result: { pane: { pane_id: 'wA:p9', tab_id: 'wA:t9', agent: 'codex', agent_status: 'done', ...extra } },
 })
 const WITH_SESSION = CODEX({ agent_session: { agent: 'codex', kind: 'id', value: SID } })
+// Codex's screen with its input field up; the name ends the status line once /rename took.
+const CODEX_READY =
+  '› Ask Codex to do anything\n  GPT-6.1-Sol low · /work/Acme · Acme invoices · Helper\n  ← for agents'
 const STATE = {
   'tab create': { result: { tab: { tab_id: 'wA:t9' }, root_pane: { pane_id: 'wA:p9', terminal_id: 'term-9' } } },
   'tab rename': { result: null },
@@ -26,7 +29,7 @@ const STATE = {
   'agent rename': { result: null },
   'agent prompt': { result: null },
   // What Codex's screen shows once /rename took: the name ends the status line.
-  'pane read': { text: '  GPT-6.1-Sol low · /work/Acme · Acme invoices' },
+  'pane read': { text: CODEX_READY },
   'pane send-keys': { result: null },
 }
 
@@ -180,11 +183,14 @@ test('spawn-agent --agent codex: codex in a new tab, named with /rename, briefed
     `tab create --workspace wA --cwd ${dir} --label Acme invoices --no-focus`,
     'pane run wA:p9 codex --model gpt-6.1-sol',
     'pane get',
+    'pane read wA:p9 --source visible',
     'agent list',
     'agent rename wA:p9 acme-invoices-2',
     'agent prompt wA:p9 /rename Acme invoices',
     'pane read wA:p9 --source visible',
     'agent prompt wA:p9  -Check the invoices.',
+    'pane get',
+    'pane read wA:p9 --source visible',
     'pane get',
   ])
   // Codex has its id only after the first prompt: the card of the model is written under it then.
@@ -365,3 +371,142 @@ test('herdr without --env: a Codex start says CODEX_HOME, not the Claude profile
   await expect(openInProfile({ configDir: null, agent: 'codex' }, old)).rejects.toThrow(/CODEX_HOME=\/h\/codex/)
   await expect(openInProfile({ configDir: null, agent: 'claude' }, old)).rejects.toThrow(/unexpected argument/)
 })
+
+// Codex's screens (#427): herdr calls Codex idle before its input takes anything.
+const SPLASH = '>_ OpenAI Codex (v0.169.0)\n  Starting SessionStart hooks…'
+const HOOKS = '  2 hooks need review before they can run\n  t trust · esc back'
+const SPAWN_ARGS = [
+  '--name',
+  'Acme invoices',
+  '--workspace',
+  'wA',
+  '--agent',
+  'codex',
+  '--brief',
+  'Check the invoices.',
+]
+const argsFor = (dir: string) => [...SPAWN_ARGS, '--cwd', dir]
+const promptsOf = (box: Sandbox) => box.calls().filter(a => a[0] === 'agent' && a[1] === 'prompt')
+const briefsOf = (box: Sandbox) => promptsOf(box).filter(a => a[3]?.trim() === 'Check the invoices.')
+const FIELD = '› Ask Codex to do anything\n  GPT-6.1-Sol low · /work/Acme · Acme invoices · Helper'
+const IDLE = [{ result: { pane: { pane_id: 'wA:p9', agent: null } } }, CODEX({ agent_status: 'idle' })]
+
+test('Codex counts as ready when its input field is up, not when herdr says idle: nothing is typed into the splash', async () => {
+  const { box, dir } = await codexBox(
+    {},
+    { ...STATE, 'pane read': { seq: [{ text: SPLASH }, { text: SPLASH }, { text: CODEX_READY }] } },
+  )
+  const r = await runSpawn(box, argsFor(dir))
+  assert.equal(r.code, 0, r.stderr)
+  const calls = box.calls().map(a => a.slice(0, 2).join(' '))
+  // Two splash reads and the field before the first prompt.
+  expect(calls.slice(0, calls.indexOf('agent prompt')).filter(c => c === 'pane read').length).toBeGreaterThanOrEqual(3)
+  expect(promptsOf(box)[0]?.slice(3)).toEqual(['/rename Acme invoices'])
+}, 30_000)
+
+test('the hooks-review screen is a dialog: a clear error, nothing typed', async () => {
+  const { box, dir } = await codexBox({}, { ...STATE, 'pane read': { text: HOOKS } })
+  const r = await runSpawn(box, argsFor(dir))
+  assert.equal(r.code, 1)
+  expect(r.stderr).toContain('waits for its hooks to be trusted')
+  expect(r.stderr).toContain('(t, then esc)')
+  expect(r.stderr).toContain('herdr agent prompt wA:p9 "/rename Acme invoices"')
+  expect(promptsOf(box)).toHaveLength(0)
+}, 30_000)
+
+test('a /rename that was dropped is typed again; a name that never shows is an error that names the way out', async () => {
+  const bare = FIELD.replace(' · Acme invoices · Helper', '')
+  const dropped = await codexBox(
+    {},
+    {
+      ...STATE,
+      'pane read': {
+        seq: [
+          { text: CODEX_READY },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: bare },
+          { text: CODEX_READY },
+        ],
+      },
+    },
+  )
+  const ok = await runSpawn(dropped.box, argsFor(dropped.dir))
+  assert.equal(ok.code, 0, ok.stderr)
+  expect(promptsOf(dropped.box).filter(a => a[3] === '/rename Acme invoices').length).toBeGreaterThanOrEqual(2)
+  expect(briefsOf(dropped.box)).toHaveLength(1)
+
+  const never = await codexBox({}, { ...STATE, 'pane read': { text: bare } })
+  const bad = await runSpawn(never.box, argsFor(never.dir))
+  assert.equal(bad.code, 1)
+  expect(bad.stderr).toContain('The name did not reach Codex')
+  // Three tries at most, and the brief was not sent.
+  expect(promptsOf(never.box)).toHaveLength(3)
+  expect(briefsOf(never.box)).toHaveLength(0)
+}, 60_000)
+
+test('a brief that was dropped is typed again; one on screen, or typed and waiting for Enter, is never sent twice', async () => {
+  const sent = `› Check the invoices.\n${FIELD}`
+  const dropped = await codexBox(
+    {},
+    {
+      ...STATE,
+      'pane get': { seq: IDLE },
+      'pane read': {
+        seq: [
+          { text: CODEX_READY },
+          { text: CODEX_READY },
+          { text: FIELD },
+          { text: FIELD },
+          { text: FIELD },
+          { text: FIELD },
+          { text: FIELD },
+          { text: FIELD },
+          { text: FIELD },
+          { text: FIELD },
+          { text: sent },
+        ],
+      },
+    },
+  )
+  const r1 = await runSpawn(dropped.box, argsFor(dropped.dir))
+  assert.equal(r1.code, 0, r1.stderr)
+  expect(briefsOf(dropped.box).length).toBeGreaterThanOrEqual(2)
+
+  const shown = await codexBox({}, { ...STATE, 'pane get': { seq: IDLE }, 'pane read': { text: sent } })
+  const r2 = await runSpawn(shown.box, argsFor(shown.dir))
+  assert.equal(r2.code, 0, r2.stderr)
+  expect(briefsOf(shown.box)).toHaveLength(1)
+
+  const typed = `› Check the invoices.\n  GPT-6.1-Sol low · /work/Acme · Acme invoices · Helper`
+  const waiting = await codexBox(
+    {},
+    {
+      ...STATE,
+      'pane get': { seq: IDLE },
+      'pane read': {
+        seq: [
+          { text: CODEX_READY },
+          { text: CODEX_READY },
+          { text: typed },
+          { text: typed },
+          { text: typed },
+          { text: typed },
+          { text: sent },
+        ],
+      },
+    },
+  )
+  const r3 = await runSpawn(waiting.box, argsFor(waiting.dir))
+  assert.equal(r3.code, 0, r3.stderr)
+  expect(briefsOf(waiting.box)).toHaveLength(1)
+  expect(waiting.box.calls().some(a => a.join(' ').startsWith('pane send-keys wA:p9 enter'))).toBe(true)
+}, 90_000)
