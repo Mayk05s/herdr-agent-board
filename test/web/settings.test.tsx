@@ -14,6 +14,7 @@ import type { Translator } from '../../src/core/types.ts'
 import type { MenuSource } from '../../web/src/components/menu/menu-engine.ts'
 import { Toolbar } from '../../web/src/components/Toolbar.tsx'
 import {
+  chooseCardModel,
   chooseFold,
   chooseLanguage,
   endLogin,
@@ -416,6 +417,37 @@ describe('the menu out of the gear', () => {
       expect(headers?.['content-type']).toBe('application/json')
       expect([asked, toasts]).toEqual(note === null ? [1, []] : [0, [[note, true]]])
     }
+  })
+
+  test('model and effort on cards: no item from a board that does not say; checked as the board says; a pick toggles it', async () => {
+    const now = {
+      t: translator('en'),
+      theme: 'auto',
+      languages: { en: 'English' },
+      canEdit: true,
+      dock: 'right' as const,
+      sleepers: true,
+      profiles: false,
+    }
+    const item = (items: readonly MenuEntry[]) => items.find(i => 'id' in i && i.id === 'cardModel')
+    expect(item(settingsMenu(now))).toBeUndefined()
+    expect(JSON.stringify(item(settingsMenu({ ...now, cardModel: false })))).toBe(
+      JSON.stringify({ id: 'cardModel', label: 'Model and effort on cards', checked: false }),
+    )
+    expect(JSON.stringify(item(settingsMenu({ ...now, cardModel: true })))).toContain('"checked":true')
+    expect(JSON.stringify(item(settingsMenu({ ...now, cardModel: true, canEdit: false })))).toContain('"disabled":true')
+    expect(settingPicked('cardModel')).toEqual({ kind: 'cardModel' })
+    const saved: unknown[] = []
+    const deps = (canEdit: boolean) => ({
+      t: translator('en'),
+      canEdit,
+      save: async (body: unknown) => void saved.push(body),
+      toast: () => {},
+    })
+    await chooseCardModel(true, deps(true))
+    expect(saved).toEqual([{ cardModel: true }])
+    await chooseCardModel(false, deps(false))
+    expect(saved).toHaveLength(1)
   })
 
   test('how sessions asleep in "Waiting" fold: the board’s way checked; gray without the board; a pick saves it (the board’s own)', async () => {

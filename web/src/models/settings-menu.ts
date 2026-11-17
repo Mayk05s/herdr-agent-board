@@ -52,6 +52,8 @@ export interface SettingsNow {
   profiles: boolean
   /** How sessions asleep in "Waiting" fold; null from a board that does not say (none offered). */
   fold?: FoldMode | null | undefined
+  /** Cards show the model and effort; undefined from a board that does not say (none offered). */
+  cardModel?: boolean | undefined
   /** The payload carries wake's state line (#119): Sleep and wake… is offered. */
   wake?: boolean
   /** The remote mode is on (the payload's `remote`): Phones… is offered. */
@@ -271,6 +273,9 @@ export function settingsMenu(now: SettingsNow): MenuEntry[] {
           },
         ]
       : []),
+    ...(now.cardModel === undefined
+      ? []
+      : [{ id: 'cardModel', label: t('set.cardModel'), checked: now.cardModel, ...edit }]),
     ...(now.signOut ? [{ separator: true as const }, { id: 'signout', label: t('set.signOut') }] : []),
   ]
 }
@@ -287,6 +292,7 @@ export type SettingPick =
   | { kind: 'profiles' }
   | { kind: 'wake' }
   | { kind: 'fold'; value: FoldMode }
+  | { kind: 'cardModel' }
   | { kind: 'phones' }
   | { kind: 'mokupilot' }
   | { kind: 'access' }
@@ -321,6 +327,7 @@ export function settingPicked(id: string): SettingPick {
   if (id === 'profiles') return { kind: 'profiles' }
   if (id === 'wake') return { kind: 'wake' }
   if (kind === 'fold' && isFoldMode(value)) return { kind, value }
+  if (id === 'cardModel') return { kind: 'cardModel' }
   if (id === 'phones') return { kind: 'phones' }
   if (id === 'mokupilot') return { kind: 'mokupilot' }
   if (id === 'access') return { kind: 'access' }

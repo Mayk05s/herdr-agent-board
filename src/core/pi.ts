@@ -189,6 +189,7 @@ const tailComplete = (info: PiInfo): boolean => !!(info.prompt && info.lastText 
  *             replied: the user wrote after them
  *   tool      the last tool call (pending: no result for it yet)
  *   context   the tokens its last answer's request carried, cached parts included
+ *   model     the model of its last answer (else its last model_change); effort: its thinking level now
  * A board reminder typed into the session is not the user answering.
  */
 export function parsePiTail(lines: readonly string[]): PiInfo {
@@ -197,6 +198,17 @@ export function parsePiTail(lines: readonly string[]): PiInfo {
   walkBranch(
     lines,
     (head, line) => {
+      // The thinking level it is on and the model it was switched to: the newest entry says.
+      if (head.type === 'thinking_level_change') {
+        const level = str(parse(line)?.thinkingLevel)
+        if (!info.effort && level && level !== 'off') info.effort = level.slice(0, 20)
+        return
+      }
+      if (head.type === 'model_change') {
+        const id = str(parse(line)?.modelId) || str(parse(line)?.model)
+        if (!info.model && id) info.model = id.slice(0, 60)
+        return
+      }
       if (head.type !== 'message') return
       const message = rec(parse(line)?.message)
       const role = str(message?.role)
@@ -212,6 +224,7 @@ export function parsePiTail(lines: readonly string[]): PiInfo {
         return
       }
       if (role !== 'assistant') return
+      if (!info.model && str(message?.model)) info.model = str(message?.model).slice(0, 60)
       const u = rec(message?.usage)
       if (info.context == null && u) {
         const tokens = num(u.input) + num(u.cacheRead) + num(u.cacheWrite)

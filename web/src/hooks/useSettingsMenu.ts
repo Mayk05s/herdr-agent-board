@@ -59,6 +59,9 @@ export interface SettingsDeps {
   openProfiles(): void
   /** How sessions asleep in "Waiting" fold, as the board says (null: it does not, none offered). */
   fold(): FoldMode | null
+  /** Cards show the model and effort, as the board says (undefined: it does not, none offered). */
+  cardModel?(): boolean | undefined
+  toggleCardModel?(): void
   chooseFold(mode: FoldMode): void
   /** The payload carries wake's state line: Sleep and wake… is offered. */
   wake?(): boolean
@@ -129,6 +132,7 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
       sleepers: deps.sleepers(),
       profiles: deps.profiles(),
       fold: deps.fold(),
+      cardModel: deps.cardModel?.(),
       wake: deps.wake?.() ?? false,
       phones: deps.phones?.() ?? false,
       mokupilot: deps.mokupilot?.() ?? false,
@@ -165,6 +169,7 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
         else if (pick?.kind === 'profiles') deps.openProfiles()
         else if (pick?.kind === 'wake') deps.openWake?.()
         else if (pick?.kind === 'fold') deps.chooseFold(pick.value)
+        else if (pick?.kind === 'cardModel') deps.toggleCardModel?.()
         else if (pick?.kind === 'phones') deps.openPhones?.()
         else if (pick?.kind === 'mokupilot') deps.openMokupilot?.()
         else if (pick?.kind === 'access') deps.openAccess?.()
@@ -231,6 +236,24 @@ export async function chooseFold(
   if (!canEdit) return toast(t('live.off'), true)
   try {
     await save({ foldWaiting: mode })
+  } catch (err) {
+    toast(errorText(err, t), true)
+  }
+}
+
+/** Model and effort on the cards, for every board (config.json's cardModel); the board shows it once the server has it. */
+export async function chooseCardModel(
+  on: boolean,
+  {
+    t,
+    canEdit,
+    save,
+    toast,
+  }: Pick<LanguageDeps, 't' | 'canEdit' | 'toast'> & { save(body: { cardModel: boolean }): Promise<unknown> },
+): Promise<void> {
+  if (!canEdit) return toast(t('live.off'), true)
+  try {
+    await save({ cardModel: on })
   } catch (err) {
     toast(errorText(err, t), true)
   }
@@ -422,6 +445,16 @@ export function useSettingsMenu(
       chooseFold: mode => {
         const { t, board } = latest.current
         void chooseFold(mode, {
+          t,
+          canEdit: board.canEdit,
+          save: body => api.post('/api/settings', body),
+          toast: board.toast,
+        })
+      },
+      cardModel: () => latest.current.board.data?.cardModel,
+      toggleCardModel: () => {
+        const { t, board } = latest.current
+        void chooseCardModel(!board.data?.cardModel, {
           t,
           canEdit: board.canEdit,
           save: body => api.post('/api/settings', body),
