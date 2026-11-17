@@ -207,6 +207,10 @@ describe.each([
         '/api/team/draft',
         '/api/team/focus',
         '/api/team/agents',
+        // the board's own server's domain opens these to the owner (ownServerTeam); a phone never
+        '/api/team/welcome',
+        '/api/team/threads/team/0123abcd-4567-49ab-8def-0123456789ab/members',
+        '/api/team/passkeys',
         '/api/team/post',
         '/api/team/threads/team/general/mute',
       ])

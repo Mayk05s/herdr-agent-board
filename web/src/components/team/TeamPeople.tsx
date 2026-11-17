@@ -2,10 +2,13 @@
 // conversations. This board (its connection, name and key), the owner's passkeys (#224), each
 // person (online or not, their key's fingerprint, Trust when it changed, their drafts, a way into
 // their conversation), the team chat's mute and the owner's agent switches (#216, #355, #360). The
-// passkeys, the mute and the switches are on this computer's board only. A new member's welcome
-// (#355) lives here too; the list draws it on top while it waits.
+// mute and the switches are on this computer's board and the board's own server's page only
+// (offersTeamSwitches), the passkeys on this computer's board only: they are confirmed on
+// localhost (#224). A new member's welcome (#355) lives here too; the list draws it on top while
+// it waits.
 import { useState } from 'react'
 import { useT } from '../../i18n/I18nProvider.tsx'
+import { remotePage } from '../../models/remote-page.ts'
 import {
   type AgentsChange,
   type AgentsView,
@@ -80,8 +83,8 @@ export function TeamPeople({
             {view.me.fingerprint && ` · ${t('team.fingerprint', { fingerprint: view.me.fingerprint })}`}
           </p>
         </section>
-        {/* The owner's passkeys (#224): on this computer's board only, as the switches are. */}
-        {agents && <TeamPasskeys open disabled={disabled} />}
+        {/* The owner's passkeys (#224): where the switches are, but on this computer's board only. */}
+        {agents && !remotePage() && <TeamPasskeys open disabled={disabled} />}
         <section className="team-roster">
           <h3>{t('team.roster')}</h3>
           {!view.roster.length && <p className="hint">{t('team.rosterEmpty')}</p>}

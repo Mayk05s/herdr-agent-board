@@ -7,6 +7,7 @@ import {
   isOwnerLogin,
   localOnly,
   ownerTeam,
+  ownServerTeam,
   remoteConfig,
   STATUS_RETRY_MS,
   statusVerdict,
@@ -190,4 +191,43 @@ test("the owner's own logins may read and write the team away from the computer,
   expect(isOwnerLogin('friend@example.com', 'me@example.com')).toBe(false)
   expect(isOwnerLogin(null, 'me@example.com')).toBe(false)
   expect(isOwnerLogin('me@example.com', null)).toBe(false)
+})
+
+test("the board's own server's login opens the Team panel's own routes beyond the owner's list: the switches, a welcome, Trust, a channel's members; nothing else", () => {
+  for (const path of [
+    '/api/team/agents',
+    '/api/team/welcome',
+    '/api/team/trust',
+    '/api/team/threads/team/0123abcd-4567-49ab-8def-0123456789ab/members',
+  ])
+    expect([path, ownServerTeam(path)]).toEqual([path, true])
+  for (const path of [
+    // the passkeys and their confirmation window: confirmed on localhost, not there (#224)
+    '/api/team/passkeys',
+    '/api/team/confirm/x',
+    // a notification's click focuses herdr on the computer
+    '/api/team/focus',
+    // an agent's own calls, the board command's on the machine
+    '/api/team/draft',
+    '/api/team/post',
+    '/api/team/listen',
+    '/api/team/threads/team/general/assign',
+    '/api/team/threads/team/general/release',
+    // what the owner's list already has, or no route at all
+    '/api/team',
+    '/api/team/send',
+    '/api/team/agents/',
+    '/api/team/agents/x',
+    '/api/team/welcomes',
+    '/api/team/trust/x',
+    '/api/team/threads/x/general/members',
+    '/api/team/threads/team/members',
+    '/api/team/threads/team/a/b/members',
+    '/api/team/threads/team/x/members/',
+    '/api/%74eam/agents',
+    '/api/team/%61gents',
+    '/api/teams/agents',
+    '/api/remote',
+  ])
+    expect([path, ownServerTeam(path)]).toEqual([path, false])
 })

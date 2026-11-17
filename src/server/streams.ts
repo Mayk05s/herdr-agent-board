@@ -8,6 +8,7 @@ import {
   ownerTeam,
   ownerThreads,
   ownServerSettings,
+  ownServerTeam,
   secretsPath,
 } from '../core/remote.ts'
 import { vaultOwnerPath } from '../core/vault.ts'
@@ -29,7 +30,8 @@ export function decoded(raw: string): string | null {
  * store too (403 local), and the owner's password vault with the answers to a login fill (403 local,
  * core/vault.ts vaultOwnerPath). `ownServer` is the board's own server's login listener, whose page
  * is the owner's own: the secrets, the vault, Settings → Backup…, Settings → Time tracking… and
- * Settings → Sleep and wake… by there (ownServerSettings), the rest of what is local still refused.
+ * Settings → Sleep and wake… by there (ownServerSettings), and with `teamOwner` and `owner` the Team
+ * panel's switches (ownServerTeam), the rest of what is local still refused.
  * The routes match a string path decoded and a RegExp one as it came, so both spellings are
  * checked, or an encoded letter (/api/fs/%6Fpen, /api/%61ccess) would get by. A desk
  * (RemoteDevice.desk) may focus herdr and reach /api/remote, whose ops the listener narrows for it
@@ -52,8 +54,12 @@ export function remoteRefusal(
   if (!ownServer && (secretsPath(raw) || secretsPath(path))) return json(403, { error: 'local' })
   // the owner's password vault and the answers to a login fill: the board's own server's domain only
   if (!ownServer && (vaultOwnerPath(raw) || vaultOwnerPath(path))) return json(403, { error: 'local' })
-  // The owner's own login, with the team on, reads and writes the team as on the computer (#355).
-  const team = teamOwner && ownerTeam(raw) && ownerTeam(path)
+  // The owner's own login, with the team on, reads and writes the team as on the computer (#355);
+  // on the board's own server, whose domain page is the owner's only one, the Team panel's
+  // switches, welcome, Trust and a channel's members too (ownServerTeam). Both spellings each time.
+  const team =
+    teamOwner &&
+    ((ownerTeam(raw) && ownerTeam(path)) || (ownServer && owner && ownServerTeam(raw) && ownServerTeam(path)))
   // The owner's own login reads and writes threads as on the computer (#392).
   const threads = owner && ownerThreads(raw) && ownerThreads(path)
   if (!pairing && !team && !threads && (local(raw) || local(path))) return json(403, { error: 'local' })

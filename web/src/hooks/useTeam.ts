@@ -1,7 +1,8 @@
 // The Team panel's data: the view (GET /api/team), the threads with the agents' drafts that wait
 // (GET /api/team/threads, #216, #415), the thread on show (GET /api/team/threads/<scope>/<id>)
 // and the owner's agent switches (GET
-// /api/team/agents, on this computer only: a remote page never asks). Its changes: a message or a
+// /api/team/agents, on this computer and on the board's own server's page only: no other remote page
+// asks, offersTeamSwitches). Its changes: a message or a
 // new topic (POST /api/team/send { to, text, thread?, replyTo? }), Trust (POST /api/team/trust { peer }), an
 // agent's drafts (POST /api/team/draft/<id>/send or /discard), a thread's mute (POST
 // /api/team/threads/<scope>/<id>/mute or /unmute) and the switches with the team chat's mute (POST
@@ -16,6 +17,7 @@ import type { Translator } from '../../../src/core/types.ts'
 import { ApiError, api, errorText } from '../api/client.ts'
 import { useT } from '../i18n/I18nProvider.tsx'
 import { remotePage } from '../models/remote-page.ts'
+import { boardOnServer } from '../models/settings-menu.ts'
 import {
   type AgentsChange,
   type AgentsView,
@@ -28,6 +30,7 @@ import {
   isWelcomeList,
   keyParts,
   offersTeam,
+  offersTeamSwitches,
   sendError,
   type TeamView,
   type ThreadLine,
@@ -50,9 +53,9 @@ export interface TeamNow {
   lines: ThreadLine[]
   /** Each thread's unread messages, by its key. */
   unread: Record<string, number>
-  /** The owner's switches; null on a remote page, which may not change them. */
+  /** The owner's switches; null on a remote page, which may not change them, but the board's own server's. */
   agents: AgentsView | null
-  /** Who joined the team and waits for the owner's welcome (#355); none on a remote page. */
+  /** Who joined the team and waits for the owner's welcome (#355); none where the switches are not. */
   pending: string[]
   /** The agents' drafts that wait for the owner, every thread's (#415), oldest first. */
   drafts: DraftLine[]
@@ -107,8 +110,10 @@ export interface TeamDeps {
   toast(text: string, error?: boolean): void
   /** The page is in front: what is on show there is read. */
   visible?(): boolean
-  /** The page is the remote one (a phone, the domain): the switches are not asked for. */
+  /** The page is the remote one (a phone, the domain): the switches are not asked for... */
   remote?(): boolean
+  /** ...but on the board's own server (the payload's `server`), whose domain page is the owner's own. */
+  server?(): boolean
 }
 
 const inFront = (): boolean => typeof document === 'undefined' || document.visibilityState === 'visible'
@@ -133,6 +138,7 @@ export function teamSource(deps: TeamDeps): TeamSource {
   let unreadTotal = 0
   const visible = deps.visible ?? inFront
   const remote = deps.remote ?? remotePage
+  const server = deps.server ?? (() => false)
   // Only the latest fetch is drawn: an older one may come back after it.
   let asked = 0
 
@@ -156,9 +162,17 @@ export function teamSource(deps: TeamDeps): TeamSource {
       const { threads, drafts = [] } = await api.get('/api/team/threads', isThreadList, { cache: 'no-store' })
       const selected = now.get().selected
       const { thread, lines } = await shown(selected)
-      const agents = remote() ? null : await api.get('/api/team/agents', isAgentsView, { cache: 'no-store' })
+      const away = remote()
+      const agents = !offersTeamSwitches(away, { server: server() })
+        ? null
+        : await api.get('/api/team/agents', isAgentsView, { cache: 'no-store' }).catch(err => {
+            // Away from the computer a refusal (a phone through Tailscale to the board's own server)
+            // draws the panel as on a phone; on the computer's page it is an error, as before.
+            if (away && err instanceof ApiError && err.status === 403) return null
+            throw err
+          })
       // Who to welcome is a nicety: a look that fails offers nobody, and the panel is drawn all the same.
-      const pending = remote()
+      const pending = !agents
         ? []
         : await api
             .get('/api/team/welcome', isWelcomeList, { cache: 'no-store' })
@@ -280,9 +294,13 @@ export function teamSource(deps: TeamDeps): TeamSource {
 export function useTeam(open: boolean): TeamNow & Omit<TeamSource, 'now' | 'sync'> {
   const t = useT()
   const { data, toast } = useBoardContext()
-  const latest = useLatest({ t, toast })
+  const latest = useLatest({ t, toast, data })
   const [source] = useState(() =>
-    teamSource({ t: () => latest.current.t, toast: (text, error) => latest.current.toast(text, error) }),
+    teamSource({
+      t: () => latest.current.t,
+      toast: (text, error) => latest.current.toast(text, error),
+      server: () => boardOnServer(latest.current.data),
+    }),
   )
   const state = useStore(source.now)
   const offered = offersTeam(data)

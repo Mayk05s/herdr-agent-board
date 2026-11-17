@@ -15,6 +15,7 @@ import type {
 } from '../../../src/services/team-hub.ts'
 import { ago } from './card.ts'
 import { remotePage, teamPage } from './remote-page.ts'
+import { boardOnServer } from './settings-menu.ts'
 
 export type { DraftLine, TeamRosterPeer, TeamView, ThreadLine, ThreadView }
 
@@ -58,6 +59,16 @@ export const offersTeam = (
   remote: boolean = remotePage(),
   team: boolean = teamPage(),
 ): boolean => (!remote || team) && payload?.teamRev !== undefined
+
+/**
+ * Whether the Team panel offers the owner's switches, a new member's welcome, Trust of a changed key
+ * and a channel's more members (/api/team/agents, /api/team/welcome, /api/team/trust, …/members):
+ * on the local board, and on the board's own server (the payload's `server`), whose domain page is
+ * the owner's own, as Settings → Backup… is there (offersBackup); not on a phone or through a PC's
+ * tunnel, where the board refuses them.
+ */
+export const offersTeamSwitches = (remote: boolean, payload?: { server?: boolean | undefined } | null): boolean =>
+  !remote || boardOnServer(payload)
 
 /** A pair's thread without a topic. */
 export const pairThread = (peer: string): string => `${peer}/general`

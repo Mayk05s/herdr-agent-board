@@ -597,7 +597,7 @@ function TopicAsThread({
         </button>
       </div>
     )
-  // Tracking shares as the owner: only where the owner's switches are (the computer, not a phone).
+  // Tracking shares as the owner: only where the owner's switches are (the computer, the board's own server's page; not a phone).
   if (!agents) return null
   const lanes = data?.categories ?? []
   const track = async () => {

@@ -548,6 +548,56 @@ describe('the source', () => {
     expect(source.now.get().agents).toBeNull()
   })
 
+  test('a phone or a PC’s tunnel (a remote page, no `server`): still no switches and nobody to welcome', async () => {
+    const calls = answers([200, VIEW], [200, { threads: [] }])
+    const source = teamSource({ ...deps(), remote: () => true, server: () => false })
+    source.sync(true, 1)
+    await Bun.sleep(5)
+    expect(calls.map(c => c.url)).toEqual(['/api/team', '/api/team/threads'])
+    expect(source.now.get()).toMatchObject({ agents: null, pending: [] })
+  })
+
+  test('the board’s own server’s page (remote, the payload’s `server`): the switches and who to welcome, as on the computer', async () => {
+    const calls = answers([200, VIEW], [200, { threads: THREADS }], [200, AGENTS], [200, { pending: [BOB] }])
+    const source = teamSource({ ...deps(), remote: () => true, server: () => true })
+    source.sync(true, 1)
+    await Bun.sleep(5)
+    expect(calls.map(c => c.url)).toEqual(['/api/team', '/api/team/threads', '/api/team/agents', '/api/team/welcome'])
+    expect(source.now.get()).toMatchObject({ agents: AGENTS, pending: [BOB] })
+    // Its changes go to the same routes as the computer's.
+    await source.setAgents({ off: true })
+    await source.trust(BOB)
+    await source.welcome({ peer: BOB, on: true, lanes: [], channels: [] })
+    expect(sent(calls).filter(c => c[1] === 'POST')).toEqual([
+      ['/api/team/agents', 'POST', '1', { off: true }],
+      ['/api/team/trust', 'POST', '1', { peer: BOB }],
+      ['/api/team/welcome', 'POST', '1', { peer: BOB, on: true, lanes: [], channels: [] }],
+    ])
+  })
+
+  test('there, switches the board refuses (a phone through Tailscale to that server): the panel as on a phone, no error', async () => {
+    const toasts: string[] = []
+    const calls = answers([200, VIEW], [200, { threads: THREADS }], [403, { error: 'local' }])
+    const source = teamSource({ ...deps(toasts), remote: () => true, server: () => true })
+    source.sync(true, 1)
+    await Bun.sleep(5)
+    expect(calls.map(c => c.url)).toEqual(['/api/team', '/api/team/threads', '/api/team/agents'])
+    expect(source.now.get()).toMatchObject({ view: VIEW, threads: THREADS, agents: null, pending: [] })
+    expect(toasts).toEqual([])
+  })
+
+  test('the computer’s page as before: a refusal of the switches is an error, shown', async () => {
+    for (const server of [false, true]) {
+      const toasts: string[] = []
+      answers([200, VIEW], [200, { threads: THREADS }], [403, { error: 'local' }])
+      const source = teamSource({ ...deps(toasts), server: () => server })
+      source.sync(true, 1)
+      await Bun.sleep(5)
+      expect([server, toasts.length, source.now.get().view]).toEqual([server, 1, null])
+      restoreFetch()
+    }
+  })
+
   test('the answers are checked: a view, threads, a thread and switches of another shape are refused', () => {
     expect(isTeamView(VIEW)).toBe(true)
     expect(isTeamView({ ...VIEW, state: 'weird' })).toBe(false)

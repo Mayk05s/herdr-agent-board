@@ -17,6 +17,7 @@ import {
   settingPicked,
   settingsMenu,
 } from '../../web/src/models/settings-menu.ts'
+import { offersTeamSwitches } from '../../web/src/models/team.ts'
 import { FakeWorld } from './support/fake-dom.ts'
 import { parseHtml } from './support/markup.ts'
 
@@ -48,6 +49,14 @@ describe('Settings', () => {
       expect(offersTimeSettings(true, payload)).toBe(false)
       expect(offersWakeSettings(true, payload)).toBe(false)
     }
+  })
+
+  test('the Team panel’s switches, welcome and Trust: on the local page and on the board’s own server’s; not on a phone or a PC’s tunnel', () => {
+    expect(offersTeamSwitches(true, { server: true })).toBe(true)
+    for (const payload of [{}, { server: false }, { server: true }, null, undefined])
+      expect(offersTeamSwitches(false, payload)).toBe(true)
+    for (const payload of [{}, { server: false }, null, undefined])
+      expect(offersTeamSwitches(true, payload)).toBe(false)
   })
 
   test('Passwords: on the board’s own server’s page through its domain, with the vault; nowhere else', () => {

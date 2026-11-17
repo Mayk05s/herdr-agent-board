@@ -197,7 +197,7 @@ export interface TeamBodyProps {
   drafts?: readonly DraftLine[]
   /** Each thread's unread messages (#355); none given: none shown. */
   unread?: Record<string, number>
-  /** The owner's switches; null (a remote page): not shown, and the team chat's mute neither. */
+  /** The owner's switches; null (a remote page but the board's own server's): not shown, and the team chat's mute neither. */
   agents: AgentsView | null
   draft: string
   /** A new topic being written in the thread's scope; null: a message in the thread on show. */

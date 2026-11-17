@@ -127,8 +127,8 @@ export const ownerThreads = (path: string): boolean => /^\/api\/threads(\/[^/]+)
  * session here, as assign does), sending or discarding a draft,
  * marking a thread read, muting one. Everything else under /api/team stays on the computer: accepting a changed key
  * (trust), what agents may do (agents, listen), handing a thread to a session (assign, release), an
- * agent's draft (draft), a notification's click (focus). Only the owner's own logins get even
- * these: the tunnel's login, and a device paired from the owner's own Tailscale login that is not
+ * agent's draft (draft), a notification's click (focus); the board's own server's domain login
+ * gets some of it (ownServerTeam). Only the owner's own logins get even these: the tunnel's login, and a device paired from the owner's own Tailscale login that is not
  * a desk (isOwnerLogin); never a Tailscale user `remote.allow` lets in.
  */
 const OWNER_TEAM =
@@ -148,6 +148,20 @@ export const isOwnerLogin = (login: string | null, owner: string | null): boolea
  * be one of them.
  */
 export const ownServerSettings = (path: string): boolean => /^\/api\/(backup|time-settings|wake)$/.test(path)
+
+/**
+ * What of the team beyond ownerTeam the board's own server opens to the owner's domain login, with
+ * the team on, as ownServerSettings opens Settings: the Team panel's own calls on the computer's
+ * page, the owner's switches (GET and POST /api/team/agents: all agents, each person, channel and
+ * the team chat with its lanes, loop pause and mute, the listener cleared), a new member's welcome
+ * (/api/team/welcome), accepting a changed key (/api/team/trust) and a channel's more members
+ * (/api/team/threads/team/<id>/members). Not the passkeys or their confirmation window (on
+ * localhost), a notification's click (focus), nor an agent's own calls (draft, post, listen,
+ * assign, release), which come from the board command on the machine.
+ */
+const OWN_SERVER_TEAM = /^\/api\/team\/(?:agents|welcome|trust|threads\/team\/[^/]+\/members)$/
+
+export const ownServerTeam = (path: string): boolean => OWN_SERVER_TEAM.test(path)
 
 /**
  * The owner's secrets for the agents (Settings → Secrets…): the local board's page, and the board's
