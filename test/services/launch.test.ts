@@ -1892,6 +1892,34 @@ test('Codex on PATH (#426): offered with its models; a start goes through herdr�
   assert.equal(((await bad.json()) as { field: string }).field, 'model')
 }, 60_000)
 
+test('Codex from the window with codexHome in config.json: the tab gets CODEX_HOME; a Claude start beside it does not', async () => {
+  const cfg = (box: Sandbox) => ({ ...PROFILES(box), codexHome: join(box.dir, 'herdr codex 100%') })
+  const { box, started, launched } = await boardServer(cfg, codexOnPath)
+  writeConfig(box, cfg(box))
+  const S = '01a1e9a1-0037-7510-b480-5ee1c3f01e5b'
+  box.state({
+    ...HERDR,
+    'agent get': { result: { agent: { agent: 'codex', agent_session: { value: S }, agent_status: 'idle' } } },
+  })
+  const dir = join(box.dir, 'Codex – проект')
+  mkdirSync(dir)
+  const job = { cwd: dir, category: 'acme', workspace: { id: 'wA' }, message: 'Go.' }
+  const l = await launched(await started({ ...job, name: 'Codex home', agent: 'codex' }))
+  assert.equal(l.state, 'done', l.error)
+  const tab = callOf(box, 'tab', 'create')
+  assert.deepEqual(tab.slice(-3), ['--env', `CODEX_HOME=${join(box.dir, 'herdr codex 100%')}`, '--no-focus'])
+  // Claude, on the same board: its tab as it was, whatever config.json says about Codex.
+  box.state({ ...HERDR, ...OPENED, 'pane get': PANE_READY, 'pane run': { result: null } })
+  const c = await launched(await started({ ...job, name: 'Claude home', profile: 'work' }))
+  assert.equal(c.state, 'done', c.error)
+  const claudeTab =
+    box
+      .calls()
+      .filter(a => a[0] === 'tab' && a[1] === 'create')
+      .at(-1) ?? []
+  assert.equal(claudeTab.join(' ').includes('CODEX_HOME'), false)
+}, 60_000)
+
 test('the new-session window is told the board’s default: launch.default when the board offers that agent, else Claude Code', async () => {
   const claude = { id: 'claude', title: 'Claude Code' }
   const pi = { id: 'pi', title: 'pi' }
