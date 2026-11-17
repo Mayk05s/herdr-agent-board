@@ -27,13 +27,15 @@
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { dedicatedCodexHome } from '../../adapters/codex-home.ts'
 import { herdr, tabCreateRoot } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { launchDir, ROOT } from '../../adapters/paths.ts'
 import { runTree } from '../../adapters/process.ts'
 import { forgetProfilePane, recordProfilePane } from '../../adapters/profile-panes.ts'
+import { CODEX_AGENT } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
-import { CLAUDE_AGENT, piCommand } from '../../core/launch/agents.ts'
+import { codexCommand, piCommand } from '../../core/launch/agents.ts'
 import {
   commandArgs,
   failureKind,
@@ -45,6 +47,7 @@ import {
 import { modelArgs } from '../../core/launch/model.ts'
 import { slugName, ticketSlugName, uniqueSlug } from '../../core/launch/names.ts'
 import { choosesSession, claudeCommand } from '../../core/launch/spawn-args.ts'
+import { PI_AGENT } from '../../core/pi.ts'
 import { envRejected } from '../../core/profiles.ts'
 import type { LaunchFailure, LaunchSpec, LaunchStep } from '../../core/types.ts'
 import { takenNames } from './prompt.ts'
@@ -149,16 +152,29 @@ const profileEnv = (l: Pick<LaunchContext, 'configDir'>): Env | undefined =>
   l.configDir === null ? undefined : { CLAUDE_CONFIG_DIR: l.configDir }
 
 /**
+ * What a new Codex session's tab gets: CODEX_HOME of the dedicated home config.json names
+ * (`codexHome`, install.ts --codex-home), when there is one. A fork stays with the home it was
+ * started in (`codex fork` looks the session up there); any other agent is not asked.
+ */
+const codexEnv = (l: { agent?: string; codexFork?: unknown }): Env | undefined => {
+  const home = l.agent === CODEX_AGENT && !l.codexFork ? dedicatedCodexHome() : null
+  return home ? { CODEX_HOME: home } : undefined
+}
+
+/**
  * Open a tab or a workspace for a launch, with its profile's env when it sets one. herdr that does
  * not take --env (older than 0.9.5) fails the launch saying so, before any Claude runs.
  */
 export async function openInProfile<T>(
-  l: Pick<LaunchContext, 'configDir'>,
+  l: Pick<LaunchContext, 'configDir'> & { agent?: string; codexFork?: unknown },
   open: (env: Env | undefined) => Promise<T>,
 ): Promise<T> {
+  const codex = codexEnv(l)
   try {
-    return await open(profileEnv(l))
+    return await open(codex ?? profileEnv(l))
   } catch (err) {
+    if (codex && envRejected(err))
+      throw new LaunchError(t('launch.err.codexEnv', { dir: codex.CODEX_HOME ?? '' }), 'launcher')
     if (l.configDir !== null && envRejected(err))
       throw new LaunchError(t('launch.err.env', { dir: l.configDir }), 'launcher')
     throw err
@@ -241,7 +257,9 @@ export function herdrLauncher(spec: LaunchSpec, codexFork = false): Launcher {
         pane = l.rootPane
         if (l.rootTab) await herdr(['tab', 'rename', l.rootTab, l.label]).catch(() => {})
       } else {
-        const opened = await openInProfile(l, env => tabCreateRoot(l.workspaceId, l.cwd, l.label, env))
+        const opened = await openInProfile({ ...l, codexFork }, env =>
+          tabCreateRoot(l.workspaceId, l.cwd, l.label, env),
+        )
         pane = opened.pane
         terminal = opened.terminal
         notePane(l, pane, opened.terminal)
@@ -374,12 +392,16 @@ export function spawnAgentLauncher(spec: LaunchSpec): Launcher {
       // A line that picks its own session (--resume, in the profile's start command, launch.claude
       // or the profile's arguments; in launch.pi for pi) gets no id from the board; a resumed
       // session has its own. A fork gets one (spawn-agent refuses a line that picks its own session for it).
-      const pi = l.agent !== CLAUDE_AGENT
+      const pi = l.agent === PI_AGENT
+      const codex = l.agent === CODEX_AGENT
       const line = pi
         ? piCommand(spec.pi)
-        : [...(l.profileCommand ?? claudeCommand(spec.claude, spec.args)), ...l.profileArgs]
+        : codex
+          ? codexCommand(spec.codex)
+          : [...(l.profileCommand ?? claudeCommand(spec.claude, spec.args)), ...l.profileArgs]
+      // Codex picks its own session id: the board has none to give it.
       let sessionId: string | null = l.resume
-      if (!l.resume && (l.fork || !choosesSession(line))) {
+      if (!codex && !l.resume && (l.fork || !choosesSession(line))) {
         sessionId = randomUUID()
         on.session(sessionId)
       }
@@ -387,9 +409,11 @@ export function spawnAgentLauncher(spec: LaunchSpec): Launcher {
       const args = [SPAWN_AGENT, '--name', l.name, '--cwd', l.cwd, '--label', l.label]
       args.push('--timeout-sec', String(readySec), ...where)
       // The profile: the env as herdr makes it, or the folder the board checked.
-      args.push(...(l.configDir === null ? ['--keep-env'] : ['--config-dir', l.configDir]))
-      if (pi) args.push('--agent', l.agent)
+      // Codex has no Claude profile: it gets neither (spawn-agent refuses them).
+      if (!codex) args.push(...(l.configDir === null ? ['--keep-env'] : ['--config-dir', l.configDir]))
+      if (pi || codex) args.push('--agent', l.agent)
       args.push(...modelArgs(l.model))
+      if (codex && l.effort) args.push('--effort', l.effort)
       return runLauncher(l, on, {
         command: messageFile => ({
           file: process.execPath,

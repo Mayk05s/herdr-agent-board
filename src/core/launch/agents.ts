@@ -57,6 +57,26 @@ export function defaultAgent(spec: LaunchSpec | undefined, offered: () => readon
 }
 
 /**
+ * `launch.codex` from config.json as a list, as piCommand reads `launch.pi`: `codex` when it is
+ * unset. spawn-agent --agent codex types it, with the options it was given after it.
+ */
+export function codexCommand(setting: unknown, win: boolean = process.platform === 'win32'): string[] {
+  if (setting === undefined || setting === null || (typeof setting === 'string' && !setting.trim()))
+    return [CODEX_AGENT]
+  const list: unknown = typeof setting === 'string' ? [setting] : setting
+  if (
+    !Array.isArray(list) ||
+    !list.length ||
+    !list.every((s): s is string => typeof s === 'string') ||
+    !String(list[0]).trim()
+  )
+    throw new Error(t('launch.err.codexCommand'))
+  const problem = typingProblem(list, win)
+  if (problem) throw new Error(t('launch.err.codexTyping', { word: problem.word }))
+  return [...list]
+}
+
+/**
  * `launch.pi` from config.json as a list: the program and its arguments, `pi` when it is unset. A
  * string is the program alone, as `launch.claude` reads it. It is typed at the tab's shell prompt,
  * so it must be typable there (spawn-args.ts typingProblem). Throws with what is wrong, in the

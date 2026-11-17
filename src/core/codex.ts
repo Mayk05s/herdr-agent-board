@@ -1,6 +1,7 @@
 // Codex rollouts contain response items and event copies of those same messages. Read the
 // response items only; system instructions, reasoning and tool outputs stay out of the thread.
 import { boardNotice } from './notices.ts'
+import type { Naming } from './pi.ts'
 import {
   type ConversationTurn,
   cleanPrompt,
@@ -173,4 +174,18 @@ export function parseCodexTail(lines: readonly string[]): TranscriptInfo {
  */
 export function parseCodexConversation(lines: readonly string[], limit = 40): ConversationTurn[] {
   return fitThread(readRollout(lines).conversation.slice(-limit))
+}
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Codex's /rename runs without a turn and prints nothing: the name shows at the end of the status
+ * line under the input (`GPT-6.1-Sol low · <folder> · <name>`), cut with … when it is long.
+ */
+export const CODEX_NAMING: Naming = {
+  title: 'Codex',
+  command: name => `/rename ${name}`,
+  done: /(?!)/,
+  // The first 40 characters: a long name is cut in the status line.
+  doneFor: name => new RegExp(`·\\s*${escapeRe(name.trim().slice(0, 40)).replace(/\s+/g, '\\s+')}`),
 }

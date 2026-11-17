@@ -29,8 +29,14 @@ const codexRoot = (): string => process.env.CODEX_HOME || join(homedir(), '.code
  * list is the one folder it always was.
  */
 function codexRoots(first: string): string[] {
+  const dedicated = dedicatedCodexHome()
+  return dedicated && dedicated !== first ? [first, dedicated] : [first]
+}
+
+/** The dedicated CODEX_HOME for sessions herdr runs (config.json `codexHome`); null when none is set. */
+export function dedicatedCodexHome(): string | null {
   const dedicated = readConfigFile()?.codexHome
-  return typeof dedicated === 'string' && dedicated && dedicated !== first ? [first, dedicated] : [first]
+  return typeof dedicated === 'string' && dedicated ? dedicated : null
 }
 
 export async function cachedCodexModels(root = codexRoot()): Promise<Record<string, string[]>> {

@@ -134,6 +134,10 @@ export const LAUNCH_STRINGS: Record<Lang, Record<string, string | string[]>> = {
       'The board starts sessions with launch.command or launch.agent, which pick the agent themselves',
     'launch.err.piCommand':
       'launch.pi in config.json must be a program, or a list of the program and its arguments: ["pi", "--model", "sonnet"]',
+    'launch.err.codexCommand':
+      'launch.codex in config.json must be a program, or a list of the program and its arguments: ["codex", "--search"]',
+    'launch.err.codexTyping':
+      'launch.codex: “{word}” cannot be typed at the tab’s shell prompt (the program a name on PATH or a path without spaces, no quotes or control characters)',
     'launch.err.piTyping':
       'launch.pi: “{word}” cannot be typed at the tab’s shell prompt (the program a name on PATH or a path without spaces, no quotes or control characters)',
     'launch.err.gone': 'That start is no longer on the board',
@@ -315,6 +319,10 @@ export const LAUNCH_STRINGS: Record<Lang, Record<string, string | string[]>> = {
       'Доска запускает сессии через launch.command или launch.agent, а они сами выбирают агента',
     'launch.err.piCommand':
       'launch.pi в config.json должен быть программой или списком: программа, потом её аргументы: ["pi", "--model", "sonnet"]',
+    'launch.err.codexCommand':
+      'launch.codex в config.json должен быть программой или списком: программа, потом её аргументы: ["codex", "--search"]',
+    'launch.err.codexTyping':
+      'launch.codex: «{word}» не набрать в командной строке вкладки (программа — имя из PATH или путь без пробелов, без кавычек и управляющих символов)',
     'launch.err.piTyping':
       'launch.pi: «{word}» не набрать в командной строке вкладки (программа — имя из PATH или путь без пробелов, без кавычек и управляющих символов)',
     'launch.err.gone': 'Этого запуска на доске уже нет',
