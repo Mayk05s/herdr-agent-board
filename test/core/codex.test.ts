@@ -1,6 +1,12 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { isCodexItem, isCodexSession, parseCodexConversation, parseCodexTail } from '../../src/core/codex.ts'
+import {
+  isCodexItem,
+  isCodexSession,
+  parseCodexConversation,
+  parseCodexTail,
+  resumedCodexSession,
+} from '../../src/core/codex.ts'
 
 const row = (type: string, payload: Record<string, unknown>) =>
   JSON.stringify({ timestamp: '2026-10-20T08:00:00Z', type, payload })
@@ -164,4 +170,23 @@ test('the card’s model and effort are the last turn’s, from its turn_context
   expect(parseCodexTail([turn('gpt-5.6-sol', undefined, 'medium')])).toMatchObject({ effort: 'medium' })
   const none = parseCodexTail([message('user', 'fix it')])
   expect('model' in none || 'effort' in none).toBe(false)
+})
+
+test('the session a codex command line resumes: only `codex resume <id>`, nothing else', () => {
+  const id = '01a1ea39-cccb-70e0-a8f8-aff0a74459c6'
+  expect(resumedCodexSession(['codex', 'resume', id, '--no-daemon', '-m', 'gpt-6.1-sol'])).toBe(id)
+  expect(resumedCodexSession(['/opt/bin/codex', '-c', 'x=1', 'resume', '--no-daemon', id.toUpperCase()])).toBe(id)
+  expect(resumedCodexSession(['C:\\Tools\\codex.exe', 'resume', id])).toBe(id)
+  for (const argv of [
+    ['codex'],
+    ['codex', '--no-daemon'],
+    ['codex', 'resume'],
+    ['codex', 'resume', '--last'],
+    ['codex', 'resume', 'не id'],
+    ['codex', id],
+    ['claude', 'resume', id],
+    ['claude', '--resume', id],
+    [],
+  ])
+    expect(resumedCodexSession(argv)).toBeNull()
 })

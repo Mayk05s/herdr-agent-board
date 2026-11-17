@@ -3,6 +3,7 @@
 import { execFile } from 'node:child_process'
 import { isAgentStatus } from '../core/board.ts'
 import type { PaneProcesses } from '../core/board-pane.ts'
+import { CODEX_AGENT, resumedCodexSession } from '../core/codex.ts'
 import type { AgentStatus } from '../core/types.ts'
 import { isRecord } from './json-store.ts'
 
@@ -155,9 +156,38 @@ export function asSnapshot(result: unknown): HerdrSnapshot {
   )
 }
 
+/** How long what a pane's process said stands before it is asked again. */
+const RESUMED_MS = 10_000
+const resumed = new Map<string, { terminal: string; at: number; session: Promise<string | null> }>()
+
+/**
+ * The session id a Codex pane was resumed with (`codex resume <id>`), read from its foreground
+ * process's argv: after a resume herdr reports no session for the pane, though the rollout is the
+ * same one. Asked only for a Codex pane herdr gives no session, at most once per RESUMED_MS.
+ */
+function resumedSession(pane: string, terminal: string): Promise<string | null> {
+  const hit = resumed.get(pane)
+  if (hit && hit.terminal === terminal && Date.now() - hit.at < RESUMED_MS) return hit.session
+  const session = paneProcesses(pane, 5000)
+    .then(procs => procs?.foreground.map(p => resumedCodexSession(p.args)).find(id => id) ?? null)
+    .catch(() => null)
+  resumed.set(pane, { terminal, at: Date.now(), session })
+  return session
+}
+
+/** A Codex pane herdr knows no session of, given the one it was resumed with; every other pane as it is. */
+async function withResumedSession(pane: HerdrPane): Promise<HerdrPane> {
+  if (pane.agent !== CODEX_AGENT || pane.agent_session?.value) return pane
+  const value = await resumedSession(pane.pane_id, pane.terminal_id ?? '')
+  return value ? { ...pane, agent_session: { value, source: 'board:codex-resume' } } : pane
+}
+
 /** Workspaces, tabs, panes and agents in one call. */
 export async function snapshot(): Promise<HerdrSnapshot> {
-  return asSnapshot(await herdr(['api', 'snapshot']))
+  const snap = asSnapshot(await herdr(['api', 'snapshot']))
+  if (snap.panes.some(p => p.agent === CODEX_AGENT && !p.agent_session?.value))
+    snap.panes = await Promise.all(snap.panes.map(withResumedSession))
+  return snap
 }
 
 /** Every pane in a snapshot, with the terminal it holds (null when herdr did not say). */
@@ -195,7 +225,11 @@ export function asAgent(answer: unknown): HerdrAgent | null {
 
 /** The agent in a pane, or null when the pane has none. */
 export async function agentGet(pane: string, timeoutMs = 30_000): Promise<HerdrAgent | null> {
-  return asAgent(await herdr(['agent', 'get', pane], timeoutMs))
+  const answer = await herdr(['agent', 'get', pane], timeoutMs)
+  const agent = asAgent(answer)
+  if (agent?.kind !== CODEX_AGENT || agent.session) return agent
+  const terminal = isRecord(answer) && isRecord(answer.agent) ? stringAt(answer.agent, 'terminal_id') : null
+  return { ...agent, session: (await resumedSession(pane, terminal ?? '')) ?? null }
 }
 
 const isPid = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0
