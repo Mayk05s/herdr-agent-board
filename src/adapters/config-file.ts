@@ -187,7 +187,7 @@ export function setTunnelOn(on: boolean): EditResult {
   })
 }
 
-/** Change settings in config.json from the web board: { language, foldWaiting }. */
+/** Change settings in config.json from the web board: { language, foldWaiting, cardModel }. */
 export function editSettings(body: unknown): EditResult {
   return editConfig(raw => {
     const language = isRecord(body) ? body.language : undefined
@@ -202,6 +202,12 @@ export function editSettings(body: unknown): EditResult {
     if (fold !== undefined) {
       if (!isFoldMode(fold)) return { ok: false, error: t('err.foldWaiting', { mode: String(fold) }) }
       raw.foldWaiting = fold
+    }
+    // The model and effort on every card.
+    const cardModel = isRecord(body) ? body.cardModel : undefined
+    if (cardModel !== undefined) {
+      if (typeof cardModel !== 'boolean') return { ok: false, error: t('err.cardModel') }
+      raw.cardModel = cardModel
     }
     // Auto-compact's default (#378): a limit, or '' (off); its instructions in config.json stay.
     const compactAt = isRecord(body) ? body.compactAt : undefined

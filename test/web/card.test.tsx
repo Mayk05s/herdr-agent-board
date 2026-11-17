@@ -359,3 +359,23 @@ test('a Codex card says its model and effort under its name (#426); a Claude car
   // Without an effort (no turn yet): nothing.
   expect(bothCards({ items: [{ ...codex, effort: null }] }, 'c').react).not.toContain('card-meter')
 })
+
+test('card model setting: off, the cards are as before for Claude, Codex and pi; on, every agent names its model', () => {
+  const codex = item({ key: 'c', name: 'Codex', agent: 'codex', column: 'work', model: 'gpt-6.1-sol', effort: 'low' })
+  const claude = item({ key: 'd', name: 'Claude', agent: 'claude', column: 'work', model: 'opus', effort: 'high' })
+  const pi = item({ key: 'e', name: 'Pi', agent: 'pi', column: 'work', model: 'claude-opus-5-5', effort: 'medium' })
+  const items = [codex, claude, pi]
+  for (const cardModel of [undefined, false]) {
+    const scene = cardModel === undefined ? { items } : { items, cardModel }
+    expect(bothCards(scene, 'c').react).toContain('<div class="card-meter">gpt-6.1-sol · low</div>')
+    expect(bothCards(scene, 'd').react).not.toContain('card-meter')
+    expect(bothCards(scene, 'e').react).not.toContain('card-meter')
+  }
+  const on = { items, cardModel: true }
+  expect(bothCards(on, 'c').react).toContain('<div class="card-meter">Codex · gpt-6.1-sol · low</div>')
+  expect(bothCards(on, 'd').react).toContain('<div class="card-meter">Claude · opus · high</div>')
+  expect(bothCards(on, 'e').react).toContain('<div class="card-meter">pi · claude-opus-5-5 · medium</div>')
+  // A model without an effort still shows; no model, nothing.
+  expect(bothCards({ ...on, items: [{ ...claude, effort: null }] }, 'd').react).toContain('Claude · opus</div>')
+  expect(bothCards({ ...on, items: [{ ...claude, model: null }] }, 'd').react).not.toContain('card-meter')
+})

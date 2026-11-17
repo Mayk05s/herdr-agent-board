@@ -111,6 +111,8 @@ export interface BoardPayload {
   claudeProgram?: string
   /** How a session asleep in "Waiting" folds (core/fold-mode.ts); a board before the setting sent none. */
   foldWaiting?: FoldMode
+  /** Cards show the model and effort of every agent (config.json's cardModel); a board before the setting sent none. */
+  cardModel?: boolean
   /** Auto-compact's default limit as written (#378, core/compact.ts: `300k`, `60%`), '' for off; a board before it sent none. */
   compactDefault?: string
   /** The remote mode (core/remote.ts), only while it is on. */

@@ -292,6 +292,7 @@ export function createBoardState({
       // What a profile without a start command types: the Profiles panel's placeholder.
       claudeProgram: claudeProgram(cfg.launch?.claude, cfg.launch?.args),
       foldWaiting: foldModeOf(cfg.foldWaiting),
+      cardModel: cfg.cardModel === true,
       // Auto-compact's default (#378), '' for off: Settings shows it checked.
       compactDefault: compactDefaultText(cfg.compact),
       // remote: only while the remote mode is on; a board without it sends none.

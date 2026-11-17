@@ -304,6 +304,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.cat.other': '{title} is the fallback lane and stays',
     'err.language': 'Unknown language {lang}',
     'err.foldWaiting': 'Unknown way to fold {mode}',
+    'err.cardModel': 'Model on cards is on or off',
     'err.configUnreadable':
       'config.json does not read as JSON (a comma too many, say): fix it by hand first. Nothing was changed.',
     'err.configBusy':
@@ -373,6 +374,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'set.lang': 'Language',
     'set.panel': 'Session panel',
     'set.fold': 'Sleeping in Waiting',
+    'set.cardModel': 'Model and effort on cards',
     'set.fold.push': 'Unfold, moving cards below',
     'set.fold.over': 'Unfold over cards below',
     'set.fold.off': 'Don’t fold',
@@ -968,6 +970,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.cat.other': '{title} нужна как запасная дорожка',
     'err.language': 'Нет языка {lang}',
     'err.foldWaiting': 'Нет такого способа сворачивать: {mode}',
+    'err.cardModel': 'Модель на карточках: включить или выключить',
     'err.configUnreadable':
       'config.json не читается как JSON (например, лишняя запятая): сначала поправьте его вручную. Ничего не изменено.',
     'err.configBusy':
@@ -1031,6 +1034,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'set.lang': 'Язык',
     'set.panel': 'Панель сессии',
     'set.fold': 'Спящие в «Ждёт внешнего»',
+    'set.cardModel': 'Модель и effort на карточках',
     'set.fold.push': 'Раскрывать, раздвигая соседние',
     'set.fold.over': 'Раскрывать поверх соседних',
     'set.fold.off': 'Не сворачивать',

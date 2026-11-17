@@ -47,6 +47,8 @@ export interface Scene {
   archiving?: string[]
   /** How sessions asleep in "Waiting" fold, as the board says (the React board's own); none: the default. */
   foldWaiting?: FoldMode
+  /** Model and effort on every card (Settings), as the board says; none: a board before the setting. */
+  cardModel?: boolean
 }
 
 export function drawBoth(scene: Scene): { old: Node[]; react: Node[] } {
@@ -58,6 +60,7 @@ export function drawBoth(scene: Scene): { old: Node[]; react: Node[] } {
     categories: scene.categories ?? CATEGORIES,
     schedules: scene.schedules ?? [],
     ...(scene.foldWaiting && { foldWaiting: scene.foldWaiting }),
+    ...(scene.cardModel !== undefined && { cardModel: scene.cardModel }),
   })
   const ui = {
     filter: scene.filter ?? 'all',

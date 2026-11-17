@@ -35,6 +35,7 @@ import {
   questionLine,
 } from '../models/card.ts'
 import { nameParts } from '../models/card-head.ts'
+import { cardMeter } from '../models/card-meter.ts'
 import { pendingQuestions } from '../models/question-model.ts'
 import { restartOf, restartView } from '../models/restart.ts'
 import { COLUMN_COLORS } from '../models/toolbar.ts'
@@ -148,14 +149,11 @@ export function Card(props: CardProps) {
 function CardContent({ item, launch, folding }: { item: Item; launch: LaunchSlots | undefined; folding: boolean }) {
   const { data } = useBoardContext()
   const oneLine = compact(item, data?.schedules)
+  const meter = cardMeter(item, data?.cardModel === true)
   return (
     <>
       <CardTop item={item} />
-      {item.agent === 'codex' && item.model && item.effort && (
-        <div className="card-meter">
-          {item.model} · {item.effort}
-        </div>
-      )}
+      {meter && <div className="card-meter">{meter}</div>}
       {!oneLine && <CardBody item={item} launch={launch} folding={folding} />}
       <CardActions item={item} />
     </>

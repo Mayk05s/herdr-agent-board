@@ -151,6 +151,19 @@ test('editSettings refuses an unknown language', () => {
   assert.equal(saved().language, 'en')
 })
 
+test('editSettings keeps model and effort on cards (card model setting); only true or false', () => {
+  isolatedHome()
+  seed({ language: 'en' })
+  assert.equal(saved().cardModel, undefined)
+  assert.deepEqual(editSettings({ cardModel: true }), { ok: true })
+  assert.equal(saved().cardModel, true)
+  assert.equal(loadConfig().cardModel, true)
+  assert.equal(editSettings({ cardModel: 'yes' }).ok, false)
+  assert.equal(saved().cardModel, true)
+  assert.deepEqual(editSettings({ cardModel: false }), { ok: true })
+  assert.equal(saved().cardModel, false)
+})
+
 test('editSettings keeps how sessions asleep in "Waiting" fold; refuses a way it does not know', () => {
   isolatedHome()
   seed({ language: 'en' })

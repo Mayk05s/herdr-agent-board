@@ -86,9 +86,33 @@ test('the card: the last prompt, the last words and the question in them, the la
     replied: false,
     tool: { id: 't1', name: 'bash', label: 'bash', detail: 'bun test', pending: false },
     context: 2013,
+    model: 'claude-opus-5-5',
   })
   // The user answered: the question is no longer open.
   expect(parsePiTail([...lines, user('yes')])).toMatchObject({ prompt: 'yes', replied: true })
+})
+
+test('the model and the thinking level: the newest answer and the newest level on the branch', () => {
+  const lines = [
+    header(),
+    entry('model_change', { provider: 'p', modelId: 'old-model' }),
+    entry('thinking_level_change', { thinkingLevel: 'low' }),
+    user('go'),
+    said([text('One.')]),
+    entry('thinking_level_change', { thinkingLevel: 'high' }),
+    said([text('Two.')]),
+  ]
+  const info = parsePiTail(lines)
+  expect(info.model).toBe('claude-opus-5-5')
+  expect(info.effort).toBe('high')
+  // No answer yet: the model it was switched to; a level of off is no effort.
+  const fresh = parsePiTail([
+    header(),
+    entry('model_change', { provider: 'p', modelId: 'chosen' }),
+    entry('thinking_level_change', { thinkingLevel: 'off' }),
+  ])
+  expect(fresh.model).toBe('chosen')
+  expect(fresh.effort).toBeUndefined()
 })
 
 test('a tool call without its result yet is pending', () => {

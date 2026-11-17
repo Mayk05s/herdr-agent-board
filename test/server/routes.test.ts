@@ -403,6 +403,17 @@ describe('routes', () => {
     expect(await answer(post('/api/settings', { foldWaiting: 'push' }))).toEqual([200, { ok: true }])
   })
 
+  test('card model setting: off unless config.json says true; Settings take a boolean', async () => {
+    const board = (await (await fetch(`${url}/api/board`)).json()) as { cardModel?: boolean }
+    expect(board.cardModel).toBe(false)
+    expect(await answer(post('/api/settings', { cardModel: 'yes' }))).toEqual([
+      409,
+      { ok: false, error: 'Model on cards is on or off' },
+    ])
+    expect(await answer(post('/api/settings', { cardModel: true }))).toEqual([200, { ok: true }])
+    expect(await answer(post('/api/settings', { cardModel: false }))).toEqual([200, { ok: true }])
+  })
+
   test('settings and categories: refusals answer 409', async () => {
     expect(await answer(post('/api/settings', { language: 'xx' }))).toEqual([
       409,
