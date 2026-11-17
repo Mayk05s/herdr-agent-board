@@ -79,3 +79,22 @@ test('prepareCodexHome links what is shared, never replaces, and keeps skills a 
   expect(lstatSync(join(b.own, 'rules')).isSymbolicLink()).toBe(false)
   expect(() => prepareCodexHome(b.global, b.global)).toThrow('is the global one')
 })
+
+test('prepareCodexHome: the master rule for herdr agent only with master, and only the four commands', () => {
+  const b = boxWith(() => ({}))
+  const rules = join(b.own, 'rules/agent-board.rules')
+  prepareCodexHome(b.own, b.global)
+  expect(readFileSync(rules, 'utf8')).not.toContain('"herdr"')
+  prepareCodexHome(b.own, b.global, { master: true })
+  const master = readFileSync(rules, 'utf8')
+  expect(master).toContain('prefix_rule(pattern=["board"], decision="allow")')
+  expect(master).toContain(
+    'prefix_rule(pattern=["herdr", "agent", ["prompt", "read", "list", "get"]], decision="allow")',
+  )
+  expect(master).not.toMatch(/send-keys|"pane"|"tab"|server/)
+  prepareCodexHome(b.own, b.global, { master: true })
+  expect(readFileSync(rules, 'utf8')).toBe(master)
+  // Installed again without the option, the file is the default one.
+  prepareCodexHome(b.own, b.global)
+  expect(readFileSync(rules, 'utf8')).not.toContain('"herdr"')
+})
