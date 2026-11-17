@@ -99,7 +99,4 @@
   .card-actions .stop-word { animation: none; }
 }
 
-.card-meter {
-  font-size: 0.82em;
-  overflow-wrap: anywhere;
-}
+.card-meter { margin-top: 2px; font-size: 12px; color: var(--label-2); overflow-wrap: anywhere; }
