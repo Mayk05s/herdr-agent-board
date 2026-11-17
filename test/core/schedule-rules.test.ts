@@ -197,3 +197,20 @@ test('prompt: a restart says how it went as upstream’s promptOf at #51 does, i
     }
   }
 })
+
+test("target: a thread's event follows its session's unique name, in the same profile, and nothing else does", () => {
+  const events = entry({ key: 'old', name: 'master', by: 'threads' })
+  const one = () => 'default'
+  const a = item({ key: 's1', session: 's1', name: 'master' })
+  const b = item({ key: 's2', session: 's2', name: 'other' })
+  assert.deepEqual(targetOf(events, [a, b], one), { item: a })
+  assert.deepEqual(targetOf(events, [b], one), {}) // no one by that name
+  assert.deepEqual(targetOf(events, [a, item({ key: 's3', session: 's3', name: 'master' })], one), {}) // two
+  assert.deepEqual(
+    targetOf(events, [a], key => (key === 'old' ? 'work' : 'default')),
+    { other: a },
+  )
+  assert.deepEqual(targetOf(entry({ key: 'old', name: 'master', by: 'threads', pane: 'p9', cwd: 'x' }), [a], one), {})
+  // Not a thread's event: a name alone leads nowhere, as before.
+  assert.deepEqual(targetOf(entry({ key: 'old', name: 'master' }), [a], one), {})
+})

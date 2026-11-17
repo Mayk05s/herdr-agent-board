@@ -6,7 +6,7 @@
 // wakes its session.
 import { setDefaultTimeout, test } from 'bun:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDb } from '../../src/adapters/db.ts'
 import { listEntries } from '../../src/adapters/schedule-store.ts'
@@ -39,9 +39,9 @@ function config(box: Sandbox, extra: Record<string, unknown>): void {
 }
 
 /** The master in p1 and the worker atlas-mapper in p2, each with its card in lane atlas; the master `status`. */
-function twoSessions(box: Sandbox, status = 'idle'): void {
+function twoSessions(box: Sandbox, status = 'idle', master = MASTER): void {
   const panes = [
-    { pane_id: 'p1', session: MASTER, name: 'master', status },
+    { pane_id: 'p1', session: master, name: 'master', status },
     { pane_id: 'p2', session: MAPPER, name: 'atlas-mapper', status: 'idle' },
   ]
   box.state({
@@ -287,4 +287,93 @@ test('with --idle, ten changes during a busy turn wait for its end and arrive as
   assert.deepEqual(prompts(box), [
     '[board reminder from threads] atlas-1 done: part 1 mapped · atlas-2 done: part 2 mapped · atlas-3 done: part 3 mapped · and 7 more. More: board thread changes',
   ])
+})
+
+const MASTER2 = '0c0c0c0c-0000-4000-8000-00000000000c'
+
+/** The master watches atlas-1, the mapper posts to it; then /clear gives the master's pane a new id, same name. */
+async function afterClear(box: Sandbox): Promise<void> {
+  config(box, { threads: true })
+  twoSessions(box)
+  const made = await board(box, MASTER, 'p1', ['thread', 'new', '--lane', 'atlas', 'Import mapping for the order feed'])
+  await board(box, MASTER, 'p1', ['thread', 'watch', '--lane', 'atlas'])
+  const posted = await board(box, MAPPER, 'p2', [
+    'thread',
+    'post',
+    'atlas-1',
+    '--status',
+    'doing',
+    '--summary',
+    'started',
+  ])
+  assert.deepEqual([made.code, posted.code], [0, 0], `${made.out} / ${posted.out}`)
+  assert.equal(entries(box).filter(e => e.by === 'threads').length, 1)
+  rmSync(join(box.cards, `${MASTER}.json`))
+  twoSessions(box, 'idle', MASTER2)
+}
+
+test('a thread event follows its session across /clear by the unique name, once, and its watches go with it', async () => {
+  const box = await sandbox()
+  await afterClear(box)
+  await scheduler(box)
+  await until(() => prompts(box, 'p1').length === 1, 20_000)
+  await new Promise(resolve => setTimeout(resolve, 1500))
+  assert.equal(prompts(box, 'p1').length, 1)
+  assert.match(
+    prompts(box, 'p1')[0] as string,
+    /^\[board reminder from threads; set for master before \/clear\] atlas-1 /,
+  )
+  assert.deepEqual(entries(box), [])
+  // The new id is the watcher now: the next change is told to it, not to the old id.
+  await board(box, MAPPER, 'p2', ['thread', 'post', 'atlas-1', '--status', 'done', '--summary', 'more'])
+  assert.deepEqual(
+    entries(box).map(e => e.key),
+    [MASTER2],
+  )
+})
+
+test('an event the new id has read (board thread changes after /clear) is dropped, not typed in', async () => {
+  const box = await sandbox()
+  await afterClear(box)
+  // The watch is still the old id's: the new session asks as itself, and reads nothing it has no watch for.
+  const first = await board(box, MASTER2, 'p1', ['thread', 'changes'])
+  assert.equal(first.code, 0, first.out)
+  await scheduler(box)
+  await until(() => entries(box).length === 0, 20_000)
+  await new Promise(resolve => setTimeout(resolve, 1500))
+  assert.deepEqual(prompts(box, 'p1'), [])
+})
+
+test('two sessions with the name: the event follows neither and stays', async () => {
+  const box = await sandbox()
+  await afterClear(box)
+  const twin = {
+    pane_id: 'p3',
+    agent: 'claude',
+    agent_session: { value: MAPPER.replace(/b/g, 'd') },
+    agent_status: 'idle',
+    terminal_title_stripped: 'master',
+    cwd: box.dir,
+  }
+  const snap = box.calls
+  void snap
+  box.state({
+    'api snapshot': {
+      result: {
+        snapshot: {
+          panes: [{ ...twin, pane_id: 'p1', agent_session: { value: MASTER2 } }, twin],
+          tabs: [],
+          workspaces: [],
+        },
+      },
+    },
+  })
+  writeFileSync(
+    join(box.cards, `${twin.agent_session.value}.json`),
+    JSON.stringify({ key: twin.agent_session.value, name: 'master', category: 'atlas' }),
+  )
+  await scheduler(box)
+  await new Promise(resolve => setTimeout(resolve, 2500))
+  assert.deepEqual(prompts(box), [])
+  assert.equal(entries(box).filter(e => e.by === 'threads').length, 1)
 })
