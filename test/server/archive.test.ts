@@ -1065,3 +1065,104 @@ test('the page’s own calls (web/src/api/client.ts) against these routes: archi
     globalThis.fetch = realFetch
   }
 }, 60_000)
+
+// A sleeper whose pane wake closed (#204) has no pane: herdr-wake lists it with none, the board's
+// item has pane null, and its record keeps ''. That is the same place, not another pane (#323).
+const freedSleeper = async (sleeping: () => boolean) => {
+  const wake = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json')
+    res.end(
+      JSON.stringify(
+        req.url?.startsWith('/sleeping') && sleeping()
+          ? [{ session: S, name: 'Probe', slept_at: new Date(Date.now() - 5 * DAY).toISOString() }]
+          : {},
+      ),
+    )
+  })
+  await new Promise<void>(resolve => wake.listen(0, '127.0.0.1', resolve))
+  return { wake, wakeUrl: `http://127.0.0.1:${(wake.address() as AddressInfo).port}` }
+}
+
+test('a sleeper without a pane archived by id stays archived: no "returned", off the board (#323)', async () => {
+  const box = await sandbox()
+  const dir = project(box)
+  herdrWith(box, dir, { gone: true })
+  const { wake, wakeUrl } = await freedSleeper(() => true)
+  try {
+    const b = await board(box, { archiveUndoSec: 0.2, wakeUrl })
+    assert.ok((await b.items()).includes(S))
+    const r = await b.archive()
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    await until(() => record(box)?.state === 'archived', 10_000)
+    await b.refresh()
+    await b.refresh()
+    assert.equal(record(box)?.state, 'archived')
+    assert.equal((await b.items()).includes(S), false)
+    assert.deepEqual(
+      archiveLog(box).map(e => e.result),
+      ['closed'],
+    )
+  } finally {
+    await new Promise(resolve => wake.close(resolve))
+  }
+}, 30_000)
+
+test('board archive --session by name for a sleeper without a pane: it stays archived (#323)', async () => {
+  const box = await sandbox()
+  const dir = project(box)
+  herdrWith(box, dir, { gone: true })
+  const { wake, wakeUrl } = await freedSleeper(() => true)
+  try {
+    boardConfig(box, { port: 9, wakeUrl, categories: CATEGORIES })
+    const b = await board(box, { archiveUndoSec: 30, wakeUrl })
+    const out = await box.run('cli', {
+      args: ['archive', '--session', 'Probe'],
+      env: { CLAUDE_CODE_SESSION_ID: OTHER },
+    }).exited
+    assert.equal(out.code, 0, `${out.stdout}${out.stderr}`)
+    await b.refresh()
+    await b.refresh()
+    assert.equal(record(box)?.state, 'archived')
+    assert.equal((await b.items()).includes(S), false)
+    assert.deepEqual(
+      archiveLog(box).map(e => e.result),
+      ['closed'],
+    )
+  } finally {
+    await new Promise(resolve => wake.close(resolve))
+  }
+}, 30_000)
+
+test('a freed sleeper resumed by hand in a pane after archiving still counts as returned (#323)', async () => {
+  const box = await sandbox()
+  const dir = project(box)
+  herdrWith(box, dir, { gone: true })
+  let sleeping = true
+  const { wake, wakeUrl } = await freedSleeper(() => sleeping)
+  try {
+    const b = await board(box, { archiveUndoSec: 0.2, wakeUrl })
+    assert.equal((await b.archive()).status, 200)
+    await until(() => record(box)?.state === 'archived', 10_000)
+    await b.refresh()
+    assert.equal((await b.items()).includes(S), false)
+    // The user runs `claude --resume` in a pane of their own: it is no sleeper any more.
+    sleeping = false
+    box.state({
+      ...herdrState(dir, { gone: true }),
+      'api snapshot': {
+        result: {
+          snapshot: { panes: [FRESH(dir)], tabs: [], workspaces: [{ workspace_id: 'wP', label: 'Personal' }] },
+        },
+      },
+    })
+    await b.refresh()
+    await until(() => record(box) === null, 10_000)
+    assert.ok((await b.items()).includes(S))
+    assert.deepEqual(
+      archiveLog(box).map(e => e.result),
+      ['closed', 'returned'],
+    )
+  } finally {
+    await new Promise(resolve => wake.close(resolve))
+  }
+}, 30_000)

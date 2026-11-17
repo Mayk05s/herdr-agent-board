@@ -93,7 +93,13 @@ function update(
  * is archived, the session is back (resumed by Return, or by hand); one being put back shows.
  */
 export const hides = (record: ArchiveRecord | null, item: Pick<Item, 'pane'>): boolean =>
-  !!record && (record.state === 'closing' || (record.state === 'archived' && record.pane === item.pane))
+  !!record && (record.state === 'closing' || (record.state === 'archived' && samePane(record.pane, item.pane)))
+
+/**
+ * Whether the record's pane and the item's are the same place. A sleeper whose pane wake closed
+ * (#204) has none: its record keeps '' and its item null, and that is no other pane (#323).
+ */
+const samePane = (archived: string, now: string | null | undefined): boolean => archived === (now ?? '')
 
 // ------------------------------------------------------------------ the session's profile
 
@@ -595,7 +601,7 @@ export function settleReturned(item: Pick<Item, 'key' | 'pane' | 'cwd'>): boolea
       seen.r = rec
       return undefined
     }
-    if (rec.state !== 'archived' || rec.pane === item.pane) return undefined
+    if (rec.state !== 'archived' || samePane(rec.pane, item.pane)) return undefined
     const moved: ArchiveRecord = { ...rec, state: 'restoring', moved: true }
     seen.r = moved
     seen.fresh = true
