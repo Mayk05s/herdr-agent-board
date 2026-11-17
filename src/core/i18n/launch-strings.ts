@@ -129,7 +129,7 @@ export const LAUNCH_STRINGS: Record<Lang, Record<string, string | string[]>> = {
     'launch.err.model': 'Not a model name: an alias such as opus or sonnet, or a full name, one word',
     'launch.err.modelLong': 'The model name is longer than {max} characters',
     'launch.err.modelLauncher':
-      'The board starts sessions with a launcher that takes no model (launch.command without {model}, or launch.agent for another agent than Claude or pi)',
+      'The board starts sessions with a launcher that takes no model (launch.command without {model}, or launch.agent for another agent than Claude, pi or Codex)',
     'launch.err.agentLauncher':
       'The board starts sessions with launch.command or launch.agent, which pick the agent themselves',
     'launch.err.piCommand':
@@ -310,7 +310,7 @@ export const LAUNCH_STRINGS: Record<Lang, Record<string, string | string[]>> = {
     'launch.err.model': 'Это не имя модели: псевдоним вроде opus или sonnet или полное имя, одним словом',
     'launch.err.modelLong': 'Имя модели длиннее {max} символов',
     'launch.err.modelLauncher':
-      'Доска запускает сессии запускателем, который не берёт модель (launch.command без {model} или launch.agent для агента, который не Claude и не pi)',
+      'Доска запускает сессии запускателем, который не берёт модель (launch.command без {model} или launch.agent для агента, который не Claude, не pi и не Codex)',
     'launch.err.agentLauncher':
       'Доска запускает сессии через launch.command или launch.agent, а они сами выбирают агента',
     'launch.err.piCommand':

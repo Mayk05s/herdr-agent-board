@@ -7,7 +7,7 @@ import { isAbsolute, join } from 'node:path'
 import { allCards, writeCard } from '../adapters/cards.ts'
 import type { ClaudeHome } from '../adapters/claude-home.ts'
 import { helpersOf } from '../adapters/helpers.ts'
-import { herdrText, paneTerminals, snapshot } from '../adapters/herdr.ts'
+import { paneTerminals, snapshot } from '../adapters/herdr.ts'
 import { isRecord } from '../adapters/json-store.ts'
 import type { LinksIndex } from '../adapters/links.ts'
 import { callAgentsGate, taskBoard } from '../adapters/mokupilot-call.ts'
@@ -17,7 +17,7 @@ import type { LiveHit } from '../adapters/profile-homes.ts'
 import { attentionOf, busy, columnOf, isAgentStatus, PINS } from '../core/board.ts'
 import { besideParents, type CallAgent, type CallView } from '../core/call-agent.ts'
 import { categoryFor } from '../core/categories.ts'
-import { codexMeter, isCodexItem } from '../core/codex.ts'
+import { isCodexItem } from '../core/codex.ts'
 import { compactView } from '../core/compact.ts'
 import { waitingTool } from '../core/held-question.ts'
 import { type HelperSummary, summarize } from '../core/helpers.ts'
@@ -576,19 +576,6 @@ export async function collect(
       it.links = l && (l.from || l.started.length || l.talks.length) ? l : null
     }
   }
-  await Promise.all(
-    items.flatMap(item => {
-      if (!isCodexItem(item) || !item.pane || item.sleeping) return []
-      return [
-        herdrText(['agent', 'read', item.pane, '--source', 'visible'], 1500)
-          .then(screen => {
-            const meter = codexMeter(screen)
-            if (meter) Object.assign(item, meter)
-          })
-          .catch(() => {}),
-      ]
-    }),
-  )
   panesSeen(paneTerminals(snap))
   return items
 }

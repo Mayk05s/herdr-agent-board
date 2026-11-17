@@ -2180,7 +2180,7 @@ test('the board’s spawn-agent starts the session on the model asked for, and i
   noEnv(box)
 }, 60_000)
 
-test('through herdr (launch.agent claude): --model before the session id; another agent than Claude or pi refuses a model before anything runs', async () => {
+test('through herdr (launch.agent claude): --model before the session id; another agent than Claude, pi or Codex refuses a model before anything runs', async () => {
   const { box, launched, started } = await boardServer(VIA_HERDR)
   const dir = join(box.dir, 'Alpha project')
   mkdirSync(dir)
@@ -2189,7 +2189,16 @@ test('through herdr (launch.agent claude): --model before the session id; anothe
   const start = box.calls().find(a => a[0] === 'agent' && a[1] === 'start') ?? []
   assert.deepEqual(start.slice(-5, -1), ['--', '--model', 'opus', '--session-id'])
   assert.equal(modelOf(box.cards, start.at(-1)), 'opus')
-  const other = await boardServer({ launch: { agent: 'codex' } })
+  // Codex takes --model too since #426: launch.agent codex starts it on the model asked for.
+  const codex = await boardServer({ launch: { agent: 'codex' } })
+  const cdir = join(codex.box.dir, 'Codex')
+  mkdirSync(cdir)
+  const c = await codex.launched(
+    await codex.started({ name: 'Codex job', cwd: cdir, workspace: { id: 'wA' }, model: 'gpt-5.5' }),
+  )
+  const cstart = codex.box.calls().find(a => a[0] === 'agent' && a[1] === 'start') ?? []
+  assert.deepEqual(cstart.slice(cstart.indexOf('--'), cstart.indexOf('--') + 3), ['--', '--model', 'gpt-5.5'], c.error)
+  const other = await boardServer({ launch: { agent: 'opencode' } })
   const odir = join(other.box.dir, 'Omega')
   mkdirSync(odir)
   const res = await other.post('/api/launch', { name: 'Omega', cwd: odir, workspace: { id: 'wA' }, model: 'opus' })
@@ -2225,18 +2234,19 @@ test('launch.command gets {model} when it takes it; one without {model} refuses 
   assert.deepEqual(await res.json(), {
     ok: false,
     error:
-      'The board starts sessions with a launcher that takes no model (launch.command without {model}, or launch.agent for another agent than Claude or pi)',
+      'The board starts sessions with a launcher that takes no model (launch.command without {model}, or launch.agent for another agent than Claude, pi or Codex)',
     field: 'model',
   })
   assert.equal(existsSync(record), false)
 }, 60_000)
 
-test('the new-session window is told whether the launcher takes a model: its own spawn-agent, Claude or pi through herdr, a launch.command with {model}', async () => {
+test('the new-session window is told whether the launcher takes a model: its own spawn-agent, Claude, pi or Codex through herdr, a launch.command with {model}', async () => {
   const cases: [string, Record<string, unknown>, boolean][] = [
     ['spawn-agent', {}, true],
     ['launch.agent claude', VIA_HERDR, true],
     ['launch.agent pi', { launch: { agent: 'pi' } }, true],
-    ['launch.agent codex', { launch: { agent: 'codex' } }, false],
+    ['launch.agent codex', { launch: { agent: 'codex' } }, true],
+    ['launch.agent opencode', { launch: { agent: 'opencode' } }, false],
     [
       'launch.command with {model}',
       { launch: { command: [process.execPath, launcher, ['--model', '{model}']] } },

@@ -1,6 +1,5 @@
 // Codex rollouts contain response items and event copies of those same messages. Read the
 // response items only; system instructions, reasoning and tool outputs stay out of the thread.
-import { stripAnsi } from './dialogs/input-box.ts'
 import { boardNotice } from './notices.ts'
 import {
   type ConversationTurn,
@@ -78,6 +77,9 @@ interface Rollout {
   conversation: ConversationTurn[]
   tool: ToolCall | null
   context?: number
+  /** The model and effort of the last turn (its turn_context), what the card shows. */
+  model?: string
+  effort?: string
 }
 
 function readRollout(lines: readonly string[]): Rollout {
@@ -85,10 +87,16 @@ function readRollout(lines: readonly string[]): Rollout {
   const calls = new Map<string, ToolTurn>()
   let tool: ToolCall | null = null
   let context: number | undefined
+  let model: string | undefined
+  let effort: string | undefined
   for (const line of lines) {
     const entry = parse(line)
     const item = rec(entry?.payload)
     if (!entry || !item) continue
+    if (entry.type === 'turn_context') {
+      model = str(item.model) || model
+      effort = str(item.effort) || str(rec(rec(item.collaboration_mode)?.settings)?.reasoning_effort) || effort
+    }
     if (entry.type === 'event_msg' && item.type === 'token_count') {
       const usage = rec(rec(item.info)?.last_token_usage)
       if (typeof usage?.input_tokens === 'number' && Number.isFinite(usage.input_tokens)) context = usage.input_tokens
@@ -119,12 +127,18 @@ function readRollout(lines: readonly string[]): Rollout {
       if (tool?.id === id) tool.pending = false
     }
   }
-  return { conversation, tool, ...(context !== undefined && { context }) }
+  return {
+    conversation,
+    tool,
+    ...(context !== undefined && { context }),
+    ...(model && { model }),
+    ...(effort && { effort }),
+  }
 }
 
 /** The last prompt, answer, question, tool and request size for a Codex card. */
 export function parseCodexTail(lines: readonly string[]): TranscriptInfo {
-  const { conversation, tool, context } = readRollout(lines)
+  const { conversation, tool, context, model, effort } = readRollout(lines)
   let prompt = ''
   let lastText = ''
   let question = ''
@@ -140,7 +154,17 @@ export function parseCodexTail(lines: readonly string[]): TranscriptInfo {
     }
     if (prompt && lastText) break
   }
-  return { title: '', prompt, lastText, question, replied, tool, ...(context !== undefined && { context }) }
+  return {
+    title: '',
+    prompt,
+    lastText,
+    question,
+    replied,
+    tool,
+    ...(context !== undefined && { context }),
+    ...(model && { model }),
+    ...(effort && { effort }),
+  }
 }
 
 /**
@@ -149,19 +173,4 @@ export function parseCodexTail(lines: readonly string[]): TranscriptInfo {
  */
 export function parseCodexConversation(lines: readonly string[], limit = 40): ConversationTurn[] {
   return fitThread(readRollout(lines).conversation.slice(-limit))
-}
-
-/** Read the model and effort together from Codex CLI's status line. */
-export function codexMeter(screen: string): { model: string; effort: string } | null {
-  const lines = stripAnsi(screen)
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-  for (const line of lines.slice(-4).reverse()) {
-    const match = /^(GPT[- ][\w .-]+?) (minimal|none|low|medium|high|xhigh|max|ultra) · (?:[~/]|[A-Za-z]:[\\/])/.exec(
-      line,
-    )
-    if (match?.[1] && match[2]) return { model: match[1], effort: match[2] }
-  }
-  return null
 }
