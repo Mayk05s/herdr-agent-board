@@ -130,6 +130,8 @@ test('--codex --codex-home puts hooks, links and skills in the dedicated folder 
     expect(result.code).toBe(0)
     expect(result.stderr).toBe('')
     expect(readFileSync(join(dir, 'hooks.json'), 'utf8').match(/codex-hook\.ts/g)).toHaveLength(2)
+    // Named in Codex's /hooks instead of "Unnamed hook", once each however often it runs.
+    expect(readFileSync(join(dir, 'hooks.json'), 'utf8').match(/"statusMessage"/g)).toHaveLength(2)
     expect(readFileSync(join(dir, 'auth.json'), 'utf8')).toBe('{"t":1}')
     expect(lstatSync(join(dir, 'config.toml')).isSymbolicLink()).toBe(true)
     expect(lstatSync(join(dir, 'skills/mine')).isSymbolicLink()).toBe(true)
@@ -162,6 +164,8 @@ test('--codex-home without a folder takes ~/.config/herdr/codex; a plain --codex
   expect(existsSync(join(home, '.codex'))).toBe(false)
   const plain = await install(box, ['--codex'])
   expect(plain.stdout).not.toContain('Codex home:')
+  // A plain --codex writes its hooks unnamed, as before: a name would change their trusted hash.
+  expect(readFileSync(join(home, '.codex/hooks.json'), 'utf8')).not.toContain('statusMessage')
 })
 
 test('--codex-master adds the herdr agent rule to the dedicated home; without it, and with a plain --codex, there is none', async () => {

@@ -5,6 +5,9 @@ import type { Lang } from '../types.ts'
 
 export const SETUP_STRINGS: Record<Lang, Record<string, string | string[]>> = {
   en: {
+    'setup.codexHook.session': 'Board: session card',
+    'setup.codexHook.prompt': 'Board: card update',
+    'setup.codexHook.herdr': 'herdr: agent status',
     'setup.cards.title': 'Card store',
     'setup.cards.check': 'Check the card store used by this preview',
     'setup.cards.invalid': 'The explicit card-store path is invalid',
@@ -178,6 +181,9 @@ export const SETUP_STRINGS: Record<Lang, Record<string, string | string[]>> = {
     'setup.toast.notBuiltFix': 'With the Command Line Tools in (xcode-select --install), build it again:',
   },
   ru: {
+    'setup.codexHook.session': 'Борда: карточка сессии',
+    'setup.codexHook.prompt': 'Борда: обновление карточки',
+    'setup.codexHook.herdr': 'herdr: статус агента',
     'setup.cards.title': 'Хранилище карточек',
     'setup.cards.check': 'Проверь хранилище карточек этого preview',
     'setup.cards.invalid': 'Неверный явный путь к карточкам',
