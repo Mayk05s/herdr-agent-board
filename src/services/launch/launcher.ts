@@ -27,6 +27,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { noDaemonArgs } from '../../adapters/codex-flags.ts'
 import { dedicatedCodexHome } from '../../adapters/codex-home.ts'
 import { herdr, tabCreateRoot } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
@@ -268,6 +269,9 @@ export function herdrLauncher(spec: LaunchSpec, codexFork = false): Launcher {
       // After launch.args and the profile's: of two --model, the last is the one taken.
       if (l.model && MODEL_AGENTS.has(kind)) args.push(...modelArgs(l.model))
       if (kind === 'codex' && l.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(l.effort)}`)
+      // The pane's env must reach a new Codex session, not the shared server's (adapters/codex-flags.ts).
+      // A fork keeps the way it was started.
+      if (kind === 'codex' && !codexFork && !args.includes('--no-daemon')) args.push(...(await noDaemonArgs([kind])))
       let sessionId: string | null = null
       if (l.resume) {
         sessionId = l.resume

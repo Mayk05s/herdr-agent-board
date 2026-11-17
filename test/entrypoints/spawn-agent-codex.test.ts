@@ -30,10 +30,10 @@ const STATE = {
   'pane send-keys': { result: null },
 }
 
-async function runSpawn(box: Sandbox, args: string[]) {
+async function runSpawn(box: Sandbox, args: string[], extra: Record<string, string> = {}) {
   const proc = Bun.spawn([process.execPath, SPAWN, ...args], {
     cwd: root,
-    env: { ...box.env, BOARD_TEST_PACE: '0.02' },
+    env: { ...box.env, BOARD_TEST_PACE: '0.02', ...extra },
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -190,6 +190,38 @@ test('spawn-agent --agent codex: codex in a new tab, named with /rename, briefed
   // Codex has its id only after the first prompt: the card of the model is written under it then.
   expect(cardOf(box, SID)).toMatchObject({ key: SID, modelWant: 'gpt-6.1-sol' })
 }, 30_000)
+
+/** A `codex` on PATH that answers --help with `help`. */
+function fakeCodex(box: Sandbox, help: string): Record<string, string> {
+  const bin = join(box.dir, 'bin-codex')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, 'codex'), `#!/bin/sh\necho '${help}'\n`, { mode: 0o755 })
+  return { PATH: `${bin}:${box.env.PATH}` }
+}
+
+test('a Codex that takes --no-daemon gets it, so the session runs with the pane’s env and herdr learns its id; one that does not, or a line that has it, is left as it is', async () => {
+  if (process.platform === 'win32') return
+  const ask = (box: Sandbox, dir: string, env: Record<string, string>) =>
+    runSpawn(
+      box,
+      ['--name', 'Helper', '--cwd', dir, '--workspace', 'wA', '--agent', 'codex', '--model', 'gpt-6.1-sol'],
+      env,
+    )
+  const yes = await codexBox()
+  const r = await ask(
+    yes.box,
+    yes.dir,
+    fakeCodex(yes.box, '      --no-daemon\n          Run without the shared background server'),
+  )
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(callList(yes.box)[1], 'pane run wA:p9 codex --no-daemon --model gpt-6.1-sol')
+  const old = await codexBox()
+  await ask(old.box, old.dir, fakeCodex(old.box, '      --search'))
+  assert.equal(callList(old.box)[1], 'pane run wA:p9 codex --model gpt-6.1-sol')
+  const own = await codexBox({ launch: { codex: ['codex', '--no-daemon'] } })
+  await ask(own.box, own.dir, fakeCodex(own.box, '      --no-daemon'))
+  assert.equal(callList(own.box)[1], 'pane run wA:p9 codex --no-daemon --model gpt-6.1-sol')
+}, 60_000)
 
 test('--effort, --approval and --sandbox become -c, -a and -s after the model; launch.codex is typed first', async () => {
   const { box, dir } = await codexBox({ launch: { codex: ['codex', '--search'] } })

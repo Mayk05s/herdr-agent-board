@@ -1892,6 +1892,42 @@ test('Codex on PATH (#426): offered with its models; a start goes through herdr�
   assert.equal(((await bad.json()) as { field: string }).field, 'model')
 }, 60_000)
 
+test('a Codex from the window gets --no-daemon when its --help lists it, so the pane’s env reaches the session; Claude’s start is as it was', async () => {
+  const withHelp = (box: Sandbox) => {
+    const env = codexOnPath(box)
+    writeFileSync(join(env.PATH, 'codex'), '#!/bin/sh\necho "      --no-daemon"\n', { mode: 0o755 })
+    return env
+  }
+  const { box, started, launched } = await boardServer(PROFILES, withHelp)
+  box.state({
+    ...HERDR,
+    'agent get': {
+      result: {
+        agent: {
+          agent: 'codex',
+          agent_session: { value: '01a1e9a1-0037-7510-b480-5ee1c3f01e5c' },
+          agent_status: 'idle',
+        },
+      },
+    },
+  })
+  const dir = join(box.dir, 'Codex')
+  mkdirSync(dir)
+  const l = await launched(
+    await started({
+      cwd: dir,
+      category: 'acme',
+      workspace: { id: 'wA' },
+      name: 'Codex nd',
+      agent: 'codex',
+      model: 'gpt-6.1-sol',
+    }),
+  )
+  assert.equal(l.state, 'done', l.error)
+  const start = callOf(box, 'agent', 'start')
+  assert.deepEqual(start.slice(start.indexOf('--')), ['--', '--model', 'gpt-6.1-sol', '--no-daemon'])
+}, 60_000)
+
 test('Codex from the window with codexHome in config.json: the tab gets CODEX_HOME; a Claude start beside it does not', async () => {
   const cfg = (box: Sandbox) => ({ ...PROFILES(box), codexHome: join(box.dir, 'herdr codex 100%') })
   const { box, started, launched } = await boardServer(cfg, codexOnPath)

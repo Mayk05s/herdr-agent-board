@@ -38,6 +38,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 import { readCard, removeCard, writeCard } from '../../adapters/cards.ts'
 import { createClaudeHome } from '../../adapters/claude-home.ts'
+import { noDaemonArgs } from '../../adapters/codex-flags.ts'
 import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { herdr, herdrText, tabCreateRoot } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
@@ -327,7 +328,13 @@ export async function spawnAgent(
   const ownId = !isCodex && (!!o.fork || (!!o.model && !o.resume && !choosesSession(program)))
   const sessionId = ownId ? (o.sessionId ?? randomUUID()) : o.sessionId
   // The model goes after the profile's arguments: of two --model, Claude and pi take the last.
-  const line = [...program, ...modelArgs(o.model), ...(isCodex ? codexOptions(o) : [])]
+  // Codex: the pane's env must reach the session (adapters/codex-flags.ts).
+  const line = [
+    ...program,
+    ...(isCodex ? await noDaemonArgs(program) : []),
+    ...modelArgs(o.model),
+    ...(isCodex ? codexOptions(o) : []),
+  ]
   const argv = o.resume
     ? [...line, '--resume', o.resume]
     : o.fork
