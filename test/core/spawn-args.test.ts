@@ -154,7 +154,7 @@ describe('spawn-agent options', () => {
         '--agent pi starts a new session: give it no --resume or --fork',
       )
     expect(parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'claude', '--resume', id])).toMatchObject({ resume: id })
-    expect(USAGE).toContain('[--agent claude|pi]')
+    expect(USAGE).toContain('[--agent claude|pi|codex]')
   })
 
   test('the model (#380): --model, -Model or --model=, with a new session, a resume, a fork or pi; blank is none', () => {
