@@ -30,7 +30,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { installSkill } from '../adapters/agents-skill.ts'
 import { defaultCodexHome, prepareCodexHome } from '../adapters/codex-dedicated.ts'
-import { codexHooksPlan, installCodexHooks } from '../adapters/codex-hooks.ts'
+import { codexHooksPlan, installCodexHooks, labelHerdrHookIn } from '../adapters/codex-hooks.ts'
 import { configFile, loadConfig, readConfigFile, withConfigFile } from '../adapters/config-file.ts'
 import { claudeIntegrationInstall, codexIntegrationInstall } from '../adapters/herdr.ts'
 import { installInto, readSettings } from '../adapters/hook-settings.ts'
@@ -93,7 +93,11 @@ if (args.includes('--codex')) {
     const dedicated = homeAt >= 0 ? (homeValue ?? defaultCodexHome()) : null
     const dir = dedicated ?? (process.env.CODEX_HOME || join(homedir(), '.codex'))
     const script = join(ROOT, 'src', 'entrypoints', 'codex-hook.ts')
-    const plan = codexHooksPlan(dir, script)
+    // Named in Codex's /hooks only in the dedicated home: a name changes a hook's trusted hash.
+    const labels = dedicated
+      ? { SessionStart: t('setup.codexHook.session'), UserPromptSubmit: t('setup.codexHook.prompt') }
+      : undefined
+    const plan = codexHooksPlan(dir, script, labels)
     if (dedicated) {
       const { linked, failed } = prepareCodexHome(dedicated, join(homedir(), '.codex'), { master })
       console.log(`Codex home: ${dedicated}${linked.length ? `, linked from ~/.codex: ${linked.join(', ')}` : ''}`)
@@ -122,11 +126,10 @@ if (args.includes('--codex')) {
       'Codex: enable hooks if disabled (codex features enable hooks), then review and trust these hooks in /hooks.',
     )
     if (dedicated)
-      console.log(
-        `Codex: start the sessions herdr runs with CODEX_HOME=${dedicated} (the board's New session window and spawn-agent do not set it yet).`,
-      )
+      console.log(`Codex: the board's New session window and spawn-agent start Codex with CODEX_HOME=${dedicated}.`)
     try {
       await codexIntegrationInstall(dir)
+      if (dedicated) labelHerdrHookIn(dir, t('setup.codexHook.herdr'))
       console.log(`herdr's hook: codex integration in ${dir}`)
     } catch (err) {
       console.log(
