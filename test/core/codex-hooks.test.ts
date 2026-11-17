@@ -169,10 +169,7 @@ test("herdr's Codex hook gets its label once; nothing to change is null", () => 
   const next = labelHerdrHook(input, 'herdr: статус агента')
   expect(next).toMatchObject({
     hooks: {
-      SessionStart: [
-        { hooks: [{ statusMessage: 'herdr: статус агента' }] },
-        { hooks: [{ command: 'keep-me' }] },
-      ],
+      SessionStart: [{ hooks: [{ statusMessage: 'herdr: статус агента' }] }, { hooks: [{ command: 'keep-me' }] }],
     },
   })
   expect(JSON.stringify(next?.hooks).match(/statusMessage/g)).toHaveLength(1)
