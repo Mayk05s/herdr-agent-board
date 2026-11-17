@@ -6,6 +6,7 @@ import { serveBoard, sharedSandbox } from '../support/board-server.ts'
 type Item = Record<string, unknown>
 type Detail = { conversation: Item[]; queued: unknown[]; helpers: unknown[] }
 const ID = '01a15a8a-bd97-7701-a7f7-401e4bec3147'
+const RESUMED = '01a15a8a-bd97-7701-a7f7-401e4bec3149'
 const MISSING = '01a15a8a-bd97-7701-a7f7-401e4bec3148'
 const CLAUDE = '030bc85e-c173-4999-b250-c85a4d5595bd'
 const row = (type: string, payload: unknown) => JSON.stringify({ timestamp: '2026-10-20T08:00:00Z', type, payload })
@@ -40,6 +41,14 @@ describe('Codex rollouts on the board, beside Claude, pi and unknown agents', ()
         }),
         row('response_item', { type: 'function_call_output', call_id: 't1', output: 'ok' }),
         row('response_item', message('assistant', 'Fixed it. Shall I push?')),
+      ].join('\n'),
+    )
+    // A session resumed (`codex resume <id>`) in a pane herdr reports no session for.
+    writeFileSync(
+      join(codex, `rollout-2026-10-20T08-00-00-${RESUMED}.jsonl`),
+      [
+        row('response_item', message('user', 'before the resume')),
+        row('response_item', message('assistant', 'Answer from before.')),
       ].join('\n'),
     )
     // A same-id rollout for Claude must never supply Claude's card.
@@ -78,7 +87,17 @@ describe('Codex rollouts on the board, beside Claude, pi and unknown agents', ()
       label: `Session ${pane_id}`,
       ...(session && { agent_session: { value: session } }),
     })
+    const running = (...argv: string[]) => ({
+      result: {
+        process_info: {
+          shell_pid: 10,
+          foreground_processes: [{ pid: 11, argv, name: 'codex' }],
+        },
+      },
+    })
     box.state({
+      'pane process-info --pane c7': running('codex', 'resume', RESUMED, '--no-daemon', '-m', 'gpt-6.1-sol'),
+      'pane process-info --pane c3': running('codex', '--no-daemon'),
       'api snapshot': {
         result: {
           snapshot: {
@@ -89,6 +108,7 @@ describe('Codex rollouts on the board, beside Claude, pi and unknown agents', ()
               pane('c4', 'claude', CLAUDE),
               pane('c5', 'pi', piFile),
               pane('c6', 'agy'),
+              pane('c7', 'codex'),
             ],
             tabs: [],
             workspaces: [],
@@ -122,6 +142,26 @@ describe('Codex rollouts on the board, beside Claude, pi and unknown agents', ()
     ])
     expect(thread.queued).toEqual([])
     expect(thread.helpers).toEqual([])
+  })
+
+  test('a Codex pane resumed with `codex resume <id>` keeps its session: the card and panel read the rollout', async () => {
+    const items = await board()
+    expect(items.find(i => i.pane === 'c7')).toMatchObject({
+      key: RESUMED,
+      session: RESUMED,
+      prompt: 'before the resume',
+      lastText: 'Answer from before.',
+    })
+    expect(items.find(i => i.key === 'pane-c7')).toBeUndefined()
+    expect((await detail(RESUMED)).conversation.map(t => t.text)).toEqual(['before the resume', 'Answer from before.'])
+  })
+
+  test('only a Codex pane without a session is asked what runs in it', () => {
+    const asked = box
+      .calls()
+      .filter(a => a[0] === 'pane' && a[1] === 'process-info')
+      .map(a => a[3])
+    expect([...new Set(asked)].sort()).toEqual(['c3', 'c7'])
   })
 
   test('missing Codex rollout, pane keys and unknown agents stay bare, never read Claude records', async () => {

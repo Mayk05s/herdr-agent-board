@@ -16,6 +16,21 @@ export const CODEX_AGENT = 'codex'
 export const isCodexItem = (item: { agent?: string | undefined }): boolean => item.agent === CODEX_AGENT
 export const isCodexSession = (id: string): boolean => /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(id)
 
+/**
+ * The session id in a `codex resume <id>` command line (argv, program first); null for any other
+ * command, `resume` with no id (the picker, `--last`) included.
+ */
+export function resumedCodexSession(argv: readonly string[]): string | null {
+  const program = (argv[0] ?? '')
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/\.exe$/i, '')
+  if (program !== CODEX_AGENT) return null
+  const at = argv.indexOf('resume')
+  const id = at < 0 ? undefined : argv.slice(at + 1).find(isCodexSession)
+  return id && isCodexSession(id) ? id.toLowerCase() : null
+}
+
 type Rec = Record<string, unknown>
 const rec = (v: unknown): Rec | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Rec) : null)
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')

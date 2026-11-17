@@ -112,6 +112,29 @@ test('Claude, pi and a replaced Codex session never receive a Codex brief or a c
   }
 })
 
+test("a resumed Codex pane herdr reports no session for is the hook's session by its `codex resume <id>` command", async () => {
+  const box = await sandbox()
+  configure(box)
+  const running = (...argv: string[]) => ({
+    result: { process_info: { shell_pid: 1, foreground_processes: [{ pid: 2, argv, name: 'codex' }] } },
+  })
+  box.state({
+    'agent get p1': { result: { agent: { agent: 'codex' } } },
+    'pane process-info --pane p1': running('codex', 'resume', ID, '--no-daemon'),
+  })
+  putCard(box, { briefV: CODEX_BRIEF_VERSION, ask: 'Push?', askSince: 1 })
+  expect(await hook(box, 'UserPromptSubmit', 'yes')).toBe('')
+  expect(readCard(box)?.ask).toBeUndefined()
+  // A fresh Codex (no resume) without a session yet stays unbriefed, as before.
+  box.state({
+    'agent get p1': { result: { agent: { agent: 'codex' } } },
+    'pane process-info --pane p1': running('codex', '--no-daemon'),
+  })
+  putCard(box, { ask: 'Push?', askSince: 1 })
+  expect(await hook(box, 'SessionStart')).toBe('')
+  expect(readCard(box)?.ask).toBe('Push?')
+})
+
 test('a Codex child, missing pane context or irrelevant event does not even query herdr', async () => {
   const box = await sandbox()
   configure(box)
