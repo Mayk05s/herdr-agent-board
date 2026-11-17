@@ -833,7 +833,8 @@ spawn-agent --name <Name> --cwd <folder> [--label <tab label>]
             [--brief-file <utf-8 file> | --brief <text>] [--workspace <herdr workspace id>]
             [--timeout-sec 120] [--session-id <uuid> | --resume <uuid>] [--fork <uuid>]
             [--pane <herdr pane id>] [--profile <id>] [--model <id or alias>]
-            [--agent claude|pi] [--trust]
+            [--agent claude|pi|codex] [--trust]
+            [--effort <level>] [--approval on-request|never] [--sandbox <mode>]   (codex only)
 ```
 
 PowerShell's spelling works too: `-Name`, `-Cwd`, `-Label`, `-BriefFile`, `-Brief`, `-Workspace`,
@@ -857,6 +858,21 @@ when taken), types `/rename <Name>`, then the brief. It prints
 ```
 pane=<pane id> name=<Name> agent=<herdr name>
 ```
+
+`--agent codex` starts Codex CLI: `launch.codex` (default `codex`) typed into a new tab, for a new
+session only. It takes no `--resume`, `--fork`, `--session-id`, `--profile`, `--config-dir`,
+`--keep-env` or `--trust` (Codex picks its own session id, has no Claude profile and asks about the
+folder in its own dialog), and is refused with them. `--model` is Codex's own; `--effort <level>`
+is `-c model_reasoning_effort=<level>` and needs a `--model` whose levels Codex's `models_cache.json`
+lists; `--approval` (`on-request`, `never`) and `--sandbox` (`read-only`, `workspace-write`,
+`danger-full-access`) are `-a` and `-s`. With none of them Codex runs on the user's `config.toml`;
+`--dangerously-bypass-approvals-and-sandbox` is not offered. Codex is started with `--no-daemon`
+when it takes the option: without it the session runs in Codex's shared background server, in its
+env, and herdr never learns the session's id (no card, no hooks, no `board` for the agent). When
+`codexHome` is set in config.json (`install.ts --codex --codex-home`), the new tab gets
+`CODEX_HOME=<that folder>`, from the board's window too; `--pane` is then refused, as a pane keeps
+the env it has. Codex has no session id until its first prompt, so the card of a session started
+on a model (`modelWant`) is written once the brief went in; the output line ends with ` kind=codex`.
 
 which is how the board knows who started whom. It fails (exit code 1, the reason on stderr) when
 the folder is not there, Claude is not ready in time, or Claude waits for a dialog first (the
