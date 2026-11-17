@@ -30,6 +30,7 @@ import {
 } from '../../adapters/herdr.ts'
 import { pause } from '../../adapters/pacing.ts'
 import { run } from '../../adapters/process.ts'
+import { CODEX_AGENT } from '../../core/codex.ts'
 import { keyTowardYes, sameFolder, type TrustDialog, trustDialog } from '../../core/dialogs/trust.ts'
 import { t } from '../../core/lang.ts'
 import { launcherError } from '../../core/launch/launcher-command.ts'
@@ -238,7 +239,10 @@ export function launchRunner({
         if (ws.pane) notePane(l, ws.pane, ws.terminal)
       }
     }
-    const launcher = launcherFor(deps.cfg.launch, { resume: !!l.resume, fork: !!l.fork })
+    const launcher =
+      l.agent === CODEX_AGENT
+        ? launcherFor({ agent: CODEX_AGENT, timeoutSec: deps.cfg.launch?.timeoutSec ?? 120 })
+        : launcherFor(deps.cfg.launch, { resume: !!l.resume, fork: !!l.fork })
     const r = await launcher.start(l, events(l))
     // The agent herdr says came up once a dialog was answered: the board's spawn-agent stops at
     // one before it can say whether its start command started Claude or pi.
@@ -496,7 +500,7 @@ export function launchRunner({
     }
     if (l.message) {
       step(l, 'message')
-      if (kind !== PI_AGENT && !(await inputEmpty(pane)))
+      if (kind !== PI_AGENT && kind !== CODEX_AGENT && !(await inputEmpty(pane)))
         throw new LaunchError(t('launch.err.message.draft'), 'message')
       if (!(await typeLine(pane, l.message))) throw new LaunchError(t('launch.err.message.lost'), 'message')
     }

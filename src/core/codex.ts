@@ -1,5 +1,6 @@
 // Codex rollouts contain response items and event copies of those same messages. Read the
 // response items only; system instructions, reasoning and tool outputs stay out of the thread.
+import { stripAnsi } from './dialogs/input-box.ts'
 import { boardNotice } from './notices.ts'
 import {
   type ConversationTurn,
@@ -148,4 +149,19 @@ export function parseCodexTail(lines: readonly string[]): TranscriptInfo {
  */
 export function parseCodexConversation(lines: readonly string[], limit = 40): ConversationTurn[] {
   return fitThread(readRollout(lines).conversation.slice(-limit))
+}
+
+/** Read the model and effort together from Codex CLI's status line. */
+export function codexMeter(screen: string): { model: string; effort: string } | null {
+  const lines = stripAnsi(screen)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+  for (const line of lines.slice(-4).reverse()) {
+    const match = /^(GPT[- ][\w .-]+?) (minimal|none|low|medium|high|xhigh|max|ultra) · (?:[~/]|[A-Za-z]:[\\/])/.exec(
+      line,
+    )
+    if (match?.[1] && match[2]) return { model: match[1], effort: match[2] }
+  }
+  return null
 }

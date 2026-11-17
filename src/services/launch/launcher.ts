@@ -86,6 +86,7 @@ export interface LaunchContext {
   readonly agent: string
   /** The model it starts on (`--model`), null for the profile's default. */
   readonly model: string | null
+  readonly effort?: string
   /** A new workspace's first pane and tab: herdr's launcher starts the agent there, not in a new tab. */
   readonly rootPane: string | null
   readonly rootTab: string | null
@@ -208,7 +209,7 @@ export function herdrCannotResume(spec: LaunchSpec, profileArgs: readonly string
 }
 
 /** The agents herdr's launcher starts that take `--model <id>`. */
-const MODEL_AGENTS = new Set(['claude', 'pi'])
+const MODEL_AGENTS = new Set(['claude', 'pi', 'codex'])
 
 /** `herdr agent start <name> --kind <agent> … -- --session-id <id>` in a tab of its own. */
 export function herdrLauncher(spec: LaunchSpec): Launcher {
@@ -239,6 +240,7 @@ export function herdrLauncher(spec: LaunchSpec): Launcher {
       on.pane(pane, terminal)
       // After launch.args and the profile's: of two --model, the last is the one taken.
       if (l.model && MODEL_AGENTS.has(kind)) args.push(...modelArgs(l.model))
+      if (kind === 'codex' && l.effort) args.push('-c', `model_reasoning_effort=${JSON.stringify(l.effort)}`)
       let sessionId: string | null = null
       if (l.resume) {
         sessionId = l.resume

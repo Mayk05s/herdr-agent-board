@@ -4,9 +4,11 @@
 // it to the session it started, the card's buttons (dismiss, go to it, trust, close its tab) and
 // what the new-session window offers, the agents a start may pick among it (core/launch/agents.ts).
 import { readCard, removeCard, writeCard } from '../../adapters/cards.ts'
+import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { herdr, paneTab, paneTabTerminal, workspaceList } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { findCommand } from '../../adapters/setup-facts.ts'
+import { CODEX_AGENT } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
 import { defaultAgent, type LaunchAgent, type LaunchAgentId, launchAgents } from '../../core/launch/agents.ts'
 import { failureKind } from '../../core/launch/launcher-command.ts'
@@ -24,6 +26,7 @@ export interface LaunchOptions {
   launcher: LauncherInfo
   /** The agents a start may name (its `agent`), the default first; none when the config's launcher picks it. */
   agents: LaunchAgent[]
+  codexModels?: Record<string, string[]>
   /** The one a start that names none starts as: `launch.default` when offered, else Claude Code. */
   agent: LaunchAgentId
   workspaces: { id: string; label: string | undefined }[]
@@ -117,10 +120,17 @@ const view = (l: Launch): LaunchView => ({
 })
 
 /** Whether `pi` is a command on the board's PATH (a .ps1 or .cmd on Windows too). */
-function piOnPath(): boolean {
-  const found = findCommand('pi')
+function agentOnPath(agent: string): boolean {
+  const found = findCommand(agent)
   return !!(found.ps ?? found.sh)
 }
+
+const availableAgents = (spec: Parameters<typeof launchAgents>[0]): LaunchAgent[] =>
+  launchAgents(
+    spec,
+    () => agentOnPath('pi'),
+    () => agentOnPath('codex'),
+  )
 
 /** The launches of this board process; `onChange` publishes the board again. */
 export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onChange?: () => void }): Launches {
@@ -150,7 +160,7 @@ export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onCh
       typesCommand: launcher.kind === 'builtin',
       ...(parent && { parent }),
       // A start of the server's own (a return, a fork) picks no agent: Claude Code's, whatever the default.
-      agents: () => (resume || fork ? [] : launchAgents(deps.cfg.launch, piOnPath)),
+      agents: () => (resume || fork ? [] : availableAgents(deps.cfg.launch)),
       standard: offered => defaultAgent(deps.cfg.launch, offered),
       pi: deps.cfg.launch?.pi,
     })
@@ -251,7 +261,11 @@ export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onCh
       // in a moment, so only other agents get a card by their pane.
       if (l.carded !== it.key && (it.session || it.agent !== 'claude')) {
         try {
-          writeCard(it.key, { category: l.category, profileWant: l.profile, ...(l.model && { modelWant: l.model }) })
+          writeCard(it.key, {
+            category: l.category,
+            ...(l.profile && { profileWant: l.profile }),
+            ...(l.model && { modelWant: l.model }),
+          })
           // pi's card is under its file: the one written under the board's id before pi was up goes.
           if (isPiItem(it) && l.carded && laneOnly(l.carded)) removeCard(l.carded)
           l.carded = it.key
@@ -322,11 +336,12 @@ export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onCh
       error = messageOf(err)
     }
     const cfg = deps.cfg
-    const agents = launchAgents(cfg.launch, piOnPath)
+    const agents = availableAgents(cfg.launch)
     const launcher = launcherFor(cfg.launch)
     return {
       launcher: launcher.describe(),
       agents,
+      ...(agents.some(agent => agent.id === CODEX_AGENT) && { codexModels: await cachedCodexModels() }),
       agent: defaultAgent(cfg.launch, () => agents),
       workspaces,
       focused,

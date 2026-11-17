@@ -3,14 +3,17 @@
 // Claude profile it starts in, refused when the board cannot be sure of it, and the agent it
 // starts as (core/launch/agents.ts), one the board offers, and the model it starts on, if one is
 // asked for (core/launch/model.ts): empty is the profile's default.
+import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { resolvePath } from '../../adapters/files.ts'
 import { SLOW, statOf } from '../../adapters/folders.ts'
 import { isRecord } from '../../adapters/json-store.ts'
+import { CODEX_AGENT } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
 import { CLAUDE_AGENT, type LaunchAgent, type LaunchAgentId, piCommand } from '../../core/launch/agents.ts'
 import { MODEL_MAX, readModel } from '../../core/launch/model.ts'
 import { checkBranch, checkName, NAME_MAX, UNSAFE_CHARS } from '../../core/launch/names.ts'
 import { profileCommand } from '../../core/launch/spawn-args.ts'
+import { PI_AGENT } from '../../core/pi.ts'
 import { type LaunchTarget, launchTarget, type ProfileSet } from '../../core/profiles.ts'
 import type { Item, Vars } from '../../core/types.ts'
 
@@ -51,6 +54,7 @@ export interface LaunchRequest {
   agent: LaunchAgentId
   /** The model it starts on (`--model`), null for the profile's default. */
   model: string | null
+  effort?: string
 }
 
 export type CheckResult = { ok: true; launch: LaunchRequest } | { ok: false; field: string; error: string }
@@ -137,6 +141,53 @@ export async function checkRequest(
   const parent = heldTo?.key ?? given(b.parent) ?? null
   const from = heldTo ?? (parent === null ? undefined : items.find(i => i.key === parent))
   const parentName = from?.name || parent || ''
+  // The agent: the one the request names, which the board must offer; else the board's default.
+  // pi's command must be one the tab's shell can type.
+  let agent: LaunchAgentId
+  const asked = given(b.agent)
+  if (asked !== undefined) {
+    const offered = agents()
+    const pick = offered.find(a => a.id === asked)
+    if (!pick) return fail('agent', offered.length ? 'launch.err.agent' : 'launch.err.agentLauncher', { id: asked })
+    agent = pick.id
+  } else agent = standard(agents)
+  if (agent === PI_AGENT)
+    try {
+      piCommand(pi)
+    } catch (err) {
+      return { ok: false, field: 'agent', error: err instanceof Error ? err.message : String(err) }
+    }
+  if (agent === CODEX_AGENT) {
+    const effort = given(b.effort)
+    if (effort) {
+      const models = await cachedCodexModels()
+      if (!model || !Object.hasOwn(models, model) || !models[model]?.includes(effort))
+        return fail('model', 'launch.err.codexEffort')
+    }
+    return {
+      ok: true,
+      launch: {
+        name,
+        label: name,
+        cwd,
+        category,
+        workspaceId,
+        workspaceLabel,
+        newWorkspace: !workspaceId,
+        message,
+        worktree,
+        parent,
+        agent,
+        model,
+        ...(effort && { effort }),
+        profile: '',
+        profileDir: '',
+        configDir: null,
+        profileArgs: [],
+        profileCommand: null,
+      },
+    }
+  }
   const target = launchTarget(
     given(b.profile),
     parent === null ? null : (from ?? { name: parentName, profile: null }),
@@ -160,22 +211,6 @@ export async function checkRequest(
       return { ok: false, field: 'profile', error: err instanceof Error ? err.message : String(err) }
     }
   }
-  // The agent: the one the request names, which the board must offer; else the board's default.
-  // pi's command must be one the tab's shell can type.
-  let agent: LaunchAgentId
-  const asked = given(b.agent)
-  if (asked !== undefined) {
-    const offered = agents()
-    const pick = offered.find(a => a.id === asked)
-    if (!pick) return fail('agent', offered.length ? 'launch.err.agent' : 'launch.err.agentLauncher', { id: asked })
-    agent = pick.id
-  } else agent = standard(agents)
-  if (agent !== CLAUDE_AGENT)
-    try {
-      piCommand(pi)
-    } catch (err) {
-      return { ok: false, field: 'agent', error: err instanceof Error ? err.message : String(err) }
-    }
   return {
     ok: true,
     launch: {

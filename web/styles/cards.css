@@ -98,3 +98,8 @@
 @media (prefers-reduced-motion: reduce) {
   .card-actions .stop-word { animation: none; }
 }
+
+.card-meter {
+  font-size: 0.82em;
+  overflow-wrap: anywhere;
+}

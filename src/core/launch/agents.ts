@@ -4,6 +4,7 @@
 // start what they start, so with either set nothing is offered. A start that names no agent is
 // the board's default: `launch.default` when the board offers that agent, else Claude Code, as it
 // was before there was a choice.
+import { CODEX_AGENT } from '../codex.ts'
 import { t } from '../lang.ts'
 import { PI_AGENT } from '../pi.ts'
 import type { LaunchSpec } from '../types.ts'
@@ -12,7 +13,7 @@ import { typingProblem } from './spawn-args.ts'
 export const CLAUDE_AGENT = 'claude'
 
 /** The agents a start can name: herdr's kind for it. */
-export type LaunchAgentId = typeof CLAUDE_AGENT | typeof PI_AGENT
+export type LaunchAgentId = typeof CLAUDE_AGENT | typeof PI_AGENT | typeof CODEX_AGENT
 
 /** An agent the new-session window offers: its id for the request, and its name. */
 export interface LaunchAgent {
@@ -22,6 +23,7 @@ export interface LaunchAgent {
 
 const CLAUDE_CODE: LaunchAgent = { id: CLAUDE_AGENT, title: 'Claude Code' }
 const PI: LaunchAgent = { id: PI_AGENT, title: 'pi' }
+const CODEX: LaunchAgent = { id: CODEX_AGENT, title: 'Codex CLI' }
 
 /** Whether config.json says how to start pi (`launch.pi` set to anything but blank). */
 export const piConfigured = (spec: LaunchSpec | undefined): boolean => {
@@ -34,9 +36,13 @@ export const piConfigured = (spec: LaunchSpec | undefined): boolean => {
  * (`launch.command`, `launch.agent`) starts sessions. `piFound`: `pi` is on the board's PATH; asked
  * only when the config does not say how to start it.
  */
-export function launchAgents(spec: LaunchSpec | undefined, piFound: () => boolean): LaunchAgent[] {
+export function launchAgents(
+  spec: LaunchSpec | undefined,
+  piFound: () => boolean,
+  codexFound: () => boolean = () => false,
+): LaunchAgent[] {
   if (spec?.command || spec?.agent) return []
-  return piConfigured(spec) || piFound() ? [CLAUDE_CODE, PI] : [CLAUDE_CODE]
+  return [CLAUDE_CODE, ...(piConfigured(spec) || piFound() ? [PI] : []), ...(codexFound() ? [CODEX] : [])]
 }
 
 /**

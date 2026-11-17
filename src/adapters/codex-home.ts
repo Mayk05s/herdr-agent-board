@@ -4,8 +4,10 @@ import { readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { isCodexSession, parseCodexConversation, parseCodexTail } from '../core/codex.ts'
+import { modelProblem } from '../core/launch/model.ts'
 import type { TranscriptInfo } from '../core/types.ts'
 import { readTail, type SessionThread } from './claude-home.ts'
+import { isRecord } from './json-store.ts'
 
 export interface CodexHome {
   transcriptInfo(session: string | null): TranscriptInfo | null
@@ -16,7 +18,46 @@ const DISCOVERY_MS = 1000
 const CARD_WINDOWS = [256 << 10, 2 << 20]
 const THREAD_WINDOWS = [2 << 20, 8 << 20]
 
-export function createCodexHome(root = process.env.CODEX_HOME || join(homedir(), '.codex')): CodexHome {
+const codexRoot = (): string => process.env.CODEX_HOME || join(homedir(), '.codex')
+
+export async function cachedCodexModels(root = codexRoot()): Promise<Record<string, string[]>> {
+  try {
+    const cache: unknown = await Bun.file(join(root, 'models_cache.json')).json()
+    if (!isRecord(cache) || !Array.isArray(cache.models)) return {}
+    return Object.fromEntries(
+      cache.models.flatMap(model => {
+        if (
+          !isRecord(model) ||
+          model.visibility !== 'list' ||
+          typeof model.slug !== 'string' ||
+          modelProblem(model.slug)
+        )
+          return []
+        const levels: unknown[] = Array.isArray(model.supported_reasoning_levels)
+          ? model.supported_reasoning_levels
+          : []
+        return [
+          [
+            model.slug,
+            [
+              ...new Set(
+                levels.flatMap(level =>
+                  isRecord(level) && typeof level.effort === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(level.effort)
+                    ? [level.effort]
+                    : [],
+                ),
+              ),
+            ],
+          ],
+        ]
+      }),
+    )
+  } catch {
+    return {}
+  }
+}
+
+export function createCodexHome(root = codexRoot()): CodexHome {
   const files = new Map<string, string>()
   const cache = new Map<string, { mtimeMs: number; size: number; info: TranscriptInfo }>()
   let scannedAt = -Infinity

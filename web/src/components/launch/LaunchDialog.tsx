@@ -35,6 +35,7 @@ export type LaunchHandlers = Pick<
   | 'branch'
   | 'message'
   | 'model'
+  | 'effort'
   | 'pickCategory'
   | 'pickAgent'
   | 'pickProfile'
@@ -51,6 +52,7 @@ export const launchHandlers = (w: LaunchWindow): LaunchHandlers => ({
   branch: w.branch,
   message: w.message,
   model: w.model,
+  effort: w.effort,
   pickCategory: w.pickCategory,
   pickAgent: w.pickAgent,
   pickProfile: w.pickProfile,
@@ -178,7 +180,7 @@ export function LaunchDialogView({ view, folder, launcher, t, on, refs }: Launch
                 </div>
               </div>
             )}
-            {view.profile.offered && (
+            {view.profile.offered && !view.agent.options.some(a => a.id === 'codex' && a.pressed) && (
               <>
                 <div className="row profile-row">
                   <span className="row-label">{t('launch.profile')}</span>
@@ -226,6 +228,23 @@ export function LaunchDialogView({ view, folder, launcher, t, on, refs }: Launch
                   ))}
                 </datalist>
                 <Note field="model" note={view.notes.model} />
+                {!!view.model.efforts?.length && (
+                  <label className="row">
+                    <span className="row-label">{t('launch.effort')}</span>
+                    <select
+                      className="row-value"
+                      value={view.model.effort ?? ''}
+                      onChange={e => on.effort(e.currentTarget.value)}
+                    >
+                      <option value="">{t('launch.effortDefault')}</option>
+                      {view.model.efforts.map(level => (
+                        <option key={level} value={level}>
+                          {level}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
               </>
             )}
             <div className="row where-row">
