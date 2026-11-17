@@ -139,6 +139,25 @@ const folder = (p: unknown): string =>
     .toLowerCase()
 
 /**
+ * A thread's event (services/work-threads.ts) knows its session by id and name, not by pane: when
+ * the id is gone (/clear), the session that carries the same name takes it, when there is exactly
+ * one such and it runs in the same profile. Two with that name: it follows neither, the entry waits.
+ */
+function namedTarget(
+  entry: ScheduleEntry,
+  items: Item[],
+  profileOf: (key: string) => string | undefined,
+): { item?: Item; other?: Item } {
+  const name = entry.name?.trim()
+  if (!name) return {}
+  const named = items.filter(i => i.session && i.name === name)
+  const only = named.length === 1 ? named[0] : undefined
+  if (!only) return {}
+  const was = profileOf(entry.key)
+  return was !== undefined && was === profileOf(only.key) ? { item: only } : { other: only }
+}
+
+/**
  * The session an entry is for (`item`): by its id, else the Claude session now in its pane and
  * folder, when that one runs in the profile the entry's session ran in (`profileOf`: a session's
  * profile id by its key, undefined when not known). /clear gives a session a new id in the same
@@ -156,7 +175,9 @@ export function targetOf(
 ): { item?: Item; other?: Item } {
   const own = items.find(i => i.key === entry.key)
   if (own) return { item: own }
-  if (entry.receipt || entry.kind === 'restart' || entry.kind === 'sleep' || !entry.pane || !entry.cwd) return {}
+  if (entry.receipt || entry.kind === 'restart' || entry.kind === 'sleep') return {}
+  if (entry.by === 'threads' && !(entry.pane && entry.cwd)) return namedTarget(entry, items, profileOf)
+  if (!entry.pane || !entry.cwd) return {}
   const next = items.find(i => i.pane === entry.pane && i.session && !i.sleeping && folder(i.cwd) === folder(entry.cwd))
   if (!next) return {}
   const was = profileOf(entry.key)

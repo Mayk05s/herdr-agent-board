@@ -807,6 +807,18 @@ export function moveCursor(tx: Tx, session: string, to: Partial<Cursor>): void {
     .run(session, to.seq ?? null, to.at ?? null, to.asked ?? null)
 }
 
+/**
+ * A session's watches and place go to its new id (/clear): a watch the new id has already stays as
+ * it is, the cursor is the later of the two. The old id is left with nothing.
+ */
+export function moveSession(tx: Tx, from: string, to: string, name: string): void {
+  const old = tx.db.query('SELECT seq, at, asked FROM thread_cursor WHERE session = ?').get(from) as Cursor | null
+  tx.db.query('UPDATE OR IGNORE thread_watch SET session = ?, name = ? WHERE session = ?').run(to, name, from)
+  tx.db.query('DELETE FROM thread_watch WHERE session = ?').run(from)
+  tx.db.query('DELETE FROM thread_cursor WHERE session = ?').run(from)
+  if (old) moveCursor(tx, to, old)
+}
+
 /** The threads a session counts as its own: those it created or is assigned. */
 export function mineIds(db: BoardDb, session: string): string[] {
   return (

@@ -60,6 +60,7 @@ import { collect } from './board.ts'
 import type { Deps } from './deps.ts'
 import { moveAsleep, moveTarget } from './move.ts'
 import { currentWakeMode } from './wake/mode.ts'
+import { followSession } from './work-threads.ts'
 
 // A run on its way (waking a session takes up to three minutes) holds its claim this long.
 const CLAIM_MS = 5 * 60_000
@@ -195,6 +196,20 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
         const movedFrom = entry.movedFrom ?? { key: entry.key, name: entry.name ?? '' }
         entry = { ...entry, key: item.key, name: item.name, movedFrom }
         updateEntry(entry.id, e => ({ ...e, key: item.key, name: item.name, movedFrom: e.movedFrom ?? movedFrom }))
+        // A thread's event: the session's watches and place follow it, and one the new id has
+        // already read (`board thread changes` after /clear) is not told again.
+        if (entry.by === 'threads') {
+          let told: ReturnType<typeof followSession> = null
+          try {
+            told = followSession(movedFrom.key, item, entry.threadsSeq)
+          } catch (err) {
+            log(`schedule ${entry.id}: ${messageOf(err)}`)
+          }
+          if (told === 'read') {
+            removeEntry(entry.id)
+            return
+          }
+        }
       }
       let r: Awaited<ReturnType<typeof send>> = { ok: true }
       if (item.sleeping) {

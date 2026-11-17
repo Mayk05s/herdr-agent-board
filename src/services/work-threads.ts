@@ -36,6 +36,7 @@ import {
   entriesOf,
   getThread,
   moveCursor,
+  moveSession,
   needsOwner,
   putWatch,
   ThreadError,
@@ -615,6 +616,22 @@ function tellOne(ctx: ThreadsCtx, schedule: EventSchedule, session: string, tx: 
   })
   moveCursor(tx, session, { seq: rev, at: next })
   return true
+}
+
+/**
+ * A thread's event followed its session to a new id (/clear, the scheduler's targetOf): the
+ * watches and the place go with it. 'read' when the new id has read everything the event says
+ * (`seq`: the revision it was made at), so it is not told again; null when there are no threads.
+ */
+export function followSession(from: string, to: { key: string; name: string }, seq: unknown): 'moved' | 'read' | null {
+  return withThreadsDb(false, db => {
+    if (!db) return null
+    return db.write(byOf({ kind: 'owner' } as Party), tx => {
+      moveSession(tx, from, to.key, to.name)
+      const asked = cursorOf(db, to.key)?.asked ?? 0
+      return typeof seq === 'number' && asked >= seq ? 'read' : 'moved'
+    })
+  })
 }
 
 /** One line per thread `board thread changes` prints: what changed since the session last asked. */
