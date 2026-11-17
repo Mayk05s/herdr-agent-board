@@ -8,11 +8,12 @@ import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { herdr, paneTab, paneTabTerminal, workspaceList } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { findCommand } from '../../adapters/setup-facts.ts'
-import { CODEX_AGENT } from '../../core/codex.ts'
+import { CODEX_AGENT, isCodexSession } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
 import { defaultAgent, type LaunchAgent, type LaunchAgentId, launchAgents } from '../../core/launch/agents.ts'
 import { failureKind } from '../../core/launch/launcher-command.ts'
 import { sameDir } from '../../core/launch/names.ts'
+import { forkCard } from '../../core/links.ts'
 import { isPiItem, piSessionId } from '../../core/pi.ts'
 import { shownProfiles } from '../../core/profiles.ts'
 import type { Item, LaunchView } from '../../core/types.ts'
@@ -50,6 +51,7 @@ export type StartResult = { ok: true; id: string } | { ok: false; field: string;
  * keeps when that card is not on the board (checkRequest).
  */
 export interface StartOptions {
+  codexFork?: true
   resume?: string | null
   fork?: string | null
   parent?: ParentFacts | null
@@ -148,14 +150,14 @@ export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onCh
   async function start(
     body: unknown,
     items: Item[] = [],
-    { resume = null, fork = null, parent = null }: StartOptions = {},
+    { resume = null, fork = null, parent = null, codexFork }: StartOptions = {},
   ): Promise<StartResult> {
     const categories = new Set([...deps.cfg.categories.map(c => c.id), ...items.map(i => i.category)])
     // Only the board's own spawn-agent types a profile's start command: the others never read it.
-    const launcher = launcherFor(deps.cfg.launch, { resume: !!resume, fork: !!fork })
+    const launcher = launcherFor(deps.cfg.launch, { resume: !!resume, fork: !!fork, ...(codexFork && { codexFork }) })
     const r = await checkRequest(body, {
       categories,
-      profiles: deps.profiles(),
+      ...(codexFork ? { codexFork } : { profiles: deps.profiles() }),
       items,
       typesCommand: launcher.kind === 'builtin',
       ...(parent && { parent }),
@@ -168,11 +170,18 @@ export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onCh
     // launch.agent whose arguments pick the session cannot resume one: refused before anything runs.
     if (resume && launcher.kind === 'herdr' && herdrCannotResume(deps.cfg.launch ?? {}, r.launch.profileArgs))
       return { ok: false, field: 'launcher', error: t('archive.err.cannotResume') }
-    if (fork && launcher.kind === 'herdr' && herdrCannotResume(deps.cfg.launch ?? {}, r.launch.profileArgs))
+    if (
+      fork &&
+      !codexFork &&
+      launcher.kind === 'herdr' &&
+      herdrCannotResume(deps.cfg.launch ?? {}, r.launch.profileArgs)
+    )
       return { ok: false, field: 'launcher', error: t('fork.err.launcher') }
     // A model it cannot pass on is refused, not left out: the session would run on another one.
-    if (r.launch.model && !launcher.takesModel)
-      return { ok: false, field: 'model', error: t('launch.err.modelLauncher') }
+    // A new Codex session starts through herdr's launcher whatever the config's (run.ts).
+    const starts =
+      r.launch.agent === CODEX_AGENT && !codexFork ? launcherFor(deps.cfg.launch, { codex: true }) : launcher
+    if (r.launch.model && !starts.takesModel) return { ok: false, field: 'model', error: t('launch.err.modelLauncher') }
     // A resumed session keeps its conversation: no first message goes into it. A fork starts with
     // a copy of its source's in the source's folder: no worktree.
     const request = resume ? { ...r.launch, message: '' } : fork ? { ...r.launch, worktree: null } : r.launch
@@ -254,6 +263,14 @@ export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onCh
         )
       }
       if (!it) continue
+      if (
+        l.codexFork &&
+        (it.agent !== 'codex' ||
+          !l.sessionId ||
+          !isCodexSession(it.session ?? '') ||
+          it.session?.toLowerCase() !== l.sessionId.toLowerCase())
+      )
+        continue
       claimed.add(it.key)
       l.key = it.key
       l.pane ??= it.pane
@@ -263,7 +280,12 @@ export function createLaunches({ deps, onChange = () => {} }: { deps: Deps; onCh
         try {
           writeCard(it.key, {
             category: l.category,
-            ...(l.profile && { profileWant: l.profile }),
+            // Codex has no Claude profile: a fork keeps its name and source, a new one its model.
+            ...(l.codexFork
+              ? { name: l.name, ...(l.fork && forkCard(l.fork)) }
+              : l.agent === CODEX_AGENT
+                ? {}
+                : { profileWant: l.profile }),
             ...(l.model && { modelWant: l.model }),
           })
           // pi's card is under its file: the one written under the board's id before pi was up goes.
