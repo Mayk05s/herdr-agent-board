@@ -7,6 +7,7 @@ import { isCodexSession, parseCodexConversation, parseCodexTail } from '../core/
 import { modelProblem } from '../core/launch/model.ts'
 import type { TranscriptInfo } from '../core/types.ts'
 import { cwdOf as readCwd, readTail, type SessionThread } from './claude-home.ts'
+import { readConfigFile } from './config-file.ts'
 import { isRecord } from './json-store.ts'
 
 export interface CodexHome {
@@ -21,6 +22,16 @@ const CARD_WINDOWS = [256 << 10, 2 << 20]
 const THREAD_WINDOWS = [2 << 20, 8 << 20]
 
 const codexRoot = (): string => process.env.CODEX_HOME || join(homedir(), '.codex')
+
+/**
+ * Where rollouts are looked for: the folder Codex uses here, then the dedicated one for sessions
+ * herdr runs (config.json `codexHome`, written by install.ts --codex-home). Without that key the
+ * list is the one folder it always was.
+ */
+function codexRoots(first: string): string[] {
+  const dedicated = readConfigFile()?.codexHome
+  return typeof dedicated === 'string' && dedicated && dedicated !== first ? [first, dedicated] : [first]
+}
 
 export async function cachedCodexModels(root = codexRoot()): Promise<Record<string, string[]>> {
   try {
@@ -87,7 +98,10 @@ export function createCodexHome(root = codexRoot()): CodexHome {
       if (!st?.isFile() && Date.now() - scannedAt >= DISCOVERY_MS) {
         scannedAt = Date.now()
         files.clear()
-        discover(join(root, 'sessions'))
+        for (const base of codexRoots(root))
+          try {
+            discover(join(base, 'sessions'))
+          } catch {} // A folder that is not there hides no other.
         file = files.get(id)
         st = file ? statSync(file, { throwIfNoEntry: false }) : null
       }

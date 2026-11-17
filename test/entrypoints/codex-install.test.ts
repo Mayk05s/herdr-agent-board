@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { root, type Sandbox, sandbox } from '../support/sandbox.ts'
 
@@ -112,4 +112,52 @@ test('Codex install rejects Claude notification flags before writing anything', 
     expect(existsSync(join(box.env.USERPROFILE as string, '.codex'))).toBe(false)
     expect(existsSync(join(box.env.USERPROFILE as string, '.local/bin/board'))).toBe(false)
   }
+})
+
+test('--codex --codex-home puts hooks, links and skills in the dedicated folder and leaves ~/.codex alone', async () => {
+  const box = await sandbox()
+  const home = box.env.USERPROFILE as string
+  const global = join(home, '.codex')
+  mkdirSync(join(global, 'skills/mine'), { recursive: true })
+  writeFileSync(join(global, 'auth.json'), '{"t":1}')
+  writeFileSync(join(global, 'config.toml'), 'model = "m"\n')
+  const globalHooks = '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"herdr-state"}]}]}}'
+  writeFileSync(join(global, 'hooks.json'), globalHooks)
+  const dir = join(box.dir, 'Codex дом 100%')
+  const run = () => install(box, ['--codex', '--codex-home', dir], { CODEX_HOME: global })
+  for (let n = 0; n < 2; n++) {
+    const result = await run()
+    expect(result.code).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(readFileSync(join(dir, 'hooks.json'), 'utf8').match(/codex-hook\.ts/g)).toHaveLength(2)
+    expect(readFileSync(join(dir, 'auth.json'), 'utf8')).toBe('{"t":1}')
+    expect(lstatSync(join(dir, 'config.toml')).isSymbolicLink()).toBe(true)
+    expect(lstatSync(join(dir, 'skills/mine')).isSymbolicLink()).toBe(true)
+    expect(lstatSync(join(dir, 'skills')).isSymbolicLink()).toBe(false)
+    expect(existsSync(join(dir, 'skills/agent-board-threads/SKILL.md'))).toBe(true)
+  }
+  // The global folder keeps its hooks, and nothing of the board went into it.
+  expect(readFileSync(join(global, 'hooks.json'), 'utf8')).toBe(globalHooks)
+  expect(existsSync(join(global, 'hooks.json.bak-agent-board'))).toBe(false)
+  expect(existsSync(join(global, 'skills/agent-board-threads'))).toBe(false)
+  // The board is told where the rollouts of these sessions are.
+  const config = JSON.parse(
+    readFileSync(join(box.env.APPDATA as string, 'herdr/plugins/config/agent-board/config.json'), 'utf8'),
+  )
+  expect(config.codexHome).toBe(dir)
+  expect(box.calls()).toEqual([
+    ['integration', 'install', 'codex'],
+    ['integration', 'install', 'codex'],
+  ])
+})
+
+test('--codex-home without a folder takes ~/.config/herdr/codex; without --codex it is refused as unknown', async () => {
+  const box = await sandbox()
+  const home = box.env.USERPROFILE as string
+  const result = await install(box, ['--codex', '--codex-home'])
+  expect(result.code).toBe(0)
+  expect(existsSync(join(home, '.config/herdr/codex/hooks.json'))).toBe(true)
+  expect(existsSync(join(home, '.codex'))).toBe(false)
+  const plain = await install(box, ['--codex'])
+  expect(plain.stdout).not.toContain('Codex home:')
 })
