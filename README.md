@@ -4068,7 +4068,9 @@ web board off), `terminal` (false turns the web board's [terminal](#terminal) of
 (path for the app window), `foldWaiting` (how the web board folds a session asleep in
 "Waiting" down to its name, what it waits for and its time: `push`, the default, unfolds it on
 hover moving the cards below apart; `over` unfolds it over them; `off` keeps it whole; the gear's
-Settings set it too), `terminalTitle` (window title pattern to
+Settings set it too), `cardModel` (`true` puts a line under every card's name with the agent, its model
+and effort, `Claude · claude-opus-5-5 · high`; absent or `false`, only a Codex card keeps its
+`model · effort`; the gear's Settings, Model and effort on cards, set it too), `terminalTitle` (window title pattern to
 raise, default `<COMPUTERNAME>:*`), `raiseTerminal`, `launch` (how new sessions start: `claude`,
 `command`, `agent`, `args`, `timeoutSec`, see [New sessions](#new-sessions)), `mokupilot` (calls
 with a fork of a session: `false` turns them off; `{ "dir": "<MokuPilot checkout>" }` runs its
