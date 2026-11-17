@@ -163,3 +163,38 @@ test('--codex-home without a folder takes ~/.config/herdr/codex; a plain --codex
   const plain = await install(box, ['--codex'])
   expect(plain.stdout).not.toContain('Codex home:')
 })
+
+test('--codex-master adds the herdr agent rule to the dedicated home; without it, and with a plain --codex, there is none', async () => {
+  const box = await sandbox()
+  const home = box.env.USERPROFILE as string
+  const dir = join(box.dir, 'Codex master')
+  const plain = await install(box, ['--codex', '--codex-home', dir])
+  expect(plain.code).toBe(0)
+  expect(plain.stdout).not.toContain('ignored')
+  expect(readFileSync(join(dir, 'rules/agent-board.rules'), 'utf8')).not.toContain('"herdr"')
+  const master = await install(box, ['--codex', '--codex-home', dir, '--codex-master'])
+  expect(master.code).toBe(0)
+  expect(master.stdout).not.toContain('ignored')
+  expect(readFileSync(join(dir, 'rules/agent-board.rules'), 'utf8')).toContain('["prompt", "read", "list", "get"]')
+  // Without a dedicated home there is no rule file to put it in: said, and nothing written.
+  const alone = await install(box, ['--codex', '--codex-master'], { CODEX_HOME: join(box.dir, 'plain') })
+  expect(alone.stdout).toContain('ignored --codex-master')
+  expect(existsSync(join(box.dir, 'plain/rules'))).toBe(false)
+  expect(existsSync(join(home, '.config/herdr/codex'))).toBe(false)
+})
+
+test("the dedicated home gets the Codex herdr-agents skill; Claude's skill file is the one it was", async () => {
+  const box = await sandbox()
+  const dir = join(box.dir, 'Codex skill')
+  expect((await install(box, ['--codex', '--codex-home', dir])).code).toBe(0)
+  const codex = readFileSync(join(dir, 'skills/herdr-agents/SKILL.md'), 'utf8')
+  expect(codex).toBe(readFileSync(join(root, 'skills/herdr-agents/SKILL.codex.md'), 'utf8'))
+  expect(codex).toContain('agent-board: installed by')
+  expect(codex).not.toMatch(/SendMessage|ListAgents|CronCreate|claude --resume/)
+  for (const need of ['herdr agent prompt', 'thread new', 'thread done', '--agent', 'not put to sleep'])
+    expect(codex).toContain(need)
+  expect(readFileSync(join(root, 'skills/herdr-agents/SKILL.md'), 'utf8')).toContain('SendMessage')
+  // A second run changes nothing; Claude's install writes the Claude one.
+  expect((await install(box, ['--codex', '--codex-home', dir])).stdout).toContain('skill:')
+  expect(readFileSync(join(dir, 'skills/herdr-agents/SKILL.md'), 'utf8')).toBe(codex)
+})

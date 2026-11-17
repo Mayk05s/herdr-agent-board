@@ -23,6 +23,11 @@ const RULES = `# agent-board: board and spawn-agent need herdr's socket and the 
 prefix_rule(pattern=["board"], decision="allow")
 prefix_rule(pattern=["spawn-agent"], decision="allow")
 `
+// Only for a master (install.ts --codex-master): it messages and reads the sessions it coordinates.
+// Nothing else of herdr: send-keys, pane and tab commands stay behind Codex's own approval.
+const MASTER_RULES = `# agent-board --codex-master: a master messages and reads other sessions.
+prefix_rule(pattern=["herdr", "agent", ["prompt", "read", "list", "get"]], decision="allow")
+`
 
 const present = (path: string): boolean => {
   try {
@@ -36,10 +41,14 @@ const present = (path: string): boolean => {
 /**
  * `dir` made ready: the shared files and folders of `source` linked in where `dir` has none, and
  * `skills/` and `rules/` real folders with a link per entry of `source`'s (the board's own skills
- * and its rule are written there as files). Returns what was linked and what could not be (no right to link, as on Windows
+ * and its rules are written there as files; `master`: with the master's too). Returns what was linked and what could not be (no right to link, as on Windows
  * without developer mode); nothing there is replaced.
  */
-export function prepareCodexHome(dir: string, source: string): { linked: string[]; failed: string[] } {
+export function prepareCodexHome(
+  dir: string,
+  source: string,
+  { master = false }: { master?: boolean } = {},
+): { linked: string[]; failed: string[] } {
   if (join(dir) === join(source)) throw new Error('the dedicated Codex home is the global one')
   for (const folder of FOLDERS) mkdirSync(join(dir, folder), { recursive: true })
   const linked: string[] = []
@@ -64,6 +73,7 @@ export function prepareCodexHome(dir: string, source: string): { linked: string[
   try {
     had = readFileSync(rules, 'utf8')
   } catch {}
-  if (had !== RULES) writeFileSync(rules, RULES)
+  const wanted = master ? RULES + MASTER_RULES : RULES
+  if (had !== wanted) writeFileSync(rules, wanted)
   return { linked, failed }
 }

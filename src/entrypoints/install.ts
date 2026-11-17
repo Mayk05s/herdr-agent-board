@@ -21,7 +21,7 @@
 //                                               script, macOS' toast.ts)
 //   bun src/entrypoints/install.ts --no-toast   and without them
 //   bun src/entrypoints/install.ts --codex      Codex's hooks and the commands, leaving Claude alone
-//   bun src/entrypoints/install.ts --codex --codex-home [dir]
+//   bun src/entrypoints/install.ts --codex --codex-home [dir] [--codex-master]
 //                                               the same in a CODEX_HOME of its own for the sessions
 //                                               herdr runs (default ~/.config/herdr/codex), linked to
 //                                               ~/.codex for auth and config; ~/.codex is not written
@@ -51,8 +51,11 @@ const argv = process.argv.slice(2)
 const homeAt = argv.indexOf('--codex-home')
 const homeValue = homeAt >= 0 && argv[homeAt + 1] && !argv[homeAt + 1]?.startsWith('--') ? argv[homeAt + 1] : undefined
 const args = argv.filter((_, i) => i !== homeAt && !(homeValue !== undefined && i === homeAt + 1))
-for (const a of args.filter(a => a !== '--toast' && a !== '--no-toast' && a !== '--codex'))
-  console.log(`ignored ${a}: the options are --toast, --no-toast, --codex and --codex --codex-home [dir]`)
+const master = args.includes('--codex-master')
+for (const a of args.filter(a => !['--toast', '--no-toast', '--codex', '--codex-master'].includes(a)))
+  console.log(
+    `ignored ${a}: the options are --toast, --no-toast, --codex and --codex --codex-home [dir] [--codex-master]`,
+  )
 let toast = args.includes('--toast') ? true : args.includes('--no-toast') ? false : undefined
 const toasts = process.platform === 'win32' || process.platform === 'darwin'
 if (toast && !toasts) {
@@ -86,12 +89,13 @@ if (args.includes('--codex')) {
       throw new Error('--codex does not take --toast or --no-toast')
     if (homeAt >= 0 && (homeValue ?? '').startsWith('~'))
       throw new Error('--codex-home: write the folder out, the shell has not expanded ~')
+    if (master && homeAt < 0) console.log('ignored --codex-master: it goes with --codex --codex-home')
     const dedicated = homeAt >= 0 ? (homeValue ?? defaultCodexHome()) : null
     const dir = dedicated ?? (process.env.CODEX_HOME || join(homedir(), '.codex'))
     const script = join(ROOT, 'src', 'entrypoints', 'codex-hook.ts')
     const plan = codexHooksPlan(dir, script)
     if (dedicated) {
-      const { linked, failed } = prepareCodexHome(dedicated, join(homedir(), '.codex'))
+      const { linked, failed } = prepareCodexHome(dedicated, join(homedir(), '.codex'), { master })
       console.log(`Codex home: ${dedicated}${linked.length ? `, linked from ~/.codex: ${linked.join(', ')}` : ''}`)
       if (failed.length)
         console.log(`Codex home: could not link ${failed.join(', ')}; link or copy them into ${dedicated} yourself.`)
@@ -102,7 +106,7 @@ if (args.includes('--codex')) {
       })
       const skill = [
         { name: THREADS_SKILL, from: files.threadsSkill },
-        { name: SKILL, from: files.skill },
+        { name: SKILL, from: files.codexSkill },
       ]
       for (const s of skill) {
         const text = readText(s.from)
