@@ -118,12 +118,15 @@ export function wireParty(p: Party, me: string): WorkParty {
 /** The key a shared thread goes by on the wire: its sharer's (without the `@name` this board shows). */
 export const wireKey = (h: ThreadHead): string => sharedOf(h)?.key ?? h.key.replace(/@.*$/, '')
 
+/** A status as the wire takes it: `review` is this board's own (board-6), for the peers it waits on the owner. */
+const wireStatus = (s: ThreadStatus): WorkHead['status'] => (s === 'review' ? 'owner' : s)
+
 /** The sender's head after an entry (rule 3). */
 export function wireHead(h: ThreadHead): WorkHead {
   return {
     key: wireKey(h),
     title: wireTitle(h.title, wireKey(h)),
-    status: h.status,
+    status: wireStatus(h.status),
     summary: wireLine(h.summary),
     rev: h.rev,
   }
@@ -138,7 +141,7 @@ export function wireHead(h: ThreadHead): WorkHead {
 export function wireSet(set: EntrySet | undefined, me: string, proposed = false): WorkSet | undefined {
   if (!set) return undefined
   const out: WorkSet = {}
-  if (set.status !== undefined && !proposed) out.status = set.status
+  if (set.status !== undefined && !proposed) out.status = wireStatus(set.status)
   if (set.summary !== undefined && !proposed) out.summary = wireLine(set.summary)
   if (set.waitingOn !== undefined) out.waitingOn = wireLine(set.waitingOn)
   if (set.title !== undefined) {
@@ -154,6 +157,7 @@ const SAY: Record<ThreadStatus, string> = {
   doing: 'doing',
   waiting: 'blocked on',
   owner: 'blocked on',
+  review: 'ready for review',
   done: 'done',
   dropped: 'dropped',
 }

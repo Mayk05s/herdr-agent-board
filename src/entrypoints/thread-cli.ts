@@ -75,7 +75,7 @@ import {
 } from '../services/work-threads.ts'
 
 export const THREAD_USAGE = `board thread new [--lane <id>] [--parent <key>] [--to <session>] [--doing] "<title>"
-board thread post <key> [--status next|doing|waiting|owner|done|dropped] [--summary "<line>"] [--waiting "<on what>"]
+board thread post <key> [--status next|doing|waiting|owner|review|done|dropped] [--summary "<line>"] [--waiting "<on what>"]
                         [--file <path>]... [--link <url>]... [--reply <entry>] [--private] ["<text>"]
 board thread done <key> ["<summary>"] [--file <path>]... [--link <url>]...
 board thread ask <key> "<question for the owner>"
@@ -93,7 +93,10 @@ board thread share <key> <name|team|channel> [--history]
   command takes --json. A thread's creator hears of its status changes, its assignee of the owner's
   answers: one line, "[board reminder from threads] atlas-13 done: <summary>", never its own changes.
   share asks the owner to share the thread with a teammate's board; on a shared thread every entry
-  that is not --private goes to them (or waits for the owner, as a team post of yours would).`
+  that is not --private goes to them (or waits for the owner, as a team post of yours would).
+  --status review: the result is ready for the owner to check (--summary the result, the text how to
+  check it, --link/--file what to look at); the owner accepts it (done) or returns it with a remark
+  (doing), and the session that handed it in is told.`
 
 /** The flags each command takes: with a value, and bare. `--json` and `--help` go with every one. */
 const FLAGS: Record<string, { values: readonly string[]; bare: readonly string[] }> = {

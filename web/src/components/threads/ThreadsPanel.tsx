@@ -40,6 +40,8 @@ export interface ThreadsPanelProps {
   onClose(): void
   /** The lane filter's menu (#412): the board's own, in its look, not the browser's list. */
   menu: LaneMenuEngine
+  /** Opens the threads as the Tasks screen instead (board-6). */
+  onFull?: () => void
 }
 
 /**
@@ -167,15 +169,21 @@ export function ThreadList({
   selected,
   onOpen,
   menu,
+  lane = null,
+  onLane,
 }: {
   rows: readonly ThreadRow[]
   selected: string | null
   onOpen(key: string): void
   menu: LaneMenuEngine
+  /** The lane shown first (the Tasks screen's `#tasks=<lane>`, board-6). */
+  lane?: string | null
+  /** The lane picked: the Tasks screen's New task starts in it. */
+  onLane?(lane: string | null): void
 }) {
   const t = useT()
   const { data } = useBoardContext()
-  const [filter, setFilter] = useState<ListFilter>({ lane: null, query: '' })
+  const [filter, setFilter] = useState<ListFilter>({ lane, query: '' })
   const [doneOpen, setDoneOpen] = useState(false)
   const lanes = lanesOf(rows)
   const titleOf = (lane: string) => data?.categories?.find(c => c.id === lane)?.title ?? lane
@@ -183,13 +191,16 @@ export function ThreadList({
   return (
     <nav className="wt-side" aria-label={t('wt.title')}>
       <div className="wt-filter">
-        {lanes.length > 1 && (
+        {(lanes.length > 1 || filter.lane !== null) && (
           <LaneFilter
             lanes={lanes}
             lane={filter.lane}
             titleOf={titleOf}
             menu={menu}
-            onPick={lane => setFilter(f => ({ ...f, lane }))}
+            onPick={lane => {
+              setFilter(f => ({ ...f, lane }))
+              onLane?.(lane)
+            }}
           />
         )}
         <label className="wt-search">
@@ -284,7 +295,21 @@ function usePush(body: React.RefObject<HTMLDivElement | null>, pane: 'list' | 't
   }
 }
 
-export function ThreadsPanel({ open, onClose, menu }: ThreadsPanelProps) {
+/**
+ * The list and one thread, side by side when wide, pushed over each other when narrow: the panel's
+ * body and the Tasks screen's (board-6). `open`: on show, so the thread is read.
+ */
+export function ThreadsBody({
+  open,
+  menu,
+  lane,
+  onLane,
+}: {
+  open: boolean
+  menu: LaneMenuEngine
+  lane?: string | null
+  onLane?(lane: string | null): void
+}) {
   const t = useT()
   const threads = useThreadsContext()
   const { data } = useBoardContext()
@@ -368,8 +393,52 @@ export function ThreadsPanel({ open, onClose, menu }: ThreadsPanelProps) {
     if (back) setPane('list')
   }
 
-  const needs = data?.threads?.needsOwner ?? 0
+  return (
+    <div
+      ref={body}
+      className="sheet-body wt-body"
+      data-pane={pane}
+      data-settled={push.settled}
+      data-wide={wide ? '' : undefined}
+    >
+      <ThreadList
+        rows={rows}
+        selected={pane === 'thread' || wide ? selected : null}
+        onOpen={openKey}
+        menu={menu}
+        {...(lane !== undefined && { lane })}
+        {...(onLane && { onLane })}
+      />
+      <div
+        className="wt-main"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
+        {selected && view ? (
+          <ThreadPane view={view} onOpen={openKey} onBack={() => setPane('list')} />
+        ) : (
+          <p className="hint wt-pick">{gone ? t('wt.gone', { key: selected ?? '' }) : selected ? '' : t('wt.pick')}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** What the threads' head says: how many are open, how many wait on the owner. */
+export function useThreadsMeta(): string {
+  const t = useT()
+  const threads = useThreadsContext()
+  const { data } = useBoardContext()
+  const rows = threads?.rows ?? []
   const live = rows.filter(r => r.status !== 'done' && r.status !== 'dropped').length
+  return t('wt.meta', { open: live, needs: data?.threads?.needsOwner ?? 0 })
+}
+
+export function ThreadsPanel({ open, onClose, menu, onFull }: ThreadsPanelProps) {
+  const t = useT()
+  const meta = useThreadsMeta()
   return (
     <Panel
       id="threads-sheet"
@@ -380,34 +449,26 @@ export function ThreadsPanel({ open, onClose, menu }: ThreadsPanelProps) {
       title={
         <>
           <h2>{t('wt.title')}</h2>
-          <p className="sheet-meta">{t('wt.meta', { open: live, needs })}</p>
+          <p className="sheet-meta">{meta}</p>
         </>
       }
+      {...(onFull && {
+        tools: (
+          <button
+            type="button"
+            className="icon-button wt-full-open"
+            title={t('wt.screen.full')}
+            aria-label={t('wt.screen.full')}
+            onClick={onFull}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 6V3h3M10 3h3v3M13 10v3h-3M6 13H3v-3" />
+            </svg>
+          </button>
+        ),
+      })}
     >
-      <div
-        ref={body}
-        className="sheet-body wt-body"
-        data-pane={pane}
-        data-settled={push.settled}
-        data-wide={wide ? '' : undefined}
-      >
-        <ThreadList rows={rows} selected={pane === 'thread' || wide ? selected : null} onOpen={openKey} menu={menu} />
-        <div
-          className="wt-main"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
-        >
-          {selected && view ? (
-            <ThreadPane view={view} onOpen={openKey} onBack={() => setPane('list')} />
-          ) : (
-            <p className="hint wt-pick">
-              {gone ? t('wt.gone', { key: selected ?? '' }) : selected ? '' : t('wt.pick')}
-            </p>
-          )}
-        </div>
-      </div>
+      <ThreadsBody open={open} menu={menu} />
     </Panel>
   )
 }

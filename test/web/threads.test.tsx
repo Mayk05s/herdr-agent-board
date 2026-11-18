@@ -81,6 +81,9 @@ function threads(rows: ThreadRow[] = ROWS): Threads {
     asked: null,
     shown: false,
     setShown() {},
+    full: false,
+    setFull() {},
+    fullLane: null,
   }
 }
 

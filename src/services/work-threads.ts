@@ -326,6 +326,8 @@ export function postEntry(ctx: ThreadsCtx, head: ThreadHead, input: PostInput): 
     if (set.status === 'dropped' && ctx.actor.kind !== 'owner')
       throw new ThreadError('owner_only', `${head.key} is shared: only the owner drops it`)
     if ((input.files?.length ?? 0) > 1) throw new ThreadError('files', `${head.key} is shared: one file per entry`)
+    if (set.status === 'review')
+      throw new ThreadError('shared_review', `${head.key} is shared: ready for review is for local threads`)
   }
   const held = ctx.ownerHolds && ctx.actor.kind === 'owner'
   const out: EntryOut | undefined = input.out ?? (shared && !input.private ? (held ? 'held' : 'queued') : undefined)
@@ -850,4 +852,46 @@ export function confirmClose(ctx: ThreadsCtx, head: ThreadHead): Written {
 export function keepOpen(ctx: ThreadsCtx, head: ThreadHead): Written {
   if (!head.proposed) throw new ThreadError('no_proposal', `nobody proposed ${head.key} done`)
   return postEntry(ctx, head, { status: 'owner' })
+}
+
+// ------------------------------------------------------------------ review (board-6)
+
+/**
+ * The entry that handed the thread to the owner to check: the newest that set `review`, while the
+ * thread still is in review; null otherwise. Its summary is the result, its text how to check it.
+ */
+export function openReview(head: ThreadHead, entries: readonly ThreadEntry[]): ThreadEntry | null {
+  if (head.status !== 'review') return null
+  for (let i = entries.length - 1; i >= 0; i--)
+    if (entries[i]?.set?.status === 'review') return entries[i] as ThreadEntry
+  return null
+}
+
+/** The owner's verdict on a review written: the session that handed it in (to be told). */
+export interface Reviewed extends Written {
+  reviewer: Extract<Party, { kind: 'session' }> | null
+}
+
+function reviewerOf(head: ThreadHead, review: ThreadEntry | null): Reviewed['reviewer'] {
+  if (review?.author.kind === 'session') return review.author
+  return head.assignee?.kind === 'session' ? head.assignee : null
+}
+
+/** The owner accepts the result in review: done, the result's summary kept. */
+export function acceptReview(ctx: ThreadsCtx, head: ThreadHead): Reviewed {
+  if (head.status !== 'review') throw new ThreadError('no_review', `${head.key} is not ready for review`)
+  const review = openReview(head, entriesOf(ctx.db, head.id))
+  const written = postEntry(ctx, head, { status: 'done', ...(review && { replyTo: review.id }) })
+  return { ...written, reviewer: reviewerOf(head, review) }
+}
+
+/** The owner returns the result in review with a remark: the remark in the feed, the thread back in work. */
+export function returnReview(ctx: ThreadsCtx, head: ThreadHead, words: string): Reviewed {
+  if (head.status !== 'review') throw new ThreadError('no_review', `${head.key} is not ready for review`)
+  const text = cleanText(words, TEXT_MAX + 1)
+  if (!text) throw new ThreadError('empty', 'a return needs a remark')
+  if (text.length > TEXT_MAX) throw new ThreadError('text_long', `the remark has more than ${TEXT_MAX} characters`)
+  const review = openReview(head, entriesOf(ctx.db, head.id))
+  const written = postEntry(ctx, head, { text, status: 'doing', ...(review && { replyTo: review.id }) })
+  return { ...written, reviewer: reviewerOf(head, review) }
 }

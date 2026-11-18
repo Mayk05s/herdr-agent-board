@@ -25,6 +25,7 @@ import { SecretRequests, secretsOf } from './components/secrets/SecretForm.tsx'
 import { Toasts } from './components/Toasts.tsx'
 import { Toolbar } from './components/Toolbar.tsx'
 import { Terminal } from './components/terminal/Terminal.tsx'
+import { TasksScreen } from './components/threads/TasksScreen.tsx'
 import { useArchive } from './hooks/useArchive.ts'
 import { useBoardKeys } from './hooks/useBoardKeys.ts'
 import { useContextMenus } from './hooks/useContextMenus.ts'
@@ -280,7 +281,10 @@ export function App() {
           picks={picks}
           more={more}
           onTodos={() => setTodosOpen(!todosOpen)}
-          {...(threads && { onThreads: () => threads.setShown(!threads.shown) })}
+          {...(threads && {
+            // On the Tasks screen (board-6) the pill takes the board back; else it opens the panel, as it did.
+            onThreads: () => (threads.full ? threads.setFull(false) : threads.setShown(!threads.shown)),
+          })}
           onBackup={remotePage() ? undefined : openBackup}
           onTime={() => {
             setTimeClient(null)
@@ -289,18 +293,22 @@ export function App() {
           onCalendar={() => setCalendarOpen(!calendarOpen)}
           {...(offersTeam(data) && { onTeam: () => (team ? setTeam(false) : openTeam()) })}
         />
-        <Board
-          onNewSession={newSession}
-          onLaneHead={openCategories}
-          onLaneTime={id => {
-            setTimeClient(id)
-            setTimeOpen(true)
-          }}
-          roomBelow={panels.roomBelow}
-          launch={launch.slots}
-          takeovers={launch.takeovers}
-          archive={archive}
-        />
+        {threads?.full ? (
+          <TasksScreen menu={menus.menu} />
+        ) : (
+          <Board
+            onNewSession={newSession}
+            onLaneHead={openCategories}
+            onLaneTime={id => {
+              setTimeClient(id)
+              setTimeOpen(true)
+            }}
+            roomBelow={panels.roomBelow}
+            launch={launch.slots}
+            takeovers={launch.takeovers}
+            archive={archive}
+          />
+        )}
       </div>
       <SidePanels
         categories={{ open: categories, focus: lane, onClose: () => setCategories(false), onOpen: openCategories }}
@@ -343,7 +351,12 @@ export function App() {
         archive={archive}
         todos={{ open: todosOpen, onClose: () => setTodosOpen(false), todos }}
         {...(threads && {
-          threads: { open: threads.shown, onClose: () => threads.setShown(false), menu: menus.menu },
+          threads: {
+            open: threads.shown,
+            onClose: () => threads.setShown(false),
+            menu: menus.menu,
+            onFull: () => threads.setFull(true),
+          },
         })}
         time={{ open: timeOpen, onClose: () => setTimeOpen(false), client: timeClient, onClient: setTimeClient }}
         sheet={{

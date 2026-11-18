@@ -351,14 +351,14 @@ export const threadsRev = (db: BoardDb): number =>
   (db.db.query('SELECT max(seq) AS s FROM thread_entries').get() as { s: number | null }).s ?? 0
 
 /**
- * Open threads that wait on the owner, proposed closes among them, and (#394) those an agent asked
+ * Open threads that wait on the owner, proposed closes and results to check (board-6) among them, and (#394) those an agent asked
  * to share and those a peer offered this board: each waits for the owner's press.
  */
 export const needsOwner = (db: BoardDb): number =>
   (
     db.db
       .query(
-        "SELECT count(*) AS n FROM threads WHERE status = 'owner' OR (json_valid(scope) AND (json_extract(scope, '$.request') IS NOT NULL OR json_extract(scope, '$.offer') IS NOT NULL))",
+        "SELECT count(*) AS n FROM threads WHERE status IN ('owner', 'review') OR (json_valid(scope) AND (json_extract(scope, '$.request') IS NOT NULL OR json_extract(scope, '$.offer') IS NOT NULL))",
       )
       .get() as { n: number }
   ).n

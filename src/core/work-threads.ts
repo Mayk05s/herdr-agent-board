@@ -10,7 +10,9 @@
 // modules are named work-thread: "thread" already means a session's conversation and a Team
 // thread in the code.
 
-export const THREAD_STATUSES = ['next', 'doing', 'waiting', 'owner', 'done', 'dropped'] as const
+// `review` (board-6): a result handed to the owner to check, with how to check it; the owner accepts
+// it (done) or returns it with a remark (doing). Local only: a shared thread does not take it.
+export const THREAD_STATUSES = ['next', 'doing', 'waiting', 'owner', 'review', 'done', 'dropped'] as const
 export type ThreadStatus = (typeof THREAD_STATUSES)[number]
 export const isThreadStatus = (v: unknown): v is ThreadStatus => THREAD_STATUSES.includes(v as ThreadStatus)
 /** Done and dropped threads are closed: hidden from a list unless asked for. */
@@ -383,6 +385,7 @@ const STATUS_WORD: Record<ThreadStatus, string> = {
   doing: 'doing',
   waiting: 'waiting',
   owner: 'needs the owner',
+  review: 'ready for review',
   done: 'done',
   dropped: 'dropped',
 }
@@ -609,6 +612,8 @@ export interface ThreadView {
   earlier: number
   /** The open question for the owner, by entry id. */
   ask: string | null
+  /** The entry that handed the thread in for review while it is in review (board-6), by id. */
+  review?: string | null
 }
 
 /** The page's own word for a thread in a text: a known key, as a link (8). */
