@@ -75,7 +75,13 @@ export interface Tag {
  */
 export function tagOf(state: TuiState, it: Item, max: number): Tag | null {
   const tag = profileTag(it, state.profiles)
-  if (!tag || max < 1) return null
+  if (max < 1) return null
+  // Another model than config.json's `models` expects (#429): red too, unless the profile is wrong.
+  if (it.modelWrong && tag?.kind !== 'wrong') {
+    const text = t('tui.wrongModel')
+    return { text: fit(text, Math.min(width(text), max)), color: 'red' }
+  }
+  if (!tag) return null
   const [text, color] =
     tag.kind === 'profile'
       ? [tag.profile.title, TAG_COLORS[tag.profile.color] ?? tag.profile.color]

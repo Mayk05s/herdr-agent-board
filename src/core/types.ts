@@ -49,6 +49,8 @@ export interface Card {
   profileWant?: string
   /** The model a start asked for (#380: spawn-agent --model, the board's launch); absent: the profile's default. */
   modelWant?: string
+  /** The model family the owner allowed it from its card (#429, core/model-check.ts): no warning while it runs on it. */
+  modelOk?: string
   /** The Claude id inherited by the root Codex hook, false when none. A Claude child has its own id. */
   codexParentClaude?: string | false
   /** A fork's: the id of the session it is a fork of, and when it started (its copied lines are older). */
@@ -218,6 +220,8 @@ export interface Config {
   compact?: unknown
   /** Threads (#379, `true` or an object), as config.json has it: read through core/work-threads.ts threadsConfig. */
   threads?: unknown
+  /** The model rule (#429, an object), as config.json has it: read through core/model-check.ts modelsConfig. */
+  models?: unknown
   [extra: string]: unknown
 }
 
@@ -251,6 +255,8 @@ export interface TranscriptInfo {
   context?: number | null
   /** The model its last assistant message ran, when the status line has not said. */
   model?: string | null
+  /** When that message was written (#429, core/model-check.ts); absent without a time. */
+  modelAt?: number
   /** The effort its last assistant message was sent with (low, medium, high, xhigh, max). */
   effort?: string | null
   [extra: string]: unknown
@@ -298,6 +304,11 @@ export interface Item {
   model?: string | null
   /** The model its start asked for (#380, card.modelWant): not the profile's default. Absent for the others. */
   modelAsked?: string
+  /**
+   * It runs on another model family than config.json's `models` expects of it (#429, core/model-check.ts):
+   * the model it runs and the family expected. Absent for the others, and always while the rule is off.
+   */
+  modelWrong?: { runs: string; want: string }
   /** The effort it thinks with (low, medium, high, xhigh, max), from its transcript. */
   effort?: string | null
   tool?: ToolCall | null

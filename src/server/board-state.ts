@@ -18,6 +18,7 @@ import { LANGUAGES } from '../core/i18n/translator.ts'
 import { lang, t } from '../core/lang.ts'
 import { claudeProgram, commandText } from '../core/launch/spawn-args.ts'
 import type { Limits } from '../core/limits.ts'
+import { familyTitle } from '../core/model-check.ts'
 import type {
   BackupPayload,
   BoardLimits,
@@ -372,6 +373,31 @@ export function createBoardState({
     }
   }
 
+  // A session on another model than config.json's `models` expects (#429) gets a herdr notification
+  // once per start (its key and the time its Claude process started): a restart or a wake that
+  // brings it back on that model says so again, a later turn does not. Only a running one: a
+  // sleeper's tag says what it last ran. Without the rule no item has modelWrong, and nothing goes.
+  const modelWarned = new Set<string>()
+  async function warnWrongModels(): Promise<void> {
+    const startOf = (i: Item): string => `${i.key}\n${i.since ?? ''}`
+    const wrong = items.filter(i => i.modelWrong && i.alive && !modelWarned.has(startOf(i)))
+    await Promise.all(
+      wrong.map(async item => {
+        modelWarned.add(startOf(item))
+        const vars = {
+          name: item.name,
+          got: item.modelWrong?.runs ?? '',
+          want: familyTitle(item.modelWrong?.want ?? ''),
+        }
+        try {
+          await notify(t('model.wrongTitle', vars), t('model.wrongBody', vars))
+        } catch (err) {
+          log(`wrong model notification: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }),
+    )
+  }
+
   let refreshing = false
   let again = false
   async function refresh(): Promise<void> {
@@ -398,6 +424,7 @@ export function createBoardState({
       lastSuccessfulRefreshAt = Date.now()
       publish()
       await warnWrongProfiles()
+      await warnWrongModels()
     } catch (err) {
       stale = true
       publish()

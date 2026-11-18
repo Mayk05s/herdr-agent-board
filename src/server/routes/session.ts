@@ -18,6 +18,7 @@ import { publicHelper } from '../../core/helpers.ts'
 import { t } from '../../core/lang.ts'
 import { checkName } from '../../core/launch/names.ts'
 import type { MessageGate } from '../../core/message-gate.ts'
+import { modelFamily } from '../../core/model-check.ts'
 import type { Viewer } from '../../core/mokupilot-mode.ts'
 import { isPiItem } from '../../core/pi.ts'
 import type { QueuedPrompt, QueueWindow } from '../../core/queue.ts'
@@ -222,6 +223,9 @@ function card(item: Item, body: Body): Result {
   if (typeof body.doing === 'string') patch.doing = body.doing.trim()
   // Kept in sight, or not any more.
   if (typeof body.favorite === 'boolean') patch.favorite = body.favorite || ''
+  // "This model is fine here" (#429): the family it runs now, so another one warns again; false takes it back.
+  if (body.modelOk === true) patch.modelOk = modelFamily(item.model) ?? ''
+  else if (body.modelOk === false) patch.modelOk = ''
   // Auto-compact (#378): its own limit ('' or null: Settings' default applies) and instructions.
   if (body.compactAt !== undefined) {
     const raw = body.compactAt

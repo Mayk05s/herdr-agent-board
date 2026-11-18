@@ -285,8 +285,12 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
     }
     if (o.type !== 'assistant' || !Array.isArray(content)) continue
     // The model it runs, for the card when the status line has not said (a synthetic message's is no model).
-    if (!info.model && typeof message?.model === 'string' && message.model !== '<synthetic>')
+    if (!info.model && typeof message?.model === 'string' && message.model !== '<synthetic>') {
       info.model = message.model.slice(0, 60)
+      // When that line was written (#429): a model from before a restart is not the one it runs now.
+      const at = Date.parse(str(o.timestamp))
+      if (at) info.modelAt = at
+    }
     // The effort that turn was sent with: on the transcript's line, not in the message.
     if (!info.effort) {
       const effort =

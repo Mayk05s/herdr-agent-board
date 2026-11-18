@@ -55,6 +55,7 @@ import {
   Turn,
   WriteGlyph,
 } from './icons.tsx'
+import { ModelTag } from './ModelTag.tsx'
 import { ProfileTag } from './ProfileTag.tsx'
 import { StopButton } from './StopButton.tsx'
 import { CardThreadChips, KeyText } from './threads/bits.tsx'
@@ -179,6 +180,8 @@ function CardTop({ item }: { item: Item }) {
       )}
       {/* Its profile, while the board shows more than one, or one hidden or not known. */}
       <ProfileTag item={item} mark />
+      {/* Another model than config.json's `models` expects (#429). */}
+      <ModelTag item={item} />
       <span className="card-status" style={{ '--c': COLUMN_COLORS[item.column] }} title={t(`col.${item.column}`)}>
         {t(`col.${item.column}`)}
       </span>
