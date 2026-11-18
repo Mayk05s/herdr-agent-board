@@ -23,6 +23,7 @@ import { waitingTool } from '../core/held-question.ts'
 import { type HelperSummary, summarize } from '../core/helpers.ts'
 import { t } from '../core/lang.ts'
 import { relate } from '../core/links.ts'
+import { modelCheck, modelsConfig } from '../core/model-check.ts'
 import { isPiItem, isPiSessionFile, PI_AGENT, piSessionId } from '../core/pi.ts'
 import { sessionProfile } from '../core/profiles.ts'
 import { pendingOf, requestsOf, type SecretView, secretViews } from '../core/secrets.ts'
@@ -165,6 +166,8 @@ interface ContextFill {
   contextSize: number | null
   model: string | null
   effort: string | null
+  /** When `model` was reported: the status line's last run (its file's time), else its assistant line's time (server only). */
+  modelAt: number | null
 }
 
 const effortCache = new Map<string, { mtimeMs: number; effort: string | null }>()
@@ -200,6 +203,7 @@ function contextOf(session: string | null, info: TranscriptInfo, settingsDir: st
     contextSize: null,
     model: info.model ?? null,
     effort: info.effort ?? effortFromSettings(settingsDir, info.model ?? null),
+    modelAt: info.model ? (info.modelAt ?? null) : null,
   }
   if (!session) return own
   const file = join(contextDir(), `${session.replace(/[^A-Za-z0-9_-]/g, '_')}.json`)
@@ -223,6 +227,8 @@ function contextOf(session: string | null, info: TranscriptInfo, settingsDir: st
     contextSize: d.size ?? null,
     model: d.model ?? own.model,
     effort: own.effort,
+    // The status line rewrites the file on every run, before the first reply too (a model, no tokens).
+    modelAt: d.model ? st.mtimeMs : own.modelAt,
   }
 }
 
@@ -291,6 +297,8 @@ export async function collect(
   { helpers = false, links = null, seen: panesSeen = () => {} }: CollectOptions = {},
 ): Promise<Item[]> {
   const { cfg } = deps
+  // The model rule (#429): null while config.json has none, and then nothing below reads it.
+  const models = modelsConfig(cfg.models)
   const [snap, asleep] = await Promise.all([snapshot(), deps.wake.sleepers()])
   // The registries of every profile, hidden ones too (their running sessions keep their names and
   // titles), and of the folder the board's own env points to.
@@ -346,7 +354,15 @@ export async function collect(
     const callOf = call ? callView(call, base.key) : null
     // Its own words on the board, else what its task board says it does.
     const doing = card.doing || callOf?.tasks.find(x => x.status === 'doing')?.text || ''
-    const context = contextOf(codex ? null : base.session, info, home?.root ?? null) // Codex has no Claude status line file.
+    const { modelAt, ...context } = contextOf(codex ? null : base.session, info, home?.root ?? null) // Codex has no Claude status line file.
+    const name = card.name || autoName
+    // A call agent goes in its parent's lane, unless its own card says another.
+    const category = card.category || parent?.category || guess || 'other'
+    // Its model against the rule (#429), once this start has reported one: a model read before it
+    // started is the one it had before a restart or a wake.
+    const fresh = !base.since || (modelAt ?? 0) >= base.since
+    const modelWrong =
+      models && fresh ? modelCheck({ ...base, name, category, model: context.model }, card, models) : null
     // Auto-compact (#378): a Claude session in a pane of its own, only where it or Settings has a
     // limit, instructions or a run to show.
     const compact =
@@ -360,10 +376,9 @@ export async function collect(
     items.push({
       ...base,
       // A name given on the board beats the one herdr and Claude know it by; autoName is theirs.
-      name: card.name || autoName,
+      name,
       autoName,
-      // A call agent goes in its parent's lane, unless its own card says another.
-      category: card.category || parent?.category || guess || 'other',
+      category,
       categorySet: !!card.category,
       doing,
       // A card written before doingAt (#321): its last change, the latest the doing can be from.
@@ -404,6 +419,7 @@ export async function collect(
       ...(callOf && { call: callOf }), // a MokuPilot call agent (#326): its call and its task board
       // the model its start asked for (#380), when not the profile's default
       ...(typeof card.modelWant === 'string' && card.modelWant && { modelAsked: card.modelWant }),
+      ...(modelWrong && { modelWrong }), // another model than config.json's `models` expects (#429)
       transcript: path,
       ...formerPanes(card), // panes wake closed as it went to sleep (#204), for the links
       ...sessionProfile(card, profiles.list), // its profile, as its hooks reported it

@@ -405,6 +405,8 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
     own && it.workspace && { id: 'renameWorkspace', label: t('menu.renameWorkspace'), ...herdr() },
     // Kept in sight: first in its column, whole, left out of a tidy-up (the card's, so the board's).
     { id: 'favorite', label: t(it.favorite ? 'menu.unfavorite' : 'menu.favorite'), ...edit() },
+    // On another model than config.json's `models` expects (#429): the owner allows it here.
+    !!it.modelWrong && { id: 'modelOk', label: t('menu.modelOk'), ...edit() },
     SEP,
     {
       id: 'category',

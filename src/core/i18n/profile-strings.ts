@@ -55,6 +55,12 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     // herdr's notification of a session whose hooks report another profile than its start asked for (server/board-state.ts)
     'profile.wrongTitle': 'Wrong profile: {name}',
     'profile.wrongBody': '{name} was started in {want} but runs in {got}',
+    'model.wrongTitle': 'Wrong model: {name}',
+    'model.wrongBody': '{name} runs on {got}, expected {want}',
+    'model.wrong': '{got}, expected {want}',
+    'model.wrongHint': 'Runs on {model}, expected {want}',
+    'menu.modelOk': 'This model is fine here',
+    'tui.wrongModel': 'wrong model',
     // the profile switch beside the lanes control, and the tag on a card (web/src/components/ProfileSwitch.tsx, ProfileTag.tsx)
     'tb.profiles': 'Profiles',
     // the profile switch folded into one pill (web/src/components/SegmentPick.tsx)
@@ -175,6 +181,12 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     // herdr's notification of a session whose hooks report another profile than its start asked for (server/board-state.ts)
     'profile.wrongTitle': 'Не тот профиль: {name}',
     'profile.wrongBody': '{name}: запущена в профиле {want}, а работает в {got}',
+    'model.wrongTitle': 'Не та модель: {name}',
+    'model.wrongBody': '{name}: работает на {got}, ожидается {want}',
+    'model.wrong': '{got}, ожидается {want}',
+    'model.wrongHint': 'Работает на {model}, ожидается {want}',
+    'menu.modelOk': 'Эта модель здесь подходит',
+    'tui.wrongModel': 'не та модель',
     // the profile switch beside the lanes control, and the tag on a card (web/src/components/ProfileSwitch.tsx, ProfileTag.tsx)
     'tb.profiles': 'Профили',
     // the profile switch folded into one pill (web/src/components/SegmentPick.tsx)

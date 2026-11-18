@@ -530,6 +530,33 @@ profile: started for …" in red, and herdr notifies you. That session is not st
 board tags a session's line the same way, before its age ("wrong profile" in red there); it has no
 switch, so it tags as "All profiles" does.
 
+**The model a session runs.** A profile whose default model is set wrong starts every session on
+it, and `board restart` or a wake resumes a session on the model it had. To be told, name the model
+family every session should run on in config.json; without the key nothing changes:
+
+```json
+"models": {
+  "expect": "opus",
+  "sessions": { "monitor": "sonnet" },
+  "lanes": { "ops": ["sonnet", "haiku"] }
+}
+```
+
+The board compares families (`opus`, `sonnet`, `haiku`, `fable`), so a version bump or `[1m]` is
+the same model. It reads the model a session runs from the status line, else from its last
+assistant message, and only once the session's current start has reported one: a model read before
+a restart or a wake is not held against it. A session started on a model of its own
+(`spawn-agent --model`, the new-session window's Model field) is expected on that one, or on the
+rule's own family. `sessions`
+(by name, key or session id) and `lanes` (by lane id) allow more families there, `"any"` every
+model. A session on another family gets a red tag after its profile tag ("Sonnet, expected Opus",
+the full model in its tooltip; "wrong model" on the terminal board) and one herdr notification per
+start while the board runs: a later turn does not notify again, a restart that brings it back on
+that model does, and so does a restart of the board. The
+tag goes when it runs on the expected family again (`/model opus`), or when you pick "This model is
+fine here" in its card's menu, which allows the family it runs now on that card (another family
+warns again; the card route's `modelOk: false` takes it back). A model of no known family (another provider's, through pi) is never judged.
+
 **On the web board**, with two or more profiles shown:
 
 - The profile switch in the toolbar, by the lanes: "All profiles" or one profile, each with the

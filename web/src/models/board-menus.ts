@@ -73,6 +73,8 @@ export interface BoardMenuActions {
   dismiss(key: string, from: MenuOrigin): unknown
   /** Into the favorites, or out of them. */
   favorite(key: string, from: MenuOrigin): unknown
+  /** "This model is fine here" (#429): its card's warning goes until it runs on another family. */
+  modelOk?(key: string, from: MenuOrigin): unknown
   clear(key: string, from: MenuOrigin): unknown
   changes(key: string, from: MenuOrigin): unknown
   history(key: string, from: MenuOrigin): unknown
@@ -300,6 +302,7 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
         return void board.do.renameWorkspace(key, el.closest('.sheet-head')?.querySelector('#sheet-workspace') ?? null)
       if (id === 'reveal') return void board.do.openPath(it.cwd, 'open')
       if (id === 'newHere') return void board.do.newSession({ item: it }, from)
+      if (id === 'modelOk') return void board.do.modelOk?.(key, from)
       if (isCardAction(id)) board.do[id](key, from)
     },
   }
