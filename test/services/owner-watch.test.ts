@@ -5,12 +5,13 @@ import { expect, test } from 'bun:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { openDb } from '../../src/adapters/db.ts'
-import { listEntries, removeEntry } from '../../src/adapters/schedule-store.ts'
+import { addEntry, listEntries, removeEntry, updateEntry } from '../../src/adapters/schedule-store.ts'
 import { promptOf } from '../../src/core/schedule-rules.ts'
 import type { Card, Item } from '../../src/core/types.ts'
 import type { Party } from '../../src/core/work-threads.ts'
 import { type ThreadCmdContext, threadCmd } from '../../src/entrypoints/thread-cli.ts'
-import { ownerWatchFile, tellOwnerWatchers } from '../../src/services/owner-watch.ts'
+import { forgetOwnerWatch, ownerWatchFile, tellOwnerWatchers } from '../../src/services/owner-watch.ts'
+import type { EventSchedule } from '../../src/services/work-threads.ts'
 import { isolatedHome } from '../support/env.ts'
 
 const NOW = Date.parse('2026-11-18T10:00:00Z')
@@ -46,11 +47,18 @@ function setUp() {
     })
     return { code, out: out.join('\n') }
   }
-  const tick = (now = NOW) => {
+  const tick = (now = NOW, over: { stale?: boolean; schedule?: EventSchedule } = {}) => {
     const db = openDb({ create: true })
     assert.ok(db)
     try {
-      return tellOwnerWatchers({ db, cfg: { gapSec: 60 }, items, cards: () => cards, now })
+      return tellOwnerWatchers({
+        db,
+        cfg: { gapSec: 60 },
+        items: over.stale ? null : items,
+        cards: () => cards,
+        now,
+        ...(over.schedule && { schedule: over.schedule }),
+      })
     } finally {
       db.close()
     }
@@ -81,7 +89,7 @@ test('no owner watch: an ask by any session schedules nothing and writes no file
 test("a card's ask by another session: one line; the same ask again nothing; cleared, it is settled", async () => {
   const { run, tick, ask } = setUp()
   const dayKey = (day as { key: string }).key
-  assert.equal((await run(day, ['watch', '--owner'])).out, 'ok · what waits on the owner · watched: status')
+  assert.equal((await run(day, ['watch', '--owner'])).out, 'ok · what waits on the owner · watched')
   ask(ben, 'Old question from before the watch')
   // The first look starts from what waits now: no line for what was there before.
   assert.deepEqual(tick(), [])
@@ -157,4 +165,133 @@ test('unwatch --owner: nothing more is told, and what it was told goes with the 
   assert.deepEqual(tick(NOW + 1000), [])
   assert.deepEqual(lines(dayKey), [])
   assert.equal(existsSync(ownerWatchFile()), false)
+})
+
+test('a refresh that failed compares nothing: no "settled" for every ask, nothing written', async () => {
+  const { run, tick, ask } = setUp()
+  const dayKey = (day as { key: string }).key
+  await run(day, ['watch', '--owner'])
+  tick()
+  ask(anna, 'Ship it?')
+  tick(NOW + 1000)
+  deliver(dayKey)
+  assert.deepEqual(tick(NOW + 2000, { stale: true }), [])
+  assert.deepEqual(lines(dayKey), [])
+  // Fresh again with the same ask: nothing new either.
+  assert.deepEqual(tick(NOW + 3000), [])
+})
+
+test('a line the scheduler claimed goes as it is; the next one follows it after the gap', async () => {
+  const { run, tick, ask } = setUp()
+  const dayKey = (day as { key: string }).key
+  await run(day, ['watch', '--owner'])
+  tick()
+  ask(anna, 'Ship it?')
+  tick(NOW + 1000)
+  const [first] = lines(dayKey)
+  assert.ok(first)
+  updateEntry(first.id, e => ({ ...e, claim: { by: 'test', at: NOW + 1500 } }))
+  ask(ben, 'Restart the worker?')
+  assert.deepEqual(tick(NOW + 2000), [dayKey])
+  const all = lines(dayKey)
+  assert.equal(all.length, 2)
+  const second = all.find(e => e.id !== first.id)
+  assert.equal(second?.text, 'ben asks the owner: Restart the worker?')
+  assert.equal(second?.next, NOW + 1000 + 60_000)
+})
+
+test('after a restart of the web board a pending line is replaced from what the session heard before it', async () => {
+  const { run, tick, ask } = setUp()
+  const dayKey = (day as { key: string }).key
+  await run(day, ['watch', '--owner'])
+  tick()
+  ask(anna, 'Ship it?')
+  tick(NOW + 1000)
+  forgetOwnerWatch()
+  ask(anna, '')
+  ask(ben, 'Restart the worker?')
+  tick(NOW + 2000)
+  expect(lines(dayKey).map(e => e.text)).toEqual(['ben asks the owner: Restart the worker?'])
+})
+
+test("one session's full schedule never keeps another from its line", async () => {
+  const { run, tick, ask } = setUp()
+  const dayKey = (day as { key: string }).key
+  const benKey = (ben as { key: string }).key
+  await run(ben, ['watch', '--owner'])
+  await run(day, ['watch', '--owner'])
+  tick()
+  const schedule: EventSchedule = {
+    list: () => listEntries(),
+    takeBack: id => {
+      removeEntry(id)
+      return true
+    },
+    add: fields => {
+      if (fields.key === benKey) throw new Error('this session has 30 entries already')
+      return addEntry(fields)
+    },
+  }
+  ask(anna, 'Ship it?')
+  assert.deepEqual(tick(NOW + 1000, { schedule }), [dayKey])
+  assert.equal(lines(dayKey).length, 1)
+  // ben is told on a later refresh, once its schedule takes the line.
+  assert.deepEqual(tick(NOW + 2000), [benKey])
+  expect(lines(benKey).map(e => e.text)).toEqual(['anna asks the owner: Ship it?'])
+})
+
+test('--idle and --wake reach the line; unwatch takes back a line that has not gone out', async () => {
+  const { run, tick, ask } = setUp()
+  const dayKey = (day as { key: string }).key
+  assert.equal(
+    (await run(day, ['watch', '--owner', '--idle', '--wake'])).out,
+    'ok · what waits on the owner · watched · when free · wakes you',
+  )
+  tick()
+  ask(anna, 'Ship it?')
+  tick(NOW + 1000)
+  const [line] = lines(dayKey)
+  assert.equal(line?.idle, true)
+  assert.equal(line?.noWake, undefined)
+  await run(day, ['unwatch', '--owner'])
+  tick(NOW + 2000)
+  assert.deepEqual(lines(dayKey), [])
+})
+
+test('asked and settled before the line went out does not hold back the next one by a gap', async () => {
+  const { run, tick, ask } = setUp()
+  const dayKey = (day as { key: string }).key
+  await run(day, ['watch', '--owner'])
+  tick()
+  ask(anna, 'Ship it?')
+  tick(NOW + 1000)
+  ask(anna, '')
+  tick(NOW + 2000)
+  assert.deepEqual(lines(dayKey), [])
+  ask(ben, 'Restart the worker?')
+  tick(NOW + 3000)
+  assert.equal(lines(dayKey)[0]?.next, NOW + 3000)
+})
+
+test('a card that asked and works on still waits: no settled line while it works', async () => {
+  const { run, tick, ask, setItems } = setUp()
+  const dayKey = (day as { key: string }).key
+  const annaKey = (anna as { key: string }).key
+  await run(day, ['watch', '--owner'])
+  tick()
+  ask(anna, 'Ship it?')
+  tick(NOW + 1000)
+  deliver(dayKey)
+  // The board's column hides the ask while the session works (attention ''), the card still has it.
+  setItems(items => items.map(i => (i.key === annaKey ? { ...i, attention: '', question: '' } : i)))
+  assert.deepEqual(tick(NOW + 2000), [])
+})
+
+test('watch --owner takes no thread, lane, --mine or --what beside it', async () => {
+  const { run } = setUp()
+  for (const extra of [['--mine'], ['--lane', 'atlas'], ['atlas-1'], ['--what', 'all']]) {
+    const r = await run(day, ['watch', '--owner', ...extra])
+    assert.notEqual(r.code, 0, extra.join(' '))
+    assert.match(r.out, /usage: board thread watch --owner/)
+  }
 })

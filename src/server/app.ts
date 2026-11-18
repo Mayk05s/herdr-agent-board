@@ -663,7 +663,11 @@ export async function startServer({
     const c = threadsConfig(cfg.threads)
     if (!c) return
     try {
-      withThreadsDb(false, db => db && tellOwnerWatchers({ db, cfg: c, items: board.items(), now: Date.now() }))
+      withThreadsDb(
+        false,
+        db =>
+          db && tellOwnerWatchers({ db, cfg: c, items: board.stale() ? null : board.items(), now: Date.now(), log }),
+      )
     } catch (err) {
       log(`owner watch: ${err instanceof Error ? err.message : String(err)}`)
     }

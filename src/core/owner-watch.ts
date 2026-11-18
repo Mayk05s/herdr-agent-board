@@ -13,6 +13,7 @@ import {
   isSession,
   MINE,
   oneLine,
+  type Party,
   SUMMARY_MAX,
   sharedOf,
   type ThreadHead,
@@ -35,14 +36,18 @@ export interface Waiting {
   /** A card's session: its key and Claude session id. */
   card?: { key: string; session: string | null }
   thread?: ThreadHead
+  /** Who put the thread on the owner: the author of its open question, else of the entry that set the status. */
+  by?: Party | null
 }
 
 /** What a session was told: by id, who and the question it heard. */
 export type Told = Record<string, { who: string; text: string }>
 
 /**
- * The cards that wait on the owner: their `board ask` (also while the session works on), or the
- * board's "needs the user" ask (a secret request only the owner can fill, #273).
+ * The cards that wait on the owner: their `board ask`, or the board's "needs the user" ask (a secret
+ * request only the owner can fill, #273). The card's ask counts while its session works on too: the
+ * column hides it then, but a session that asked and took a reminder in would otherwise be told as
+ * settled and asked again each time it worked.
  */
 export function cardsWaiting(items: readonly Item[], cards: ReadonlyMap<string, Card>): Waiting[] {
   const out: Waiting[] = []
@@ -63,26 +68,39 @@ export function cardsWaiting(items: readonly Item[], cards: ReadonlyMap<string, 
   return out
 }
 
-/** The open threads in status owner, each with its open question ('' for none). A peer's words never go in. */
-export function threadsWaiting(threads: readonly { head: ThreadHead; ask: string }[]): Waiting[] {
+/**
+ * The open threads in status owner, each with its open question ('' for none) and who put it on
+ * the owner. A peer's words never go in.
+ */
+export function threadsWaiting(threads: readonly { head: ThreadHead; ask: string; by?: Party | null }[]): Waiting[] {
   return threads
     .filter(t => t.head.status === 'owner')
-    .map(({ head, ask }) => ({
+    .map(({ head, ask, by }) => ({
       id: `thread:${head.id}`,
       who: head.key,
       text: sharedOf(head) ? '' : oneLine(ask || head.waitingOn || head.summary || head.title, SUMMARY_MAX),
       thread: head,
+      by: by ?? null,
     }))
 }
 
-/** Whether one of the session's other watches covers the thread, or it is the session's own (it hears it already). */
-function heardElsewhere(h: ThreadHead, session: string, watches: readonly Watch[]): boolean {
-  if (isSession(h.createdBy, session) || isSession(h.assignee, session)) return true
+/**
+ * Whether the session hears of the thread waiting on the owner already: it put it there, it created
+ * it (a creator hears of its status changes), or another of its watches covers it and hears status
+ * changes. An assignee's own watch hears answers only, so a thread someone else set to the owner
+ * is still told to it.
+ */
+function heardElsewhere(w: Waiting & { thread: ThreadHead }, session: string, watches: readonly Watch[]): boolean {
+  const h = w.thread
+  if (isSession(w.by, session) || isSession(h.createdBy, session)) return true
   return watches.some(
-    w =>
-      w.session === session &&
-      w.target !== OWNER &&
-      (w.target === h.id || w.target === `lane:${h.lane}` || w.target === MINE),
+    x =>
+      x.session === session &&
+      x.target !== OWNER &&
+      x.what !== 'answers' &&
+      (x.target === h.id ||
+        x.target === `lane:${h.lane}` ||
+        (x.target === MINE && (isSession(h.createdBy, session) || isSession(h.assignee, session)))),
   )
 }
 
@@ -91,7 +109,7 @@ export function waitingFor(all: readonly Waiting[], session: string, watches: re
   return all.filter(w =>
     w.card
       ? w.card.key !== session && w.card.session !== session
-      : !(w.thread && heardElsewhere(w.thread, session, watches)),
+      : !(w.thread && heardElsewhere(w as Waiting & { thread: ThreadHead }, session, watches)),
   )
 }
 

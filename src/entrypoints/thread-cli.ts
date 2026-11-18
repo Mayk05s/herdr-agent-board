@@ -628,6 +628,9 @@ class Run {
     const me = this.session()
     const lane = a.one('--lane')
     if (lane !== undefined && !LANE.test(lane.toLowerCase())) throw new Usage(`"${lane}" is not a lane id`)
+    // What waits on the owner is one target of its own: never beside a thread, a lane or --mine.
+    if (a.has('--owner') && (a.has('--mine') || lane !== undefined || a.words.length || a.one('--what') !== undefined))
+      throw new Usage(`usage: board thread ${on ? 'watch --owner [--idle] [--wake]' : 'unwatch --owner'}`)
     const target = a.has('--owner')
       ? OWNER
       : a.has('--mine')
@@ -666,9 +669,13 @@ class Run {
     if (this.json) this.out(JSON.stringify({ ok: true, watch: w }))
     else
       this.out(
-        ['ok', label, `watched: ${w.what}`, ...(w.idle ? ['when free'] : []), ...(w.wake ? ['wakes you'] : [])].join(
-          ' · ',
-        ),
+        [
+          'ok',
+          label,
+          target === OWNER ? 'watched' : `watched: ${w.what}`,
+          ...(w.idle ? ['when free'] : []),
+          ...(w.wake ? ['wakes you'] : []),
+        ].join(' · '),
       )
   }
 }

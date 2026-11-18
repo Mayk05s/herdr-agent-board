@@ -34,6 +34,7 @@ import {
   watchesOf,
 } from '../../adapters/work-thread-store.ts'
 import { t } from '../../core/lang.ts'
+import { OWNER as OWNER_WATCH } from '../../core/owner-watch.ts'
 import { type OwnerAction, unlocks } from '../../core/team-confirm.ts'
 import type { Config } from '../../core/types.ts'
 import {
@@ -241,7 +242,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
       if (mine) {
         const watched = watchesOf(db, mine)
           .map(w => w.target)
-          .filter(target => target !== MINE && !target.startsWith('lane:'))
+          .filter(target => target !== MINE && target !== OWNER_WATCH && !target.startsWith('lane:'))
         ids = [...new Set([...mineIds(db, mine), ...watched])]
       }
       if (since !== undefined) {
