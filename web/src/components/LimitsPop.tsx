@@ -1,6 +1,6 @@
-// The usage popover under the pill. A press outside (a finger's spends its click, #432), Escape or
-// a resize closes it; Escape and the close button give the focus back to the pill. With two or more profiles shown, each shown profile
-// has its part: its windows, or "No session lately".
+// The usage popover under the pill. A press outside (a finger's also spends its click, #432),
+// Escape or a resize closes it; Escape and the close button give the focus back to the pill. With
+// two or more profiles shown, each shown profile has its part: its windows, or "No session lately".
 import { type Dispatch, type RefObject, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { useT } from '../i18n/I18nProvider.tsx'
 import { pressAway } from '../models/click-away.ts'

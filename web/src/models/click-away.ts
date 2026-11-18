@@ -40,6 +40,12 @@ export function panelPress(event: PressEvent, selector: string, menu = false): P
   return event.button === 0 ? { x: event.clientX, y: event.clientY, kept: eventWithin(event, selector), menu } : null
 }
 
+/** How long after a press its click may still come: a slow tap's comes within it. */
+export const CLICK_SPEND_MS = 600
+
+/** A finger or a pen: its click is aimed at what is under it once it lifts, not where it pressed. */
+export const byFinger = (pointerType: string | undefined): boolean => !!pointerType && pointerType !== 'mouse'
+
 /** What pressAway listens on: the window, or a stand-in in the tests. */
 export interface ClickSource {
   addEventListener(type: 'click', listener: (e: Event) => void, capture: boolean): void
@@ -56,8 +62,8 @@ export function pressAway(
   on: ClickSource,
   now: () => number = () => performance.now(),
 ): void {
-  if (!event.pointerType || event.pointerType === 'mouse') return
-  const until = now() + 600
+  if (!byFinger(event.pointerType)) return
+  const until = now() + CLICK_SPEND_MS
   const click = (e: Event) => {
     on.removeEventListener('click', click, true)
     if (now() > until) return

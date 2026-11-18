@@ -10,6 +10,7 @@ import { asDom } from './support/react-commit.ts'
 const ITEMS: MenuEntry[] = [
   { id: 'time', label: 'Time' },
   { id: 'lane', label: 'Lane', checked: false, keep: true },
+  { id: 'move', label: 'Move to', submenu: [{ id: 'cat:acme', label: 'Acme' }] },
 ]
 
 /** The menu open over a "card" (the page's #outside) that opens on a click, as Board.tsx's do. */
@@ -20,8 +21,8 @@ async function overCard(source: 'touch' | 'mouse') {
   await side.open(ITEMS, { x: 100, y: 100, source, origin: 'opener' })
   await side.world.tick(400) // a tap well after it opened, not the release of the press that did
   await side.world.settle()
-  const item = (i: number) => {
-    const el = side.levels()[0]?.querySelector(`[data-i="${i}"]`)
+  const item = (i: number, level = 0) => {
+    const el = side.levels()[level]?.querySelector(`[data-i="${i}"]`)
     if (!el) throw new Error(`no item ${i}`)
     return el
   }
@@ -47,18 +48,44 @@ describe('a tap on a menu item over a card', () => {
     }
   })
 
-  test('a check that keeps the menu open spends nothing: its click is on the menu', async () => {
+  test('a check that keeps the menu open, or an item that opens a submenu, spends nothing: its click is on the menu', async () => {
     const { side, card, item } = await overCard('touch')
     try {
-      await side.world.fire(item(1), 'pointerdown', { pointerType: 'touch' })
-      await side.world.fire(item(1), 'pointerup', { pointerType: 'touch' })
-      expect(side.isOpen()).toBe(true)
-      await side.world.fire(item(1), 'click', { pointerType: 'touch' })
-      // A press outside closes it and is spent on that.
+      const tap = async (el: ReturnType<typeof item>) => {
+        asDom(el).addEventListener('click', () => side.log.push(`click on ${el.id}`))
+        await side.world.fire(el, 'pointerdown', { pointerType: 'touch' })
+        await side.world.fire(el, 'pointerup', { pointerType: 'touch' })
+        await side.world.fire(el, 'click', { pointerType: 'touch' })
+      }
+      await tap(item(1))
+      await tap(item(2))
+      await side.world.settle()
+      expect(side.levels().length).toBe(2)
+      expect(side.log.filter(l => l !== 'changed')).toEqual(['picked lane', 'click on menu-1-1', 'click on menu-1-2'])
+      // A pick in the submenu takes both levels away: that click is spent.
+      await side.world.fire(item(0, 1), 'pointerdown', { pointerType: 'touch' })
+      await side.world.fire(item(0, 1), 'pointerup', { pointerType: 'touch' })
+      await side.world.fire(card, 'click', { pointerType: 'touch' })
+      expect(side.log.filter(l => l !== 'changed').slice(3)).toEqual(['picked cat:acme'])
+      expect(side.isOpen()).toBe(false)
+    } finally {
+      await side.dispose()
+    }
+  })
+
+  test('a tap outside closes it and does nothing else; a click long after a pick is not spent', async () => {
+    const { side, card, item } = await overCard('touch')
+    try {
       await side.world.fire(card, 'pointerdown', { pointerType: 'touch' })
       await side.world.fire(card, 'click', { pointerType: 'touch' })
-      expect(side.log.filter(l => l !== 'changed')).toEqual(['picked lane'])
-      expect(side.isOpen()).toBe(false)
+      expect([side.isOpen(), side.log.includes('card opened')]).toEqual([false, false])
+      await side.open(ITEMS, { x: 100, y: 100, source: 'touch', origin: 'opener' })
+      await side.world.tick(400)
+      await side.world.fire(item(0), 'pointerdown', { pointerType: 'touch' })
+      await side.world.fire(item(0), 'pointerup', { pointerType: 'touch' })
+      await side.world.tick(700) // no click came (the finger moved off); the next tap acts
+      await side.world.fire(card, 'click', { pointerType: 'touch' })
+      expect(side.log.filter(l => l !== 'changed')).toEqual(['picked time', 'card opened'])
     } finally {
       await side.dispose()
     }
@@ -87,8 +114,12 @@ describe('a press outside a popover (the usage pill, the setup note)', () => {
     const click = () => {
       const e = { prevented: false, stopped: false }
       const event = {
-        preventDefault: () => void (e.prevented = true),
-        stopImmediatePropagation: () => void (e.stopped = true),
+        preventDefault: () => {
+          e.prevented = true
+        },
+        stopImmediatePropagation: () => {
+          e.stopped = true
+        },
       } as unknown as Event
       for (const fn of [...listeners]) fn(event)
       return e
