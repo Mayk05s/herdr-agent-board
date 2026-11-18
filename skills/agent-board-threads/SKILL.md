@@ -45,7 +45,7 @@ Your brief names a key ("work in thread atlas-13"). Report there, not to whoever
 
 ## Watching
 
-- `board thread watch <key> | --lane <id> | --mine` adds a watch; `board thread unwatch` with the same target removes it.
+- `board thread watch <key> | --lane <id> | --mine` adds a watch; `board thread unwatch` with the same target removes it. `--owner` hears whatever starts or stops waiting on the owner in any lane, a card's `board ask` too, as one `[board reminder from asks]` line (MokuPilot's day session sets it when its setting asks for it).
 - `--what status` (the default: status changes and the owner's answers), `asks` (also questions raised for the owner), `all` (every entry).
 - `--idle`: the line waits until your turn is over instead of arriving in it. `--wake`: a line wakes you when you sleep; without it the line waits until you are awake, which is the default, since waking a session costs more than a status line is worth.
 - The board leaves a gap of a minute between two lines to one session; what changes meanwhile joins the next line.
