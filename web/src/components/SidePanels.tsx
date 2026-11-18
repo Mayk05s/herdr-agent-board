@@ -6,7 +6,7 @@
 // settings once each was first opened, on the local board; Secrets once it was first opened, on the local board
 // and the board's own server; the paths on this computer once first opened, on the board seen from another
 // device. A session sheet that fails to draw says so on its own and leaves the board; opening another session
-// tries again.
+// tries again. The board's own server's state (Settings → Server…) once first opened, on its page only.
 import type { Archive } from '../hooks/useArchive.ts'
 import { offersProfiles } from '../models/profiles.ts'
 import { remotePage } from '../models/remote-page.ts'
@@ -26,6 +26,7 @@ import { PhonesPanel, type PhonesPanelProps } from './phones/PhonesPanel.tsx'
 import { ProfilesPanel, type ProfilesPanelProps } from './profiles/ProfilesPanel.tsx'
 import { SchedulePanel, type SchedulePanelProps } from './schedule/SchedulePanel.tsx'
 import { SecretsPanel, type SecretsPanelProps } from './secrets/SecretsPanel.tsx'
+import { ServerPanel, type ServerPanelProps } from './server/ServerPanel.tsx'
 import { Sheet, type SheetSlots } from './sheet/Sheet.tsx'
 import { TeamPanel, type TeamPanelProps } from './team/TeamPanel.tsx'
 import { ThreadsPanel, type ThreadsPanelProps } from './threads/ThreadsPanel.tsx'
@@ -71,6 +72,8 @@ export interface SidePanelsProps {
   calendarSettings?: CalendarSettingsPanelProps
   /** Settings → Team… (#231): given by the page while it offers it (the local page, the payload's teamRev). */
   team?: TeamPanelProps
+  /** Settings → Server… and the head's chip: given by the page once opened, on the board's own server's page only (offersServer). */
+  server?: ServerPanelProps
 }
 
 export function SidePanels({
@@ -93,6 +96,7 @@ export function SidePanels({
   calendar,
   calendarSettings,
   team,
+  server,
 }: SidePanelsProps) {
   const { data, ui, dispatch } = useBoardContext()
   return (
@@ -118,6 +122,7 @@ export function SidePanels({
       {calendarSettings && <CalendarSettingsPanel {...calendarSettings} />}
       {localPaths && remotePage() && <LocalPathsPanel {...localPaths} />}
       {team && offersTeam(data) && <TeamPanel {...team} />}
+      {server && <ServerPanel {...server} />}
     </>
   )
 }

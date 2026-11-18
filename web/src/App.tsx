@@ -4,7 +4,8 @@
 // session's helpers in their window; the Claude profiles' panel and sleep and wake's from Settings
 // (wake's also from the toolbar's "Wake stopped"); the archive (its panel, sessions off the board
 // and back, Ctrl+Z); a fork of a session in a new tab; Remote access from Settings on the local
-// board; Secrets from Settings on the local board and on the board's own server.
+// board; Secrets from Settings on the local board and on the board's own server; on the board's own
+// server's page, its state (Settings → Server…, the head's chip).
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Board } from './components/Board.tsx'
 import type { CalendarFocus } from './components/calendar/CalendarPanel.tsx'
@@ -56,7 +57,8 @@ import { linkThreadsSheet, useThreadsContext } from './hooks/useThreads.tsx'
 import { useTodos } from './hooks/useTodos.ts'
 import { useToolbarMenu } from './hooks/useToolbarMore.ts'
 import { pageLayers } from './models/lifecycle.ts'
-import { remotePage } from './models/remote-page.ts'
+import { keptAuth, remotePage } from './models/remote-page.ts'
+import { offersServer } from './models/server-state.ts'
 import { offersBackup, offersSecrets, offersTimeSettings } from './models/settings-menu.ts'
 import { offersTeam } from './models/team.ts'
 import { useBoardContext } from './state/BoardProvider.tsx'
@@ -179,6 +181,15 @@ export function App() {
     setLocalPaths(true)
     setLocalPathsMounted(true)
   }
+  // Settings → Server… and the head's chip, on the board's own server's page only: mounted at its
+  // first opening, as Remote access; elsewhere there is neither.
+  const serverOn = offersServer(remotePage(), data, keptAuth)
+  const [server, setServer] = useState(false)
+  const [serverMounted, setServerMounted] = useState(false)
+  const openServer = () => {
+    setServer(true)
+    setServerMounted(true)
+  }
   // The reminders' buttons, shared by the schedule panel and the sheet.
   const reminders = useSchedule()
   // Sessions off the board and back, the archive's panel; Retry on a session back from it is its Return again.
@@ -236,6 +247,7 @@ export function App() {
     openLocalPaths,
     openCalendarSettings,
     openTeam,
+    openServer,
   )
   // Tasks' 📌 menu under an agent's message, and the panel's buttons.
   const todos = useTodos(menus.menu)
@@ -309,6 +321,7 @@ export function App() {
           }}
           onCalendar={() => setCalendarOpen(!calendarOpen)}
           {...(offersTeam(data) && { onTeam: () => (team ? setTeam(false) : openTeam()) })}
+          {...(serverOn && { onServer: () => (server ? setServer(false) : openServer()) })}
         />
         <Board
           onNewSession={newSession}
@@ -366,6 +379,7 @@ export function App() {
               },
             }
           : {})}
+        {...(serverMounted && serverOn ? { server: { open: server, onClose: () => setServer(false) } } : {})}
         archive={archive}
         todos={{ open: todosOpen, onClose: () => setTodosOpen(false), todos }}
         {...(threads && {

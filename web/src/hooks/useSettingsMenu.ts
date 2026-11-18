@@ -5,7 +5,8 @@
 // the Profiles panel, while wake's state line is in the payload Sleep and wake…, and how sessions
 // asleep in "Waiting" fold, for every board; on the local board, Remote access…; on a page
 // signed in through the owner's domain, Sign out; Presence (#172), the board's, for every board;
-// Secrets…, Backup… and Time tracking… on the local board and on the board's own server.
+// Secrets…, Backup… and Time tracking… on the local board and on the board's own server; Server…
+// on the board's own server's page only.
 // The items are models/settings-menu.ts.
 import { useEffect, useState } from 'react'
 import type { FoldMode } from '../../../src/core/fold-mode.ts'
@@ -22,6 +23,7 @@ import { LOOK_KEY, lookNow, setLook } from '../models/look.ts'
 import { type Dock, isDock } from '../models/panel-layout.ts'
 import { offersProfiles } from '../models/profiles.ts'
 import { keptAuth, remotePage, UNPAIRED } from '../models/remote-page.ts'
+import { offersServer } from '../models/server-state.ts'
 import {
   offersAccess,
   offersBackup,
@@ -95,6 +97,9 @@ export interface SettingsDeps {
   /** The board's own server's page with its password vault: Passwords is offered. */
   vault?(): boolean
   openVault?(): void
+  /** The board's own server's page: Server… is offered. */
+  server?(): boolean
+  openServer?(): void
   /** The local board's page: Calendar… is offered (#328). */
   calendarSettings?(): boolean
   openCalendarSettings?(): void
@@ -154,6 +159,7 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
       backup: deps.backup?.() ?? false,
       timeSettings: deps.timeSettings?.() ?? false,
       vault: deps.vault?.() ?? false,
+      server: deps.server?.() ?? false,
       calendarSettings: deps.calendarSettings?.() ?? false,
       team: deps.team?.() ?? false,
       signOut: deps.signOut?.() ?? false,
@@ -191,6 +197,7 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
         else if (pick?.kind === 'backup') deps.openBackup?.()
         else if (pick?.kind === 'timeSettings') deps.openTimeSettings?.()
         else if (pick?.kind === 'vault') deps.openVault?.()
+        else if (pick?.kind === 'server') deps.openServer?.()
         else if (pick?.kind === 'calendarSettings') deps.openCalendarSettings?.()
         else if (pick?.kind === 'team') deps.openTeam?.()
         else if (pick?.kind === 'signout') deps.endLogin?.()
@@ -357,7 +364,7 @@ const crossFade = (): ((apply: () => void) => unknown) | undefined =>
  * `openAccess` the Remote access panel, `openMokupilot` the MokuPilot panel, `openSecrets` the
  * Secrets panel, `openBackup` the Backup panel, `openTimeSettings` Time tracking's,
  * `openLocalPaths` Paths on this computer, `openCalendarSettings` the calendar's (#328), `openTeam`
- * the Team panel (#231).
+ * the Team panel (#231), `openServer` the board's own server's state.
  */
 export function useSettingsMenu(
   menu: MenuEngine,
@@ -372,6 +379,7 @@ export function useSettingsMenu(
   openLocalPaths: () => void = () => {},
   openCalendarSettings: () => void = () => {},
   openTeam: () => void = () => {},
+  openServer: () => void = () => {},
 ): SettingsMenu {
   const { t, choose } = useLanguage()
   const board = useBoardContext()
@@ -391,6 +399,7 @@ export function useSettingsMenu(
     openLocalPaths,
     openCalendarSettings,
     openTeam,
+    openServer,
   })
   const [expanded, setExpanded] = useState(false)
   const [gear] = useState(() => {
@@ -477,6 +486,8 @@ export function useSettingsMenu(
       openCalendarSettings: () => latest.current.openCalendarSettings(),
       team: () => offersTeam(latest.current.board.data),
       openTeam: () => latest.current.openTeam(),
+      server: () => offersServer(remotePage(), latest.current.board.data, keptAuth),
+      openServer: () => latest.current.openServer(),
       signOut: () => remotePage() && keptAuth() === 'login',
       endLogin: () => {
         const { t, board } = latest.current

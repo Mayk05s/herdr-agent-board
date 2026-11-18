@@ -12,7 +12,8 @@
 // with their counts. The lanes control and the profile switch each fold into a pill where the row has no
 // room for all of their segments (hooks/useSegmentFolds.ts). The icon-only buttons' labels carry their
 // text keys (`data-i18n`, as upstream's page wrote them): the stylesheet hides a label beside its
-// icon by that, leaving it the button's name.
+// icon by that, leaving it the button's name. On the board's own server its chip (components/server)
+// sits before the usage pill.
 
 import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react'
 import { useBoardView } from '../hooks/useBoardView.ts'
@@ -71,6 +72,7 @@ import { PresenceSwitch } from './PresenceSwitch.tsx'
 import { ProfileSwitch } from './ProfileSwitch.tsx'
 import { SetupNote } from './SetupNote.tsx'
 import { Summary } from './Summary.tsx'
+import { ServerChip } from './server/ServerChip.tsx'
 import { WakeNote } from './wake/WakeNote.tsx'
 
 export interface ToolbarProps {
@@ -103,6 +105,8 @@ export interface ToolbarProps {
   onThreads?: () => void
   /** The calendar (#328): its panel, while the board has the calendar on. */
   onCalendar?: () => void
+  /** The board's own server's state (Settings → Server…'s panel), out of its chip; its page only (models/server-state.ts offersServer). */
+  onServer?: (() => void) | undefined
 }
 
 /** The first filter that can take the focus: the lanes' pill, else a lane, else search (the lanes control folded hides the rest). */
@@ -138,6 +142,7 @@ export function Toolbar({
   onTeam,
   onThreads,
   onCalendar,
+  onServer,
 }: ToolbarProps) {
   const t = useT()
   const { data, ui, dispatch, canMutate, canEdit, now } = useBoardContext()
@@ -179,7 +184,7 @@ export function Toolbar({
 
   const openTasks = data?.todos ? openMine(data.items) : 0
   /** What More lists for the actions in it (the pill's own words, read when More is pressed). */
-  const entriesFor = (usage: string) =>
+  const entriesFor = (usage: string, server = '') =>
     moreEntries(
       toolbarEntries(
         {
@@ -190,6 +195,7 @@ export function Toolbar({
           team: onTeam ? { unread: data?.teamUnread ?? 0 } : null,
           threads: onThreads && data?.threads ? { needsOwner: data.threads.needsOwner } : null,
           usage,
+          server,
           presence: presenceSwitch(data?.presence, t),
         },
         t,
@@ -400,6 +406,7 @@ export function Toolbar({
               {setup && <SetupNote setup={setup} />}
               <BackupNote onOpen={onBackup} />
               {onWake && <WakeNote onOpen={onWake} />}
+              {onServer && <ServerChip onOpen={onServer} />}
               <Limits anchor={limitsAnchor} />
               {/* What left the row. It is there (its attribute hides it) so its width is known. */}
               <button
@@ -415,7 +422,8 @@ export function Toolbar({
                 onClick={e => {
                   const from = e.currentTarget
                   const usage = usageText(row.current?.querySelector('#limits') ?? null)
-                  more?.open(from, e.detail === 0, entriesFor(usage), id => pick(id, from))
+                  const server = row.current?.querySelector('#server-chip')?.getAttribute('aria-label') ?? ''
+                  more?.open(from, e.detail === 0, entriesFor(usage, server), id => pick(id, from))
                 }}
               >
                 <MoreIcon />

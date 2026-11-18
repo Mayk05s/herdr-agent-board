@@ -33,6 +33,8 @@ export const oneRowFits = (width: number, { title, actions }: RowSizes, filters 
  * goes first comes last. Each is the id of its button (the calendar's: of its wrapper). Settings,
  * More and the live dot are not here: they never leave. Next is first (#351): it is used all the
  * time, where presence is mostly glanced at, so a phone's row keeps Next and gives presence to More.
+ * The board's own server's chip (its CPU, RAM and fullest disk) goes before Categories, after the
+ * quiet notes; elsewhere there is none.
  */
 export const TOOLBAR_PRIORITY: readonly string[] = [
   'next-attention',
@@ -49,6 +51,7 @@ export const TOOLBAR_PRIORITY: readonly string[] = [
   'limits',
   'archive-open',
   'cats-open',
+  'server-chip',
   'setup-note',
   'backup-note',
   'wake-note',

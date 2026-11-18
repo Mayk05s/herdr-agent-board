@@ -17,6 +17,8 @@
 // local board's page and on the board's own server (offersSecrets). Backup… the backup of the
 // board's database (#233, components/backup/BackupPanel.tsx), and Time tracking… its clients and
 // projects (#237, components/time/TimeSettingsPanel.tsx), there too (offersBackup, offersTimeSettings).
+// Server… opens the board's own server's state (components/server/ServerPanel.tsx), on its page
+// only (models/server-state.ts offersServer).
 // Passwords opens the owner's password vault (/vault, src/core/vault.ts) in a tab of its own, on the
 // board's own server's page with the vault only (offersVault).
 // How sessions asleep in "Waiting" fold is the board's, for every board (src/core/fold-mode.ts).
@@ -74,6 +76,8 @@ export interface SettingsNow {
   timeSettings?: boolean
   /** The board's own server's page with its password vault (offersVault): Passwords opens it. */
   vault?: boolean
+  /** The board's own server's page (models/server-state.ts offersServer): Server… is offered. */
+  server?: boolean
   /** The local board's page: Calendar… is offered (#328). */
   calendarSettings?: boolean
   /** The local board's page with the payload's teamRev (#231): Team… is offered. */
@@ -267,6 +271,7 @@ export function settingsMenu(now: SettingsNow): MenuEntry[] {
     ...(now.secrets ? [{ id: 'secrets', label: t('set.secrets') }] : []),
     ...(now.backup ? [{ id: 'backup', label: t('set.backup') }] : []),
     ...(now.timeSettings ? [{ id: 'timeSettings', label: t('set.time') }] : []),
+    ...(now.server ? [{ id: 'server', label: t('set.server') }] : []),
     ...(now.vault ? [{ id: 'vault', label: t('set.vault') }] : []),
     ...(now.calendarSettings ? [{ id: 'calendarSettings', label: t('set.calendar') }] : []),
     ...(now.localPaths ? [{ id: 'localPaths', label: t('set.localPaths') }] : []),
@@ -306,6 +311,7 @@ export type SettingPick =
   | { kind: 'backup' }
   | { kind: 'timeSettings' }
   | { kind: 'vault' }
+  | { kind: 'server' }
   | { kind: 'calendarSettings' }
   | { kind: 'team' }
   | { kind: 'signout' }
@@ -384,6 +390,7 @@ export function settingPicked(id: string): SettingPick {
   if (id === 'backup') return { kind: 'backup' }
   if (id === 'timeSettings') return { kind: 'timeSettings' }
   if (id === 'vault') return { kind: 'vault' }
+  if (id === 'server') return { kind: 'server' }
   if (id === 'calendarSettings') return { kind: 'calendarSettings' }
   if (id === 'team') return { kind: 'team' }
   if (id === 'signout') return { kind: 'signout' }

@@ -105,12 +105,12 @@ export const DESK_REMOTE_OPS: ReadonlySet<unknown> = new Set(['approve', 'deny',
  * (#231: /api/team, not /api/peers), and which process the board is and its folder (#356:
  * /api/process), and threads (#392: /api/threads, which the owner's own logins reach,
  * ownerThreads), and Settings → Threads (#410: /api/threads-settings, which writes into the Claude
- * profiles here). Refused on every remote listener, in both spellings of a path; the backup's,
- * Settings → Time's and wake's but on the board's own server through its domain's login
- * (ownServerSettings).
+ * profiles here), and the board's own server's state (/api/system, Settings → Server…). Refused on
+ * every remote listener, in both spellings of a path; the backup's, Settings → Time's, wake's and
+ * the server's state but on the board's own server through its domain's login (ownServerSettings).
  */
 export const localOnly = (path: string): boolean =>
-  /^\/api\/(remote|access|wake|backup|time-settings|calendar-settings|links\/log|team|process|threads|threads-settings)(\/|$)/.test(
+  /^\/api\/(remote|access|wake|backup|time-settings|calendar-settings|links\/log|team|process|threads|threads-settings|system)(\/|$)/.test(
     path,
   )
 
@@ -142,12 +142,13 @@ export const isOwnerLogin = (login: string | null, owner: string | null): boolea
 
 /**
  * What of localOnly the board's own server opens through its domain's login, where that page is the
- * owner's own (they have no other): Settings → Backup…, Settings → Time tracking… and Settings →
- * Sleep and wake… (#119: its switches, the reaper, Telegram, Start and Log), their routes as they
- * are, not a path under them. Matched on a path as it is, so each spelling a route could take must
- * be one of them.
+ * owner's own (they have no other): Settings → Backup…, Settings → Time tracking…, Settings →
+ * Sleep and wake… (#119: its switches, the reaper, Telegram, Start and Log) and Settings → Server…
+ * (the server's state, read only; the route is there on the board's own server only), their routes
+ * as they are, not a path under them. Matched on a path as it is, so each spelling a route could
+ * take must be one of them.
  */
-export const ownServerSettings = (path: string): boolean => /^\/api\/(backup|time-settings|wake)$/.test(path)
+export const ownServerSettings = (path: string): boolean => /^\/api\/(backup|time-settings|wake|system)$/.test(path)
 
 /**
  * What of the team beyond ownerTeam the board's own server opens to the owner's domain login, with

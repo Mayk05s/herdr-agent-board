@@ -145,6 +145,7 @@ describe('routes', () => {
       'styles/panels.css',
       'styles/sheet-phone.css',
       'styles/desktop.css',
+      'styles/server.css',
       'styles/stairs.css',
       'styles/beside.css',
       'styles/look-terminal.css',

@@ -77,6 +77,7 @@ import { createRemoteAccess } from '../services/remote-access.ts'
 import { startScheduler } from '../services/scheduler.ts'
 import { createServerSetup } from '../services/server-setup.ts'
 import { createSetupChecks } from '../services/setup-check.ts'
+import { createSystemState } from '../services/system-state.ts'
 import { createTeamConfirm } from '../services/team-confirm.ts'
 import { createTeam } from '../services/team-hub.ts'
 import { createTeamNotify, type TeamNotify } from '../services/team-notify.ts'
@@ -121,6 +122,7 @@ import { categoriesRoute, profilesRoute, settingsRoute } from './routes/settings
 import { setupRoute } from './routes/setup.ts'
 import { sleepRoute } from './routes/sleep.ts'
 import { staticRoute } from './routes/static.ts'
+import { systemRoutes } from './routes/system.ts'
 import { teamRoutes } from './routes/team.ts'
 import { teamNotifyRoutes, teamReveal } from './routes/team-notify.ts'
 import { terminalRoute } from './routes/terminal.ts'
@@ -900,6 +902,21 @@ export async function startServer({
     ),
     ...launchRoutes(launches, board.items),
     terminalRoute({ cfg, terminals, find: board.find, publish: board.publish }),
+    // The server's state now (Settings → Server…, the head's chip), on the board's own server only:
+    // read when asked, nothing made or read on a PC.
+    ...(onServer(cfg)
+      ? systemRoutes(
+          createSystemState({
+            sessions: () =>
+              board.items().map(i => ({
+                key: i.key,
+                pane: i.pane,
+                name: i.name || i.autoName || i.key.slice(0, 8),
+                sleeping: i.sleeping,
+              })),
+          }),
+        )
+      : []),
     // The agents' own browsers, on the board's own server only.
     ...(desktops
       ? desktopRoutes({

@@ -20,12 +20,14 @@ export interface EntryInput {
   threads?: { needsOwner: number } | null
   /** The usage pill's own text. */
   usage: string
+  /** The server chip's own words (the board's own server's page only; '' elsewhere). */
+  server?: string
   presence: PresenceSwitchView | null
 }
 
 /** Every action's entry; More lists those that left the row (moreEntries). */
 export function toolbarEntries(input: EntryInput, t: Translator): ToolbarEntry[] {
-  const { canMutate, schedule, tasks, next, usage, presence, team, threads } = input
+  const { canMutate, schedule, tasks, next, usage, presence, team, threads, server } = input
   const proposed = tasks?.proposed ?? 0
   return [
     ...(presence
@@ -73,6 +75,7 @@ export function toolbarEntries(input: EntryInput, t: Translator): ToolbarEntry[]
     { id: 'limits', label: usage || t('limits.title') },
     { id: 'archive-open', label: t('archive.open') },
     { id: 'cats-open', label: t('tb.cats') },
+    { id: 'server-chip', label: server || t('sys.title') },
     { id: 'setup-note', label: t('setup.incomplete'), alert: true },
     { id: 'backup-note', label: t('backup.noteLabel'), alert: true },
     { id: 'wake-note', label: t('wake.stopped'), alert: true },

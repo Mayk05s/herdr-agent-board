@@ -27,6 +27,7 @@ import { SECRET_STRINGS } from './secret-strings.ts'
 import { SERVER_STRINGS } from './server-strings.ts'
 import { SETUP_STRINGS } from './setup-strings.ts'
 import { SYNC_STRINGS } from './sync-strings.ts'
+import { SYSTEM_STRINGS } from './system-strings.ts'
 import { TEAM_STRINGS } from './team-strings.ts'
 import { TERMINAL_STRINGS } from './terminal-strings.ts'
 import { THREAD_STRINGS } from './thread-strings.ts'
@@ -1425,3 +1426,5 @@ for (const code of Object.keys(DESKTOP_STRINGS) as Lang[]) Object.assign(STRINGS
 for (const code of Object.keys(DESK_STRINGS) as Lang[]) Object.assign(STRINGS[code], DESK_STRINGS[code])
 // And auto-compact (#378).
 for (const code of Object.keys(COMPACT_STRINGS) as Lang[]) Object.assign(STRINGS[code], COMPACT_STRINGS[code])
+// And the board's own server's state: the head's chip, Settings → Server….
+for (const code of Object.keys(SYSTEM_STRINGS) as Lang[]) Object.assign(STRINGS[code], SYSTEM_STRINGS[code])
