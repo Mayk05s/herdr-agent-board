@@ -40,6 +40,39 @@ export function panelPress(event: PressEvent, selector: string, menu = false): P
   return event.button === 0 ? { x: event.clientX, y: event.clientY, kept: eventWithin(event, selector), menu } : null
 }
 
+/** How long after a press its click may still come: a slow tap's comes within it. */
+export const CLICK_SPEND_MS = 600
+
+/** A finger or a pen: its click is aimed at what is under it once it lifts, not where it pressed. */
+export const byFinger = (pointerType: string | undefined): boolean => !!pointerType && pointerType !== 'mouse'
+
+/** What pressAway listens on: the window, or a stand-in in the tests. */
+export interface ClickSource {
+  addEventListener(type: 'click', listener: (e: Event) => void, capture: boolean): void
+  removeEventListener(type: 'click', listener: (e: Event) => void, capture: boolean): void
+}
+
+/**
+ * A popover put away by a press outside it: a finger's press also spends the click that follows,
+ * which would otherwise open what is under it, a card say (#432), as a press outside a menu does
+ * (components/menu/menu-engine.ts). A mouse's click acts, as before.
+ */
+export function pressAway(
+  event: { pointerType?: string },
+  on: ClickSource,
+  now: () => number = () => performance.now(),
+): void {
+  if (!byFinger(event.pointerType)) return
+  const until = now() + CLICK_SPEND_MS
+  const click = (e: Event) => {
+    on.removeEventListener('click', click, true)
+    if (now() > until) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+  }
+  on.addEventListener('click', click, true)
+}
+
 export function outsidePanelPress(down: Press | null, click: PressEvent, selector: string): boolean {
   return (
     !!down &&

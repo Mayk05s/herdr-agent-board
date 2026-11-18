@@ -6,6 +6,7 @@ import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useSta
 import type { LaunchView } from '../../../src/core/types.ts'
 import { useT } from '../i18n/I18nProvider.tsx'
 import type { MenuOrigin } from '../models/board-menus.ts'
+import { pressAway } from '../models/click-away.ts'
 import { setupPopPlace } from '../models/setup.ts'
 import { reducedMotion } from '../models/spring.ts'
 import { useBoardContext } from '../state/BoardProvider.tsx'
@@ -145,6 +146,7 @@ export function useFork(): Forker {
       const target = e.target instanceof Node ? e.target : null
       const from = anchor.current
       if (popRef.current?.contains(target) || (from instanceof Element && from.contains(target))) return
+      pressAway(e, window)
       close(false)
     }
     const onKey = (e: KeyboardEvent): void => {
