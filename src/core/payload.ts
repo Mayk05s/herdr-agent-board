@@ -191,6 +191,8 @@ export interface ThreadsPayload {
   agents?: false
   /** Kept on this board also with Team on (`share: false`, #410): absent while they may be shared. */
   share?: false
+  /** The page opens on the Tasks screen (config.json's `"view": "tasks"`, board-6): absent otherwise. */
+  view?: 'tasks'
 }
 
 /** What the board's payload says of the calendar (#328). */

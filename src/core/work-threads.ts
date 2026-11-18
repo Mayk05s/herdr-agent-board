@@ -192,6 +192,8 @@ export interface ThreadsConfig {
   gapSec: number
   /** Threads may be shared over the hub (phase 4); false keeps them local. */
   share: boolean
+  /** `"view": "tasks"` (board-6): the page opens on the Tasks screen until this browser picks the agents. */
+  tasksView?: true
 }
 
 export const GAP_SEC = 60
@@ -207,6 +209,7 @@ export function threadsConfig(raw: unknown): ThreadsConfig | null {
     agents: r.agents !== false,
     gapSec: Number.isFinite(gap) && gap >= 0 ? Math.min(gap, 3600) : GAP_SEC,
     share: r.share !== false,
+    ...(r.view === 'tasks' && { tasksView: true as const }),
   }
 }
 

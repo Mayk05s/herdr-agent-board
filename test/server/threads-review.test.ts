@@ -211,3 +211,15 @@ test('on the wire review goes as owner, so a board without it takes the entry', 
   assert.equal(next.waitingOn, '')
   assert.equal(next.doneAt, null)
 })
+
+test('config.json "view": "tasks" puts the Tasks screen first in the payload; without it the payload is as it was', async () => {
+  isolatedHome()
+  const { threadsConfig } = await import('../../src/core/work-threads.ts')
+  const { threadsPayload } = await import('../../src/services/work-threads.ts')
+  assert.equal(threadsConfig({ view: 'tasks' })?.tasksView, true)
+  assert.equal('tasksView' in (threadsConfig(true) ?? {}), false)
+  assert.equal(threadsConfig({ view: 'agents' })?.tasksView, undefined)
+  assert.deepEqual(threadsPayload({ threads: { view: 'tasks' } }), { rev: 0, needsOwner: 0, view: 'tasks' })
+  assert.deepEqual(threadsPayload({ threads: true }), { rev: 0, needsOwner: 0 })
+  assert.equal(threadsPayload({}), null)
+})

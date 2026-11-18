@@ -706,7 +706,11 @@ export function threadsPayload(cfg: Pick<Config, 'threads'>): ThreadsPayload | n
     if (kept) dropKept()
     return null
   }
-  const mode = { ...(!c.agents && { agents: false as const }), ...(!c.share && { share: false as const }) }
+  const mode = {
+    ...(!c.agents && { agents: false as const }),
+    ...(!c.share && { share: false as const }),
+    ...(c.tasksView && { view: 'tasks' as const }),
+  }
   return { ...threadsRead(), ...mode }
 }
 

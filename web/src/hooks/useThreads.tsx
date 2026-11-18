@@ -34,19 +34,19 @@ export const ThreadsContext = createContext<Threads | null>(null)
 /** The threads while they are on, else null. */
 export const useThreadsContext = (): Threads | null => useContext(ThreadsContext)
 
-/** This browser's choice of the Tasks screen: kept across reloads, never needed (a blocked storage is the board). */
+/** This browser's choice of the Tasks screen: `1` the screen, `0` the agents; kept across reloads, never needed (a blocked storage is the board). */
 const TASKS_SCREEN = 'board-tasks-screen'
-function readTasksScreen(): boolean {
+function readTasksScreen(): boolean | null {
   try {
-    return localStorage.getItem(TASKS_SCREEN) === '1'
+    const v = localStorage.getItem(TASKS_SCREEN)
+    return v === '1' ? true : v === '0' ? false : null
   } catch {
-    return false
+    return null
   }
 }
 function writeTasksScreen(on: boolean): void {
   try {
-    if (on) localStorage.setItem(TASKS_SCREEN, '1')
-    else localStorage.removeItem(TASKS_SCREEN)
+    localStorage.setItem(TASKS_SCREEN, on ? '1' : '0')
   } catch {}
 }
 
@@ -86,7 +86,12 @@ export function ThreadsProvider({ children }: { children: ReactNode }) {
   const [shown, setShown] = useState(false)
   // `#tasks` or `#tasks=<lane>` opens the Tasks screen; else it is where this browser left it.
   const [fullLane] = useState(() => tasksInHash(location.hash))
-  const [full, setFullState] = useState(() => fullLane !== undefined || readTasksScreen())
+  const [full, setFullState] = useState(() => fullLane !== undefined || readTasksScreen() === true)
+  // config.json's `"view": "tasks"` (board-6): the screen first, unless this browser picked the agents.
+  const tasksFirst = data?.threads?.view === 'tasks'
+  useEffect(() => {
+    if (tasksFirst && readTasksScreen() === null) setFullState(true)
+  }, [tasksFirst])
   const setFull = useCallback((on: boolean) => {
     setFullState(on)
     writeTasksScreen(on)

@@ -2195,7 +2195,8 @@ The threads can also take the board's place: the panel's full-screen button, or 
 `#tasks` (`#tasks=<lane>` for one project), opens the **Tasks** screen, every thread in sections by
 status, a project filter and **New task** (a title, the project, the task in the owner's words as
 its first note). **Agents** brings the board back. This browser remembers the screen the panel's
-button picked; with the address alone it opens once.
+button picked; with the address alone it opens once. `"threads": { "view": "tasks" }` in config.json makes the Tasks screen
+the first one the page opens, until a browser picks the agents (Agents), which it then remembers.
 
 Settings → Threads turns it on (#410): Off, Only me, or Me and agents; with Team on, also whether
 they are shared over Team or kept on this board. It writes config.json and copies the agents' skill
