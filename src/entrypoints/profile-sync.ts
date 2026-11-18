@@ -15,12 +15,13 @@
 // pack and apply take the groups the owner ticked (`allow`); each holds to them whatever the other
 // side sends. A failure: {t:'error', message}, exit 1; what apply wrote before it is recorded all
 // the same. A profile made by apply gets the board's hooks: the board's install action runs once,
-// as on the server's install.
+// as on the server's install. The other side gone (its stdin cut short, its reader of stdout gone,
+// or nothing from it for SYNC_IDLE_MS) is a failure too: the op ends and the process with it.
 import { mkdirSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
-import { createGunzip } from 'node:zlib'
+import { createGunzip, type Gunzip } from 'node:zlib'
 import { isRecord } from '../adapters/json-store.ts'
 import { ROOT } from '../adapters/paths.ts'
 import {
@@ -40,6 +41,19 @@ import { type Allow, type CarryTo, fileGroup, historyFile } from '../core/profil
 
 /** What this program speaks: a request of another version is refused. */
 export const SYNC_VERSION = 2
+
+/**
+ * How long an op waits for the other side to send anything (each piece of a file counts) before
+ * it fails: a connection that dropped without closing ends the op instead of holding it. Generous,
+ * as the computer sends while it reads its files.
+ */
+export const SYNC_IDLE_MS = 10 * 60_000
+
+/** BOARD_SYNC_IDLE_MS (tests only, unset in production: the server's command runs this under env -i) when a whole number of ms, else SYNC_IDLE_MS. */
+function idleMs(): number {
+  const ms = Number(process.env.BOARD_SYNC_IDLE_MS)
+  return Number.isInteger(ms) && ms > 0 ? ms : SYNC_IDLE_MS
+}
 
 const text = (v: unknown): string => (typeof v === 'string' ? v : '')
 const list = (v: unknown): Record<string, unknown>[] => (Array.isArray(v) ? v.filter(isRecord) : [])
@@ -221,10 +235,53 @@ const nameOk = (v: unknown): v is string =>
   Buffer.byteLength(v) <= 255 &&
   !/[/\\\0]/.test(v)
 
+/**
+ * `input` read on into `into` while bytes keep coming: none for `ms` while it is open, and `into`
+ * fails with it (the frame waited on fails); a read that fails fails it too. The timer keeps no
+ * process alive.
+ */
+function failWhenQuiet(input: Readable, into: Gunzip, ms: number): void {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const stop = (): void => clearTimeout(timer)
+  const fail = (err: Error): void => {
+    stop()
+    input.unpipe(into)
+    into.destroy(err)
+  }
+  const arm = (): void => {
+    stop()
+    timer = setTimeout(() => fail(new Error(`nothing came from the other side for ${ms} ms`)), ms)
+    timer.unref()
+  }
+  arm()
+  input.on('data', arm)
+  input.on('error', fail)
+  input.once('end', stop)
+  input.once('close', stop)
+  into.once('close', stop)
+}
+
 /** One op: its request and frames read from `input`, its answer written to `output`; the exit code. */
-export async function serve(op: string, input: Readable, output: Writable, here: Here): Promise<number> {
-  const out = frameSink(output)
-  const frames = framesOf(input.pipe(createGunzip()))
+export async function serve(
+  op: string,
+  input: Readable,
+  output: Writable,
+  here: Here,
+  idle: number = SYNC_IDLE_MS,
+): Promise<number> {
+  // the other side's reader of `output` gone (EPIPE): every send fails at once and nothing waits on
+  // it (unheard, the error ended nothing: the op waited on gzip's end for ever)
+  let lost = false
+  const gone = new Promise<void>(resolve =>
+    output.on('error', () => {
+      lost = true
+      resolve()
+    }),
+  )
+  const out = frameSink(output, gone)
+  const gunzip = createGunzip()
+  const frames = framesOf(input.pipe(gunzip))
+  failWhenQuiet(input, gunzip, idle)
   try {
     const first = await frames.next()
     const req = first.done ? null : first.value.head
@@ -266,10 +323,13 @@ export async function serve(op: string, input: Readable, output: Writable, here:
       await out.send({ t: 'exists', there })
     } else throw new Error(`no op ${op}`)
     await out.end()
-    return 0
+    return lost ? 1 : 0
   } catch (err) {
-    await out.send({ t: 'error', message: err instanceof Error ? err.message : String(err) })
-    await out.end()
+    // said to the other side, unless it is gone
+    try {
+      await out.send({ t: 'error', message: err instanceof Error ? err.message : String(err) })
+      await out.end()
+    } catch {}
     return 1
   }
 }
@@ -295,9 +355,18 @@ function installAction(dirs: readonly string[]): boolean {
   return ok
 }
 
-if (import.meta.main)
-  process.exitCode = await serve(process.argv[2] ?? '', process.stdin, process.stdout, {
-    home: homedir(),
-    platform: process.platform,
-    install: installAction,
+// Not awaited at the top: Bun spins a core on a top-level await that never settles (one ran 18
+// days so). 1 until the op ends well; a failed one ends the process at once, its stdin maybe open.
+if (import.meta.main) {
+  process.exitCode = 1
+  void serve(
+    process.argv[2] ?? '',
+    process.stdin,
+    process.stdout,
+    { home: homedir(), platform: process.platform, install: installAction },
+    idleMs(),
+  ).then(code => {
+    if (code === 0) process.exitCode = 0
+    else process.exit(code)
   })
+}
