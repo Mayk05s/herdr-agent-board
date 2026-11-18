@@ -82,12 +82,12 @@ button.wt-who:active { transform: scale(0.96); }
 .wt-pick { margin: auto; padding: 24px; text-align: center; }
 
 /* ---------------------------------------------------------------- one thread */
-.wt-body .mini, .wt-screen .mini { padding: 4px 11px; border: 0; border-radius: 7px; background: var(--fill); color: inherit; font: inherit; font-size: 12.5px; cursor: pointer; transition: transform 100ms ease-out, background-color 120ms ease; }
-.wt-body .mini:hover:not(:disabled), .wt-screen .mini:hover:not(:disabled) { color: var(--accent); }
-.wt-body .mini:active:not(:disabled), .wt-screen .mini:active:not(:disabled) { transform: scale(0.96); }
-.wt-body .mini:disabled, .wt-screen .mini:disabled { opacity: 0.5; cursor: default; }
-.wt-body .mini.primary, .wt-screen .mini.primary { background: var(--accent); color: #fff; }
-.wt-body .mini.primary:hover:not(:disabled), .wt-screen .mini.primary:hover:not(:disabled) { color: #fff; background: color-mix(in srgb, var(--accent) 88%, #000); }
+.wt-body .mini { padding: 4px 11px; border: 0; border-radius: 7px; background: var(--fill); color: inherit; font: inherit; font-size: 12.5px; cursor: pointer; transition: transform 100ms ease-out, background-color 120ms ease; }
+.wt-body .mini:hover:not(:disabled) { color: var(--accent); }
+.wt-body .mini:active:not(:disabled) { transform: scale(0.96); }
+.wt-body .mini:disabled { opacity: 0.5; cursor: default; }
+.wt-body .mini.primary { background: var(--accent); color: #fff; }
+.wt-body .mini.primary:hover:not(:disabled) { color: #fff; background: color-mix(in srgb, var(--accent) 88%, #000); }
 .wt-thread { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
 .wt-head { flex: none; display: flex; flex-direction: column; gap: 7px; padding: 2px 18px 10px; }
 .wt-bar { display: flex; align-items: center; gap: 6px; min-height: 32px; }
@@ -208,29 +208,3 @@ button.wt-who:active { transform: scale(0.96); }
 @media (prefers-reduced-transparency: reduce) {
   .wt-filter { background: var(--panel); }
 }
-/* ---------------------------------------------------------------- the Tasks screen (board-6) */
-/* The threads in the board's place: the list and a thread fill the page under the toolbar
-   (TasksScreen measures where it starts into --wt-top). */
-.wt-screen { display: flex; flex-direction: column; height: calc(100dvh - var(--wt-top, 64px)); min-height: 360px; padding: 8px var(--gutter, 16px) 0; }
-.wt-screen-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; padding: 6px 2px 10px; }
-.wt-screen-head h2 { margin: 0; font-size: 20px; font-weight: 700; }
-.wt-screen-head .sheet-meta { margin: 0; }
-.wt-screen-head .spacer { flex: 1; }
-.wt-screen > .wt-body { flex: 1; border-radius: 14px; background: var(--panel); box-shadow: 0 0 0 1px var(--separator); }
-.wt-new { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin: 0 0 12px; padding: 12px; border-radius: 14px; background: var(--panel); box-shadow: 0 0 0 1px var(--separator); }
-.wt-new input, .wt-new select, .wt-new textarea { font: inherit; color: var(--label); background: var(--fill-2); border: 0; border-radius: 8px; padding: 7px 10px; min-width: 0; }
-.wt-new-title { font-weight: 600; }
-.wt-new-lane { display: inline-flex; align-items: center; gap: 6px; color: var(--label-2); font-size: 12.5px; }
-.wt-new-text { grid-column: 1 / -1; resize: vertical; }
-.wt-new-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; }
-@media (max-width: 560px) { .wt-new { grid-template-columns: minmax(0, 1fr); } }
-
-/* A result handed in for review: what it is, how to check it, Accept and Return. */
-.wt-review { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--fill-2); box-shadow: inset 3px 0 0 var(--c-review, var(--orange)); font-size: 13px; line-height: 1.4; }
-.wt-review p { margin: 0; overflow-wrap: anywhere; }
-.wt-review b { font-weight: 600; }
-.wt-review-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.wt-review-actions .mini.on { background: color-mix(in srgb, var(--orange) 18%, var(--fill-2)); }
-.wt-updated { color: var(--label-3); font-size: 12px; align-self: center; }
-/* The agents' column heads belong to their board: not over the Tasks screen. */
-.page:has(.wt-screen) .columns-head { display: none; }

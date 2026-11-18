@@ -5,7 +5,7 @@
 //   GET  /api/threads?lane=&status=&mine=<session>&since=<rev>&closed=1   heads only
 //   GET  /api/threads/<key or id>?last=&since=&full=1                      the head and entries
 //   POST /api/threads {op: 'new', lane, title, parent?, to?, doing?}
-//   POST /api/threads/<key or id> {op: 'post' | 'set' | 'ask' | 'answer' | 'confirm' | 'keep' | 'accept' | 'return', ...}
+//   POST /api/threads/<key or id> {op: 'post' | 'set' | 'ask' | 'answer' | 'confirm' | 'keep', ...}
 //   POST /api/threads/<key or id> {op: 'send', entry}        a shared entry to the peers (#394)
 //   POST /api/threads/<key or id> {op: 'share', to, history?} | 'unshare' | 'decline-share'
 //                                 | 'take' | 'decline' (an offer) | 'history'
@@ -56,7 +56,6 @@ import type { TeamConfirm } from '../../services/team-confirm.ts'
 import type { SendOut, WorkHub } from '../../services/work-hub.ts'
 import { declineOffer, declineShare, myPeer, takeOffer, unshareThread } from '../../services/work-share.ts'
 import {
-  acceptReview,
   answerAsk,
   askOwner,
   confirmClose,
@@ -65,9 +64,7 @@ import {
   keepOpen,
   newThread,
   openAsk,
-  openReview,
   postEntry,
-  returnReview,
   setFields,
   type ThreadsCtx,
   withThreadsDb,
@@ -292,7 +289,6 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
         entries: entries.map(e => entryView(e, app.state)),
         earlier: all.length - entries.length,
         ask: openAsk(head, all)?.id ?? null,
-        review: openReview(head, all)?.id ?? null,
       }
       return json(200, { ok: true, rev: threadsRev(db), ...view })
     })
@@ -463,14 +459,6 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
           return { written: confirmClose(ctx, head) }
         case 'keep':
           return { written: keepOpen(ctx, head) }
-        case 'accept': {
-          const r = acceptReview(ctx, head)
-          return { written: r, reviewed: { reviewer: r.reviewer, text: 'accepted: done' } }
-        }
-        case 'return': {
-          const r = returnReview(ctx, head, String(body.text ?? ''))
-          return { written: r, reviewed: { reviewer: r.reviewer, text: `returned to work: ${r.entry.text}` } }
-        }
         case 'watch':
           throw new ThreadError('later', t('thread.err.later'))
         default:
@@ -490,15 +478,6 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
       }))
       // Its card's question goes once it has the answer; one it did not get stays on show.
       if (told.ok) await app.clearAsk(asker, answered.question)
-      out.told = told.ok
-      if (!told.ok) out.why = told.error
-    }
-    // The owner's verdict on a result in review (board-6): typed into the session that handed it in, as an answer is.
-    const reviewed = 'reviewed' in done ? done.reviewed : undefined
-    if (reviewed?.reviewer) {
-      const told = await app
-        .tell(reviewed.reviewer.key, `[board thread ${written.head.key}] ${reviewed.text}`)
-        .catch(err => ({ ok: false as const, error: err instanceof Error ? err.message : String(err) }))
       out.told = told.ok
       if (!told.ok) out.why = told.error
     }

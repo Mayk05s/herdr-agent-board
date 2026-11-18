@@ -14,7 +14,7 @@ A thread is a task with a memory, kept by the board: a key (`atlas-12`), a title
 ## Keys and statuses
 
 - A key is the lane and a number: `atlas-12`. It never changes, also when the thread moves to another lane. Name threads by their key when you talk about them. Commands also take a bare number in your own lane (`12`) and the first 8 characters of a thread's id.
-- Statuses: `next` (not started), `doing`, `waiting` (blocked on something outside: a client, CI, a date; `--waiting` says what), `owner` (waits on the owner: an answer, a decision, a step that is theirs), `review` (a result for the owner to check), `done`, `dropped` (will not be done). On the owner's page they read Planned, Doing, Blocked, Needs my answer, Ready for review, Done, Dropped.
+- Statuses: `next` (not started), `doing`, `waiting` (on something outside: a client, CI, a date; `--waiting` says what), `owner` (waits on the owner: an answer, a decision, a step that is theirs), `done`, `dropped` (will not be done).
 - A thread may have sub-threads, one level only, 20 at most. When the last open one closes, the parent's feed says so and its watchers hear it.
 - Every write prints one line (`ok · atlas-13 · done · 1 file`) and every command takes `--json`.
 
@@ -29,17 +29,6 @@ Your brief names a key ("work in thread atlas-13"). Report there, not to whoever
 - Text without flags is a note in the feed: `board thread post atlas-13 "the 2019 sheet has two header rows"`; text that starts with `--` goes after a lone `--`. Links: `--link <url>` (http, https, a thread key or a local path). A flag a command does not take is refused: read the error and fix the flag.
 - Do not send the full report to your master as a message as well. It hears your summary in one line and reads the rest only if it needs to.
 - `done` on a thread that waits on the owner is only proposed: the owner confirms it on the board.
-- When the owner should check the result before it counts as done, hand it in for review instead of `done`: `board thread post atlas-13 --status review --summary "<the result, one line>" --link <where to see it> "<how to check it, in a few steps>"`. A local commit is not a release: say which one it is. The owner accepts it (the thread is done) or returns it with a remark (the thread is `doing` again); either way the verdict is typed into your session, after the thread's key in brackets: `accepted: done` or `returned to work: <remark>`. Work the remark, then hand it in again. Shared threads do not take `review`.
-
-## A project's master and its pool
-
-The owner adds tasks to a project's pool on the board's Tasks screen: a thread in the project's lane, `next`, nobody holding it, the task in their words as its first note. A master takes them from there:
-
-- Once, when it starts: `board thread watch --lane <lane> --what status --wake`. A new task in the lane, and every status change in it, then arrive as one line, and wake you if you sleep. The watch outlives /clear and a restart.
-- Taking a task: `board thread show <key>` first. If it already has an assignee that is not you, leave it: someone took it. Otherwise `board thread set <key> --assignee <your session name>` and `board thread post <key> --status doing --summary "<taken: first step>"`. Giving it back: `board thread set <key> --assignee none` and `--status next` with the reason as the note; handing it on: `--assignee <session>` with the reason; blocked: `--status waiting --waiting "<on what>"`.
-- You hold the task; helpers work in sub-threads (`board thread new --parent <key> --to <helper> "<their part>"`), so the owner's list shows one task and its helpers inside it.
-- A question for the owner is asked in the task (`board thread ask <key> "<one question, and what the answer decides>"`), one at a time. The answer comes back into your session and into the thread.
-- The result goes in for review as above; the task is done when the owner accepts it.
 
 ## When you hand work out
 

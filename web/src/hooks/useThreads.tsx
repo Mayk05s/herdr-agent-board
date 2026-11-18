@@ -22,10 +22,6 @@ export interface Threads {
   /** Whether the panel is open. */
   shown: boolean
   setShown(shown: boolean): void
-  /** The threads as the Tasks screen in the board's place (board-6), and the lane it opened on. */
-  full: boolean
-  setFull(full: boolean): void
-  fullLane: string | null
 }
 
 /** The threads while they are on (exported for the tests' own values). */
@@ -33,29 +29,6 @@ export const ThreadsContext = createContext<Threads | null>(null)
 
 /** The threads while they are on, else null. */
 export const useThreadsContext = (): Threads | null => useContext(ThreadsContext)
-
-/** This browser's choice of the Tasks screen: `1` the screen, `0` the agents; kept across reloads, never needed (a blocked storage is the board). */
-const TASKS_SCREEN = 'board-tasks-screen'
-function readTasksScreen(): boolean | null {
-  try {
-    const v = localStorage.getItem(TASKS_SCREEN)
-    return v === '1' ? true : v === '0' ? false : null
-  } catch {
-    return null
-  }
-}
-function writeTasksScreen(on: boolean): void {
-  try {
-    localStorage.setItem(TASKS_SCREEN, on ? '1' : '0')
-  } catch {}
-}
-
-/** `#tasks` (null: every lane) or `#tasks=<lane>`; undefined when the address does not ask for the Tasks screen. */
-export function tasksInHash(hash: string): string | null | undefined {
-  const m = /^#tasks(?:=([a-z0-9_-]{1,64}))?$/.exec(hash)
-  if (!m) return undefined
-  return m[1] ?? null
-}
 
 const isList = (v: unknown): v is { rev: number; threads: ThreadRow[] } =>
   typeof v === 'object' && v !== null && Array.isArray((v as { threads?: unknown }).threads)
@@ -84,19 +57,6 @@ export function ThreadsProvider({ children }: { children: ReactNode }) {
   const [list, setList] = useState<{ rev: number; rows: ThreadRow[] }>({ rev: -1, rows: [] })
   const [asked, setAsked] = useState<{ key: string | null; n: number } | null>(null)
   const [shown, setShown] = useState(false)
-  // `#tasks` or `#tasks=<lane>` opens the Tasks screen; else it is where this browser left it.
-  const [fullLane] = useState(() => tasksInHash(location.hash))
-  const [full, setFullState] = useState(() => fullLane !== undefined || readTasksScreen() === true)
-  // config.json's `"view": "tasks"` (board-6): the screen first, unless this browser picked the agents.
-  const tasksFirst = data?.threads?.view === 'tasks'
-  useEffect(() => {
-    if (tasksFirst && readTasksScreen() === null) setFullState(true)
-  }, [tasksFirst])
-  const setFull = useCallback((on: boolean) => {
-    setFullState(on)
-    writeTasksScreen(on)
-    setShown(false)
-  }, [])
   const turn = useRef(askedInTurn())
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new revision is when to read again
@@ -124,22 +84,8 @@ export function ThreadsProvider({ children }: { children: ReactNode }) {
     .join(' ')
   const known = useMemo(() => new Set(keys ? keys.split(' ') : []), [keys])
   const value = useMemo<Threads | null>(
-    () =>
-      on
-        ? {
-            rows: list.rows,
-            known,
-            rev: list.rev,
-            open,
-            asked,
-            shown: shown && on && !full,
-            setShown,
-            full,
-            setFull,
-            fullLane: fullLane ?? null,
-          }
-        : null,
-    [on, list, known, open, asked, shown, full, setFull, fullLane],
+    () => (on ? { rows: list.rows, known, rev: list.rev, open, asked, shown: shown && on, setShown } : null),
+    [on, list, known, open, asked, shown],
   )
   return <ThreadsContext.Provider value={value}>{children}</ThreadsContext.Provider>
 }

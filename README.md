@@ -2180,23 +2180,9 @@ and the session that handed the work out gets one line:
 ```
 
 A thread has a key (`atlas-13`: the lane and a number), a title, a one-line summary, a status
-(next, doing, waiting, owner, review, done, dropped), an assignee and a feed of entries with text,
-links and files. It lives in the board's database, and a file posted to it is copied into the
-board's state folder.
-
-`review` (board-6) is a result handed to the owner to check: `board thread post <key> --status review
---summary "<the result>" --link <where> "<how to check it>"`. The thread shows the result, how to
-check it, **Accept** (done) and **Return with a remark** (doing again, the remark in the feed); the
-session that handed it in gets the verdict typed in, as it gets an answer. It counts with what needs
-the owner. A shared thread does not take it; a thread shared while in review goes to the peers as
-`owner`.
-
-The threads can also take the board's place: the panel's full-screen button, or the address
-`#tasks` (`#tasks=<lane>` for one project), opens the **Tasks** screen, every thread in sections by
-status, a project filter and **New task** (a title, the project, the task in the owner's words as
-its first note). **Agents** brings the board back. This browser remembers the screen the panel's
-button picked; with the address alone it opens once. `"threads": { "view": "tasks" }` in config.json makes the Tasks screen
-the first one the page opens, until a browser picks the agents (Agents), which it then remembers.
+(next, doing, waiting, owner, done, dropped), an assignee and a feed of entries with text, links
+and files. It lives in the board's database, and a file posted to it is copied into the board's
+state folder.
 
 Settings → Threads turns it on (#410): Off, Only me, or Me and agents; with Team on, also whether
 they are shared over Team or kept on this board. It writes config.json and copies the agents' skill

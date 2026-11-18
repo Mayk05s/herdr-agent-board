@@ -91,9 +91,6 @@ const threads = (): Threads => ({
   asked: null,
   shown: false,
   setShown() {},
-  full: false,
-  setFull() {},
-  fullLane: null,
 })
 
 function render(node: ReactNode, value: Board, th: Threads | null = threads()): string {

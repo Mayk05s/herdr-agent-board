@@ -10,9 +10,7 @@
 // modules are named work-thread: "thread" already means a session's conversation and a Team
 // thread in the code.
 
-// `review` (board-6): a result handed to the owner to check, with how to check it; the owner accepts
-// it (done) or returns it with a remark (doing). Local only: a shared thread does not take it.
-export const THREAD_STATUSES = ['next', 'doing', 'waiting', 'owner', 'review', 'done', 'dropped'] as const
+export const THREAD_STATUSES = ['next', 'doing', 'waiting', 'owner', 'done', 'dropped'] as const
 export type ThreadStatus = (typeof THREAD_STATUSES)[number]
 export const isThreadStatus = (v: unknown): v is ThreadStatus => THREAD_STATUSES.includes(v as ThreadStatus)
 /** Done and dropped threads are closed: hidden from a list unless asked for. */
@@ -192,8 +190,6 @@ export interface ThreadsConfig {
   gapSec: number
   /** Threads may be shared over the hub (phase 4); false keeps them local. */
   share: boolean
-  /** `"view": "tasks"` (board-6): the page opens on the Tasks screen until this browser picks the agents. */
-  tasksView?: true
 }
 
 export const GAP_SEC = 60
@@ -209,7 +205,6 @@ export function threadsConfig(raw: unknown): ThreadsConfig | null {
     agents: r.agents !== false,
     gapSec: Number.isFinite(gap) && gap >= 0 ? Math.min(gap, 3600) : GAP_SEC,
     share: r.share !== false,
-    ...(r.view === 'tasks' && { tasksView: true as const }),
   }
 }
 
@@ -388,7 +383,6 @@ const STATUS_WORD: Record<ThreadStatus, string> = {
   doing: 'doing',
   waiting: 'waiting',
   owner: 'needs the owner',
-  review: 'ready for review',
   done: 'done',
   dropped: 'dropped',
 }
@@ -615,8 +609,6 @@ export interface ThreadView {
   earlier: number
   /** The open question for the owner, by entry id. */
   ask: string | null
-  /** The entry that handed the thread in for review while it is in review (board-6), by id. */
-  review?: string | null
 }
 
 /** The page's own word for a thread in a text: a known key, as a link (8). */

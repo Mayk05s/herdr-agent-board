@@ -25,18 +25,17 @@ export const STATUS_COLUMN: Record<ThreadStatus, ColumnId> = {
   doing: 'work',
   waiting: 'ext',
   owner: 'me',
-  review: 'me',
   done: 'done',
   dropped: 'idle',
 }
 export const statusColor = (s: ThreadStatus): string => COLUMN_COLORS[STATUS_COLUMN[s]]
 
-/** The panel's sections, in order (10.3): Done folds, and holds the dropped ones too; what waits on the owner first. */
-export const SECTIONS = ['owner', 'review', 'doing', 'waiting', 'next', 'done'] as const
+/** The panel's sections, in order (10.3): Done folds, and holds the dropped ones too. */
+export const SECTIONS = ['owner', 'doing', 'waiting', 'next', 'done'] as const
 export type SectionId = (typeof SECTIONS)[number]
 export const sectionOf = (s: ThreadStatus): SectionId => (s === 'dropped' ? 'done' : s)
 /** The statuses the owner's status menu offers. */
-export const STATUS_MENU: readonly ThreadStatus[] = ['next', 'doing', 'waiting', 'owner', 'review', 'done', 'dropped']
+export const STATUS_MENU: readonly ThreadStatus[] = ['next', 'doing', 'waiting', 'owner', 'done', 'dropped']
 
 export interface ListFilter {
   /** A lane id, or null for every lane. */

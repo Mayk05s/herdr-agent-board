@@ -43,13 +43,6 @@ export interface ThreadPaneProps {
 }
 
 const iso = (at: number) => new Date(at).toISOString()
-/** When the thread last moved: the time today, else the date with it. */
-const whenOf = (at: number, lang: string): string => {
-  const d = new Date(at)
-  return new Date().toDateString() === d.toDateString()
-    ? d.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleString(lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-}
 
 /** An entry as Team's bubble takes it: the owner's on the right, everyone else's on the left. */
 const lineOf = (e: ThreadEntryView): ThreadLine => ({
@@ -129,10 +122,6 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
   const feed = feedOf(head, view.entries, view.ask)
   // A close the agent proposed meanwhile is answered by Confirm or Keep open: the box adds a note.
   const asking = view.ask !== null && head.status === 'owner' && !head.proposed
-  // A result in review (board-6): what was handed in, and the owner returning it with a remark from the box.
-  const review = head.status === 'review' ? (view.entries.find(e => e.id === view.review) ?? null) : null
-  const [returning, setReturning] = useState(false)
-  const remarking = returning && head.status === 'review'
 
   // A new entry, or another thread: the feed shows its end.
   const last = view.entries.at(-1)?.id
@@ -145,7 +134,6 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
   useEffect(() => {
     setReply(null)
     setPicking(false)
-    setReturning(false)
   }, [head.id])
 
   // On a shared thread, and for the share ops, a write is the owner's that goes out (#394): through
@@ -159,8 +147,7 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
     try {
       const r = viaOwner(body) ? await ownerPost(path, body) : await api.post(path, body)
       done?.()
-      const verdict = body.op === 'accept' || body.op === 'return'
-      if (r.told === false) toast(t(verdict ? 'wt.review.notTold' : 'wt.notTold', { why: String(r.why ?? '') }), true)
+      if (r.told === false) toast(t('wt.notTold', { why: String(r.why ?? '') }), true)
       const said = sentToast(r, t)
       if (said) toast(said.text, said.error)
       return true
@@ -178,17 +165,11 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
     const text = draft.trim()
     const paths = attached.filter(f => f.status === 'done').map(f => f.path)
     if ((!text && !paths.length) || attached.some(f => f.status === 'uploading')) return
-    if (remarking && !text) return
-    const body = remarking
-      ? { op: 'return', text }
-      : asking
-        ? { op: 'answer', text }
-        : { op: 'post', text, files: paths, ...(reply && { replyTo: reply }) }
+    const body = asking ? { op: 'answer', text } : { op: 'post', text, files: paths, ...(reply && { replyTo: reply }) }
     void write(body, () => {
       setDraft('')
       setReply(null)
-      setReturning(false)
-      if (!remarking) files.clear(head.key)
+      files.clear(head.key)
     })
   }
   const quote = (id: string): Quote | null => {
@@ -324,9 +305,6 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
             </select>
           </span>
           <span className="wt-lane-pill">{data?.categories?.find(c => c.id === head.lane)?.title ?? head.lane}</span>
-          <time className="wt-updated" dateTime={iso(head.updatedAt)}>
-            {t('wt.updated', { when: whenOf(head.updatedAt, t.lang) })}
-          </time>
           <ShareButton head={head} busy={busy} onPicking={setPicking} />
         </div>
         <ThreadShare head={head} busy={busy} act={write} picking={picking} onPicking={setPicking} team={team} />
@@ -335,39 +313,7 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
             <KeyText text={head.waitingOn} onOpen={onOpen} />
           </p>
         )}
-        {review && (
-          <div className="wt-review" data-review={review.id}>
-            <p>
-              <b>{t('wt.review.result')}:</b> <KeyText text={head.summary || review.text} onOpen={onOpen} />
-            </p>
-            {review.text && head.summary && (
-              <p>
-                <b>{t('wt.review.check')}:</b> <KeyText text={review.text} onOpen={onOpen} />
-              </p>
-            )}
-            <Files entry={review} />
-            <div className="wt-review-actions">
-              <button
-                type="button"
-                className={classNames('mini', remarking && 'on')}
-                aria-pressed={remarking}
-                disabled={!canEdit || busy}
-                onClick={() => setReturning(!returning)}
-              >
-                {remarking ? t('wt.review.cancel') : t('wt.review.return')}
-              </button>
-              <button
-                type="button"
-                className="mini primary"
-                disabled={!canEdit || busy}
-                onClick={() => void write({ op: 'accept' })}
-              >
-                {t('wt.review.accept')}
-              </button>
-            </div>
-          </div>
-        )}
-        {head.summary && !head.proposed && !review && (
+        {head.summary && !head.proposed && (
           <p className="wt-summary">
             <KeyText text={head.summary} onOpen={onOpen} />
           </p>
@@ -490,23 +436,22 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
       >
         <TeamComposer
           value={draft}
-          placeholder={remarking ? t('wt.review.remark') : asking ? t('wt.answer') : t('wt.note')}
+          placeholder={asking ? t('wt.answer') : t('wt.note')}
           disabled={!canEdit || busy}
           canSend={!!draft.trim() || attached.some(f => f.status === 'done')}
           onChange={setDraft}
           onSend={send}
           reply={reply ? quote(reply) : null}
           onCancelReply={() => setReply(null)}
-          sendTitle={remarking ? t('wt.review.returnSend') : asking ? t('wt.answerSend') : t('wt.noteSend')}
+          sendTitle={asking ? t('wt.answerSend') : t('wt.noteSend')}
           {...(attached.length > 0 && {
             attachments: (
               <Attachments id="wt-attachments" list={attached} onRemove={id => files.remove(head.key, id)} />
             ),
           })}
-          {...(!asking &&
-            !remarking && {
-              actions: <AttachButton disabled={!canEdit || busy} onFiles={given => files.add(head.key, given)} />,
-            })}
+          {...(!asking && {
+            actions: <AttachButton disabled={!canEdit || busy} onFiles={given => files.add(head.key, given)} />,
+          })}
         />
       </div>
     </div>
