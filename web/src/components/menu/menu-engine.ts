@@ -384,7 +384,12 @@ export class MenuEngine {
     if (!this.downInside && this.now() - this.openedAt < 350) return
     this.downInside = false
     const i = indexAt(e)
-    if (i >= 0) this.activate(layer, i)
+    if (i < 0) return
+    this.activate(layer, i)
+    // A finger's click comes after its release and is aimed at what is there by then: the menu
+    // the pick took away lets it through to the card under it (#432). It is spent, as a press
+    // outside is; a mouse's goes to the menu it was pressed in, as before.
+    if (e.pointerType !== 'mouse' && !this.layers.includes(layer)) this.swallowUntil = this.now() + 600
   }
 
   private openSub(layer: Layer, i: number, focusFirst: boolean): void {

@@ -1,8 +1,9 @@
-// The usage popover under the pill. A press outside, Escape or a resize closes it; Escape and the
-// close button give the focus back to the pill. With two or more profiles shown, each shown profile
+// The usage popover under the pill. A press outside (a finger's spends its click, #432), Escape or
+// a resize closes it; Escape and the close button give the focus back to the pill. With two or more profiles shown, each shown profile
 // has its part: its windows, or "No session lately".
 import { type Dispatch, type RefObject, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { useT } from '../i18n/I18nProvider.tsx'
+import { pressAway } from '../models/click-away.ts'
 import { limitInfo, popoverPosition, profileUsage } from '../models/limits.ts'
 import { useBoardContext } from '../state/BoardProvider.tsx'
 import type { BoardAction } from '../state/board-ui.ts'
@@ -37,7 +38,9 @@ export function LimitsPop({ anchor }: { anchor: Pill }) {
     if (!open) return
     const onPress = (e: PointerEvent) => {
       const target = e.target instanceof Element ? e.target : null
-      if (!target?.closest('#limits-pop, #limits')) close(false)
+      if (target?.closest('#limits-pop, #limits')) return
+      pressAway(e, window)
+      close(false)
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
