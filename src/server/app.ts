@@ -81,6 +81,7 @@ import {
 import { createWakeControl, startWakeStart } from '../services/wake/control.ts'
 import { createWorkHub, type WorkHub } from '../services/work-hub.ts'
 import { keepThreadsDb, threadsPayload, withThreadsDb } from '../services/work-threads.ts'
+import { createWorkdeskWatcher } from '../services/workdesk-watcher.ts'
 import { createBoardState } from './board-state.ts'
 import { dispatch, json, peerOf, type Route } from './http.ts'
 import { createRemoteListener } from './remote.ts'
@@ -617,6 +618,12 @@ export async function startServer({
     const shown = line && reminders.line()
     return shown ? { ...line, reminders: shown } : line
   }
+  const workdesk = createWorkdeskWatcher({
+    cfg,
+    items: () => (board.stale() ? null : board.items()),
+    onChange: () => board.publish(),
+    log,
+  })
   const board = createBoardState({
     deps,
     launches,
@@ -636,6 +643,7 @@ export async function startServer({
     backup: backupLine,
     time: timeLine,
     calendar: calendarLine,
+    workdesk: workdesk.view,
     // Threads (#379): while config.json turns them on, the revision and the count that waits on
     // the owner (two queries a refresh); off, nothing is read.
     threads: () => {
@@ -880,6 +888,7 @@ export async function startServer({
   refresh()
   // The port makes it one board per machine, so one scheduler; claims cover an overlap.
   const scheduler = startScheduler({ deps, onChange: refresh })
+  workdesk.configChanged()
   // Auto-compact (#378) beside it, for the same reason: one board types /compact.
   const compactor = startCompactor({ deps, onChange: refresh })
   // Shells a board before this one opened and that are gone by now are forgotten.
@@ -931,6 +940,7 @@ export async function startServer({
       // The calendar turned on or off: its timer started or stopped, its reminders' too.
       calendar.configChanged()
       reminders.configChanged()
+      workdesk.configChanged()
       team.refresh()
       holdLoopback6()
       await board.refresh()
@@ -941,6 +951,7 @@ export async function startServer({
       for (const watcher of watchers) watcher.close()
       omarchy?.close()
       scheduler.stop()
+      await workdesk.stop()
       compactor.stop()
       backups.stop()
       wake.stop()

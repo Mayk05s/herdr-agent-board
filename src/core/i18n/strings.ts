@@ -35,6 +35,17 @@ export type Dictionary = Record<string, Entry>
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en: {
+    'workdesk.status': 'Workdesk · {queue} queued · Last poll {time}',
+    'workdesk.problem.config': 'Check the local Workdesk configuration',
+    'workdesk.problem.tools': 'Waiting for Workdesk coordinator tools',
+    'workdesk.problem.connection': 'Cannot reach the Workdesk adapter',
+    'workdesk.problem.heartbeat': 'Workdesk did not confirm the heartbeat',
+    'workdesk.problem.list': 'Could not read the Workdesk queue',
+    'workdesk.problem.threads': 'Enable Board threads to deliver assignments',
+    'workdesk.problem.master': 'Waiting for a uniquely named master session',
+    'workdesk.problem.claim': 'Could not confirm a Workdesk claim',
+    'workdesk.problem.conflict': 'A task was claimed by another executor',
+    'workdesk.problem.handoff': 'Could not save or queue a Workdesk handoff',
     'sheet.properties': 'Card details',
     'sheet.details': 'Session details',
     'sheet.detailsShow': 'Show details',
@@ -697,6 +708,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
   },
 
   ru: {
+    'workdesk.status': 'Workdesk · В очереди {queue} · Последний опрос {time}',
+    'workdesk.problem.config': 'Проверьте локальную настройку Workdesk',
+    'workdesk.problem.tools': 'Ожидаются инструменты координатора Workdesk',
+    'workdesk.problem.connection': 'Нет связи с адаптером Workdesk',
+    'workdesk.problem.heartbeat': 'Workdesk не подтвердил сигнал присутствия',
+    'workdesk.problem.list': 'Не удалось прочитать очередь Workdesk',
+    'workdesk.problem.threads': 'Для передачи поручений включите треды Борды',
+    'workdesk.problem.master': 'Ожидается сессия мастера с однозначным именем',
+    'workdesk.problem.claim': 'Не удалось подтвердить claim в Workdesk',
+    'workdesk.problem.conflict': 'Задачу взял другой исполнитель',
+    'workdesk.problem.handoff': 'Не удалось сохранить или поставить в очередь передачу',
     'sheet.properties': 'Сведения о карточке',
     'sheet.details': 'Сведения о сессии',
     'sheet.detailsShow': 'Показать сведения',
