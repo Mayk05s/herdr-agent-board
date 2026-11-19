@@ -14,7 +14,8 @@
 //   board thread list [--mine | --lane <id> | --all] [--status <s>] [--done]
 //   board thread changes [--peek]
 //   board thread watch <key> | --lane <id> | --mine  [--what status|asks|all] [--idle] [--wake]
-//   board thread unwatch <key> | --lane <id> | --mine
+//   board thread watch --owner [--idle] [--wake]   whatever waits on the owner (#434, services/owner-watch.ts)
+//   board thread unwatch <key> | --lane <id> | --mine | --owner
 //   board thread link <key> | --base
 //   board thread open <key>
 //   board thread import <task board file> [--lane <id>]
@@ -35,6 +36,7 @@ import {
   ThreadError,
   watchesOf,
 } from '../adapters/work-thread-store.ts'
+import { OWNER } from '../core/owner-watch.ts'
 import { parseTaskFile, TaskFileError } from '../core/thread-import.ts'
 import type { Config } from '../core/types.ts'
 import {
@@ -84,7 +86,8 @@ board thread show <key> [--last <n>] [--since <n>] [--full]
 board thread list [--mine | --lane <id> | --all] [--status <s>] [--done]
 board thread changes [--peek] [--all]
 board thread watch <key> | --lane <id> | --mine  [--what status|asks|all] [--idle] [--wake]
-board thread unwatch <key> | --lane <id> | --mine
+board thread watch --owner [--idle] [--wake]
+board thread unwatch <key> | --lane <id> | --mine | --owner
 board thread link <key> | --base
 board thread open <key>
 board thread import <task board file> [--lane <id>]
@@ -92,6 +95,8 @@ board thread share <key> <name|team|channel> [--history]
   <key>: a key (atlas-12), the first 8 characters of an id, or a bare number in your lane. Every
   command takes --json. A thread's creator hears of its status changes, its assignee of the owner's
   answers: one line, "[board reminder from threads] atlas-13 done: <summary>", never its own changes.
+  watch --owner: whatever starts or stops waiting on the owner, any lane, a card's board ask too, as
+  "[board reminder from asks] anna asks the owner: <question> · ben: settled"; not your own.
   share asks the owner to share the thread with a teammate's board; on a shared thread every entry
   that is not --private goes to them (or waits for the owner, as a team post of yours would).`
 
@@ -105,8 +110,8 @@ const FLAGS: Record<string, { values: readonly string[]; bare: readonly string[]
   show: { values: ['--last', '--since'], bare: ['--full'] },
   list: { values: ['--lane', '--status'], bare: ['--mine', '--all', '--done'] },
   changes: { values: [], bare: ['--peek', '--all'] },
-  watch: { values: ['--lane', '--what'], bare: ['--mine', '--idle', '--wake'] },
-  unwatch: { values: ['--lane'], bare: ['--mine'] },
+  watch: { values: ['--lane', '--what'], bare: ['--mine', '--owner', '--idle', '--wake'] },
+  unwatch: { values: ['--lane'], bare: ['--mine', '--owner'] },
   link: { values: [], bare: ['--base'] },
   open: { values: [], bare: [] },
   import: { values: ['--lane'], bare: ['--todos'] },
@@ -500,7 +505,7 @@ class Run {
       const me = this.session()
       const watched = watchesOf(this.db, me.key)
         .map(w => w.target)
-        .filter(t => t !== MINE && !t.startsWith('lane:'))
+        .filter(t => t !== MINE && t !== OWNER && !t.startsWith('lane:'))
       const ids = [...new Set([...mineIds(this.db, me.key), ...watched])]
       heads = listThreads(this.db, { ids, closed, ...(status && { status }) })
     } else {
@@ -623,15 +628,28 @@ class Run {
     const me = this.session()
     const lane = a.one('--lane')
     if (lane !== undefined && !LANE.test(lane.toLowerCase())) throw new Usage(`"${lane}" is not a lane id`)
-    const target = a.has('--mine')
-      ? MINE
-      : lane !== undefined
-        ? laneTarget(lane.toLowerCase())
-        : a.words[0]
-          ? this.thread(a.words[0]).id
-          : ''
-    if (!target) throw new Usage(`usage: board thread ${on ? 'watch' : 'unwatch'} <key> | --lane <id> | --mine`)
-    const named = target === MINE ? 'your threads' : target.startsWith('lane:') ? `lane ${target.slice(5)}` : null
+    // What waits on the owner is one target of its own: never beside a thread, a lane or --mine.
+    if (a.has('--owner') && (a.has('--mine') || lane !== undefined || a.words.length || a.one('--what') !== undefined))
+      throw new Usage(`usage: board thread ${on ? 'watch --owner [--idle] [--wake]' : 'unwatch --owner'}`)
+    const target = a.has('--owner')
+      ? OWNER
+      : a.has('--mine')
+        ? MINE
+        : lane !== undefined
+          ? laneTarget(lane.toLowerCase())
+          : a.words[0]
+            ? this.thread(a.words[0]).id
+            : ''
+    if (!target)
+      throw new Usage(`usage: board thread ${on ? 'watch' : 'unwatch'} <key> | --lane <id> | --mine | --owner`)
+    const named =
+      target === OWNER
+        ? 'what waits on the owner'
+        : target === MINE
+          ? 'your threads'
+          : target.startsWith('lane:')
+            ? `lane ${target.slice(5)}`
+            : null
     const label = named ?? getThread(this.db, target)?.key ?? target
     if (!on) {
       const n = unwatch(this.write, me.key, target)
@@ -651,9 +669,13 @@ class Run {
     if (this.json) this.out(JSON.stringify({ ok: true, watch: w }))
     else
       this.out(
-        ['ok', label, `watched: ${w.what}`, ...(w.idle ? ['when free'] : []), ...(w.wake ? ['wakes you'] : [])].join(
-          ' · ',
-        ),
+        [
+          'ok',
+          label,
+          target === OWNER ? 'watched' : `watched: ${w.what}`,
+          ...(w.idle ? ['when free'] : []),
+          ...(w.wake ? ['wakes you'] : []),
+        ].join(' · '),
       )
   }
 }

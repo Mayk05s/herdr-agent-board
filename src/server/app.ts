@@ -45,6 +45,7 @@ import { toastBody } from '../core/team-unread.ts'
 import { MAX_NAME } from '../core/team-wire.ts'
 import { boardPorts, forwardSpec, publicHosts, sshArgs, tunnelConfig, tunnelProblems } from '../core/tunnel.ts'
 import type { Config } from '../core/types.ts'
+import { threadsConfig } from '../core/work-threads.ts'
 import { teamDesktop } from '../integrations/team-toast.ts'
 import { createAccess } from '../services/access.ts'
 import { backupView, startBackups } from '../services/backup.ts'
@@ -55,6 +56,7 @@ import { startCompactor } from '../services/compactor.ts'
 import type { Deps } from '../services/deps.ts'
 import { createLaunches } from '../services/launch/launches.ts'
 import { mokupilotCheck } from '../services/mokupilot.ts'
+import { tellOwnerWatchers } from '../services/owner-watch.ts'
 import { createPresence } from '../services/presence.ts'
 import { editProfile, installProfile, installThreadsSkill, wakeHooksInPlace } from '../services/profiles.ts'
 import { createRemote } from '../services/remote.ts'
@@ -78,7 +80,7 @@ import {
 } from '../services/tunnel.ts'
 import { createWakeControl, startWakeStart } from '../services/wake/control.ts'
 import { createWorkHub, type WorkHub } from '../services/work-hub.ts'
-import { keepThreadsDb, threadsPayload } from '../services/work-threads.ts'
+import { keepThreadsDb, threadsPayload, withThreadsDb } from '../services/work-threads.ts'
 import { createBoardState } from './board-state.ts'
 import { dispatch, json, peerOf, type Route } from './http.ts'
 import { createRemoteListener } from './remote.ts'
@@ -655,9 +657,24 @@ export async function startServer({
       return item ? { kind: 'session', key: item.key, name: item.name || item.autoName || item.key.slice(0, 8) } : null
     },
   })
+  // `board thread watch --owner` (#434, services/owner-watch.ts): after each refresh, what waits on
+  // the owner told to the sessions that watch it. Threads off: nothing; no such watch: one query.
+  const ownerTick = (): void => {
+    const c = threadsConfig(cfg.threads)
+    if (!c) return
+    try {
+      withThreadsDb(
+        false,
+        db =>
+          db && tellOwnerWatchers({ db, cfg: c, items: board.stale() ? null : board.items(), now: Date.now(), log }),
+      )
+    } catch (err) {
+      log(`owner watch: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
   const refresh = (): void => {
     piTasks.tick()
-    void board.refresh()
+    void board.refresh().then(ownerTick)
   }
   // After Install from the Profiles panel, and the install a show runs: the panel's note and "Setup
   // incomplete" follow at once, not at the next refresh and the next check in up to 10 minutes;
@@ -917,6 +934,7 @@ export async function startServer({
       team.refresh()
       holdLoopback6()
       await board.refresh()
+      ownerTick()
     },
     async close() {
       clearInterval(poll)

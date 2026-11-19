@@ -309,7 +309,8 @@ board thread show <key> [--last <n>] [--since <n>] [--full]
 board thread list [--mine | --lane <id> | --all] [--status <s>] [--done]
 board thread changes [--peek]
 board thread watch <key> | --lane <id> | --mine  [--what status|asks|all] [--idle] [--wake]
-board thread unwatch <key> | --lane <id> | --mine
+board thread watch --owner [--idle] [--wake]
+board thread unwatch <key> | --lane <id> | --mine | --owner
 board thread link <key> | --base
 board thread open <key>
 board thread share <key> <name|team|channel> [--history]
