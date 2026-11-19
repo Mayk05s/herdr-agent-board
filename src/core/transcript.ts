@@ -289,7 +289,14 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
         if (!info.lastText) info.replied = true
         continue
       }
-      if (!o.isMeta && userText(content) && !isNotice(userText(content))) typed = true
+      if (
+        !o.isMeta &&
+        !o.isCompactSummary &&
+        rec(o.origin)?.kind !== 'task-notification' &&
+        userText(content) &&
+        !isNotice(userText(content))
+      )
+        typed = true
       // A reminder the board typed in (services/scheduler.ts) or a background task reporting back is not the user answering.
       if (
         !info.lastText &&

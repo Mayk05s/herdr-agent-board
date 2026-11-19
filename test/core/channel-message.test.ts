@@ -163,6 +163,20 @@ test('the card counts a channel message as the last prompt and as the answer', (
     JSON.stringify({ type: 'last-prompt', lastPrompt: 'typed later' }),
   ]
   expect(parseTranscriptTail(withLast).prompt).toBe('typed later')
+  // A compaction's summary or a task reporting back after it is not a prompt typed after it.
+  const summary = JSON.stringify({
+    type: 'user',
+    isCompactSummary: true,
+    timestamp: TS,
+    message: { role: 'user', content: 'This session is being continued…' },
+  })
+  const task = JSON.stringify({
+    type: 'user',
+    origin: { kind: 'task-notification' },
+    timestamp: TS,
+    message: { role: 'user', content: 'Background task done' },
+  })
+  expect(parseTranscriptTail([meta(TEXT), summary, task]).prompt).toBe('Hello, please check the estimate.')
   // A session without channels: as before.
   expect(parseTranscriptTail([typed('hi'), said('Done?')]).replied).toBe(false)
 })
