@@ -36,6 +36,7 @@ import { todosConfig } from '../core/todos.ts'
 import type { Item } from '../core/types.ts'
 import type { WakeView } from '../core/wake/view.ts'
 import type { WorkdeskPayload } from '../core/workdesk.ts'
+import type { BoardObservation } from '../core/workdesk-topology.ts'
 import { collect } from '../services/board.ts'
 import type { Deps } from '../services/deps.ts'
 import { canFork } from '../services/launch/fork.ts'
@@ -47,6 +48,7 @@ export interface BoardState {
   /** The latest payload, as JSON text. */
   payload(): string
   items(): Item[]
+  observation(): BoardObservation | null
   find(key: string): Item | undefined
   /** True when the data is too old for actions that go through herdr. */
   stale(): boolean
@@ -443,14 +445,16 @@ export function createBoardState({
     }
   }
 
+  const isStale = () =>
+    stale ||
+    !lastSuccessfulRefreshAt ||
+    Date.now() - lastSuccessfulRefreshAt > Math.max(10000, (cfg.refreshSec ?? 2) * 3000)
   return {
     payload: () => payload,
     items: () => items,
+    observation: () => (lastSuccessfulRefreshAt && !isStale() ? { items, observedAt: lastSuccessfulRefreshAt } : null),
     find: key => items.find(i => i.key === key),
-    stale: () =>
-      stale ||
-      !lastSuccessfulRefreshAt ||
-      Date.now() - lastSuccessfulRefreshAt > Math.max(10000, (cfg.refreshSec ?? 2) * 3000),
+    stale: isStale,
     publish,
     refresh,
     edges: (since, limit) => edgeLog.read(since, limit),

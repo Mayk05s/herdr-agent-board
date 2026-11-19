@@ -1,4 +1,5 @@
 import { isAbsolute } from 'node:path'
+import { DEVICE_ID } from './workdesk-topology.ts'
 
 const DEFAULT_MASTERS = {
   BoxMap: 'BoxMap-master',
@@ -20,6 +21,7 @@ export type WorkdeskConfig = {
   masters: Map<string, string>
   fallback: string
   onlyTaskId?: number
+  topologyDeviceId?: string
 }
 
 export const projectKey = (name: string): string => name.trim().toLowerCase()
@@ -66,6 +68,7 @@ export function workdeskConfig(raw: unknown): WorkdeskConfig | null {
     if (!localWord(project) || !localWord(name)) return null
     mapping.set(projectKey(project), name.trim())
   }
+  const device = object(config.topology)?.deviceId
   return {
     executable,
     args,
@@ -74,6 +77,7 @@ export function workdeskConfig(raw: unknown): WorkdeskConfig | null {
     fallback: fallback.trim(),
     ...(caFile !== undefined && { caFile }),
     ...(onlyTaskId !== undefined && { onlyTaskId }),
+    ...(typeof device === 'string' && DEVICE_ID.test(device) && { topologyDeviceId: device }),
   }
 }
 

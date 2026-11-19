@@ -4,6 +4,12 @@ import { object, type WorkdeskConfig } from '../core/workdesk.ts'
 const RPC_TIMEOUT_MS = 15_000
 const MAX_FRAME = 8 * 1024 * 1024
 
+export function supportsTopology(schema: unknown): boolean {
+  const topology = object(object(object(schema)?.properties)?.topology)
+  const versions = object(object(topology?.properties)?.version)?.enum
+  return Array.isArray(versions) && versions.includes(1)
+}
+
 export class WorkdeskToolError extends Error {
   readonly conflict: boolean
 
@@ -39,7 +45,7 @@ export async function withWorkdeskMcp<T>(
   config: WorkdeskConfig,
   signal: AbortSignal,
   run: (mcp: {
-    tools(): Promise<Set<string>>
+    tools(): Promise<Map<string, unknown>>
     call(name: string, args: Record<string, unknown>): Promise<unknown>
   }) => Promise<T>,
 ): Promise<T> {
@@ -91,15 +97,15 @@ export async function withWorkdeskMcp<T>(
     write({ method: 'notifications/initialized' })
     return await run({
       async tools() {
-        const names = new Set<string>()
+        const catalog = new Map<string, unknown>()
         let cursor: unknown
         const seen = new Set<string>()
         do {
           const result = await rpc('tools/list', typeof cursor === 'string' ? { cursor } : {})
           if (!Array.isArray(result.tools)) throw new Error('Invalid Workdesk MCP tool list')
           for (const tool of result.tools) {
-            const name = object(tool)?.name
-            if (typeof name === 'string') names.add(name)
+            const entry = object(tool)
+            if (typeof entry?.name === 'string') catalog.set(entry.name, entry.inputSchema)
           }
           cursor = result.nextCursor
           if (typeof cursor === 'string') {
@@ -107,7 +113,7 @@ export async function withWorkdeskMcp<T>(
             seen.add(cursor)
           }
         } while (typeof cursor === 'string')
-        return names
+        return catalog
       },
       async call(name, args) {
         const result = await rpc('tools/call', { name, arguments: args })

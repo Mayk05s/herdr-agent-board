@@ -10,10 +10,21 @@ type Pending = Handoff & { task_id: number; thread_id: string }
 const PARKED = 8_640_000_000_000_000 // beyond any normal due time, still a valid Date
 const AUTHOR = { kind: 'owner' } as const
 
+export const workdeskHandoffTable = (db: BoardDb): boolean =>
+  !!db.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'workdesk_handoffs'").get()
+
+export function workdeskHandoffReader(db: BoardDb): (id: number) => Handoff | null {
+  if (!workdeskHandoffTable(db)) return () => null
+  const query = db.db.query<Handoff, [number]>(
+    'SELECT executor, session_key, thread_id, schedule_id FROM workdesk_handoffs WHERE task_id = ?',
+  )
+  return id => query.get(id)
+}
+
 export function workdeskStore(db: BoardDb) {
   // Keep the integration's schema lazy. The board's ordinary databases and migration path
   // do not depend on Workdesk. Keep one terminal row per ID even if its thread is deleted.
-  if (!db.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'workdesk_handoffs'").get())
+  if (!workdeskHandoffTable(db))
     db.write('workdesk', ({ db: sql }) =>
       sql.exec(`
         CREATE TABLE IF NOT EXISTS workdesk_handoffs (
@@ -29,29 +40,25 @@ export function workdeskStore(db: BoardDb) {
       `),
     )
 
-  const find = db.db.query<Handoff, [number]>(
-    'SELECT executor, session_key, thread_id, schedule_id FROM workdesk_handoffs WHERE task_id = ?',
-  )
+  const find = workdeskHandoffReader(db)
   const finish = db.db.query('UPDATE workdesk_handoffs SET released = 1 WHERE task_id = ?')
 
   return {
-    find(id: number): Handoff | null {
-      return find.get(id)
-    },
+    find,
 
     reserve(id: number, master: WorkdeskMaster): Handoff | null {
       return db.write('workdesk', ({ db: sql }) => {
         sql
           .query('INSERT OR IGNORE INTO workdesk_handoffs (task_id, executor, session_key) VALUES (?, ?, ?)')
           .run(id, master.name, master.key)
-        const row = find.get(id)
+        const row = find(id)
         return row?.executor === master.name && row.session_key === master.key && !row.thread_id ? row : null
       })
     },
 
     handoff(task: WorkdeskTask, master: WorkdeskMaster, now: number): void {
       db.write('workdesk', tx => {
-        const saved = find.get(task.id)
+        const saved = find(task.id)
         if (!saved || saved.thread_id || saved.executor !== task.executor || saved.session_key !== master.key) return
         const { id, title, project, description, acceptance, url, executor_model } = task
         const launcher =
@@ -107,7 +114,7 @@ export function workdeskStore(db: BoardDb) {
       for (const row of pending) {
         const scheduleId = db.write('workdesk', ({ db: sql }) => {
           // A second poller could have committed since the SELECT.
-          const current = find.get(row.task_id)
+          const current = find(row.task_id)
           if (!current) return null
           const existing = current.schedule_id ? null : listEntries().find(e => e.workdeskThread === row.thread_id)
           const thread = getThread(db, row.thread_id)

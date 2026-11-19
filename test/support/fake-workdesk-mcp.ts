@@ -8,6 +8,9 @@ type State = {
   missing?: boolean
   dropClaim?: number
   conflict?: number
+  topology?: boolean
+  rejectHeartbeat?: boolean
+  invalidList?: boolean
 }
 const isState = (value: unknown): value is State => isRecord(value) && Array.isArray(value.tasks)
 const [, , statePath = '', logPath = '', literal = ''] = process.argv
@@ -22,12 +25,32 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (!state) process.exit(1)
   appendFileSync(logPath, `${JSON.stringify({ method, params, literal })}\n`)
   if (method === 'initialize') send(id, { protocolVersion: '2024-11-05' })
-  if (method === 'tools/list')
-    send(id, { tools: (state.missing ? ['start_codex_review', 'get_codex_review'] : tools).map(name => ({ name })) })
+  if (method === 'tools/list') {
+    send(id, {
+      tools: (state.missing ? ['start_codex_review', 'get_codex_review'] : tools).map(name => ({
+        name,
+        ...(state.topology &&
+          name === 'board_heartbeat' && {
+            inputSchema: { properties: { topology: { properties: { version: { enum: [1] } } } } },
+          }),
+      })),
+    })
+  }
   if (method !== 'tools/call') continue
 
-  if (params.name === 'board_heartbeat') send(id, response({ ok: true, received_at: Date.now() }))
-  if (params.name === 'list_board_tasks') send(id, response({ tasks: state.tasks }))
+  if (params.name === 'board_heartbeat') {
+    const snapshot = params.arguments.topology
+    const ack = snapshot
+      ? { version: 1, device_id: snapshot.device_id, observed_at: snapshot.observed_at, accepted: true }
+      : undefined
+    send(
+      id,
+      state.rejectHeartbeat
+        ? response({ code: 'invalid_topology', status: 400 }, true)
+        : response({ ok: true, received_at: Date.now(), ...(ack && { topology: ack }) }),
+    )
+  }
+  if (params.name === 'list_board_tasks') send(id, response({ tasks: state.invalidList ? null : state.tasks }))
   if (params.name !== 'claim_task') continue
 
   const { task_id, executor } = params.arguments

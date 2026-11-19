@@ -2270,6 +2270,21 @@ For a scoped acceptance test, set `onlyTaskId` to the positive Workdesk ID of th
 The board polls the catalogue and only claims and dispatches that card. Remove `workdesk` to
 pause the watcher, or remove `onlyTaskId` to process the full queue.
 
+To publish a topology snapshot alongside the heartbeat, set `workdesk.topology` to
+`{ "deviceId": "mac" }` on that physical device. Use its explicit Workdesk device ID. The
+watcher sends only confirmed local Workdesk handoffs and uses its existing Herdr collection.
+Older MCP servers and incomplete observations still get the regular presence heartbeat.
+A scoped `onlyTaskId` run also sends presence only, so it cannot replace a whole device snapshot.
+
+A master with a local Workdesk handoff can record an explicit worker launch with
+`spawn-agent --workdesk-worker ...`, or attach an existing worker with
+`board workdesk workers link <SID>`. The caller must be the actual master, and the worker SID
+must be the native Herdr ID. Use `unlink <SID>` to release a worker. Run
+`board workdesk workers complete` once the full roster is known and `incomplete` when it is not.
+The explicit spawn flag sets coverage to incomplete until confirmed again. Only linked Claude Code
+and Codex sessions in Herdr's working or blocked state count. Missing or incomplete coverage
+is shown as unknown in Workdesk. A complete roster with no active workers shows zero.
+
 ## Secrets
 
 An agent that needs a token, a password or OAuth keys it must never see used to write a script

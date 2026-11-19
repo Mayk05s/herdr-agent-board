@@ -621,6 +621,7 @@ export async function startServer({
   const workdesk = createWorkdeskWatcher({
     cfg,
     items: () => (board.stale() ? null : board.items()),
+    observation: () => board.observation(),
     onChange: () => board.publish(),
     log,
   })

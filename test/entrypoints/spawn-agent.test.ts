@@ -2,6 +2,9 @@ import { expect, test } from 'bun:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { openDb } from '../../src/adapters/db.ts'
+import { workdeskStore } from '../../src/adapters/workdesk-store.ts'
+import { workerRoster } from '../../src/adapters/workdesk-worker-store.ts'
 import { failureKind } from '../../src/core/launch/launcher-command.ts'
 import { parseArgs } from '../../src/core/launch/spawn-args.ts'
 import { profileReport, profileTag, sessionProfile } from '../../src/core/profiles.ts'
@@ -1301,3 +1304,88 @@ test('--resume with --model in a profile with its own command and args: the comm
   ])
   expect(cardOf(box, SID)).toMatchObject({ profileWant: 'work', modelWant: 'haiku' })
 }, 30_000)
+
+test.each(['claude', 'codex'])(
+  'an explicit Workdesk worker launch from a %s master registers its observed SID',
+  async kind => {
+    const box = await sandbox()
+    const master = '7fe7b6e7-97f1-4dd0-82af-ab00000abcde'
+    const masterPane = 'wA:p1'
+    const masterAgent = {
+      result: { agent: { agent: kind, agent_session: { value: master }, agent_status: 'working' } },
+    }
+    const shown = {
+      result: {
+        pane: {
+          pane_id: 'wA:p9',
+          tab_id: 'wA:t9',
+          agent: 'claude',
+          agent_status: 'idle',
+          agent_session: { value: SID },
+        },
+      },
+    }
+    box.state({
+      ...STATE,
+      'pane get': shown,
+      'agent get wA:p1': masterAgent,
+      'api snapshot': {
+        result: {
+          snapshot: {
+            panes: [{ pane_id: 'wA:p9', agent: 'claude', agent_session: { value: SID } }],
+            tabs: [],
+            workspaces: [],
+          },
+        },
+      },
+    })
+    boardConfig(box, { threads: true, workdesk: { executable: process.execPath, topology: { deviceId: 'mac' } } })
+    const db = openDb({ path: join(box.env.LOCALAPPDATA as string, 'herdr/plugins/agent-board/board.db') })
+    if (!db) throw Error('fixture database missing')
+    try {
+      const store = workdeskStore(db)
+      const owner = { key: master, name: 'Master with spaces', lane: 'board' }
+      store.reserve(7, owner)
+      store.handoff(
+        {
+          id: 7,
+          executor: owner.name,
+          title: 'Fixture',
+          status: 'doing',
+          project: 'Board',
+          description: '',
+          acceptance: '',
+          url: 'https://workdesk.test/tasks/7',
+          executor_model: 'codex',
+        },
+        owner,
+        Date.now(),
+      )
+      const env = {
+        HERDR_PANE_ID: masterPane,
+        ...(kind === 'claude' ? { CLAUDE_CODE_SESSION_ID: master } : { CODEX_THREAD_ID: master }),
+      }
+      const launched = await runSpawn(
+        box,
+        ['-Name', 'Acme invoices', '-Cwd', box.dir, '-Workspace', 'wA', '--workdesk-worker'],
+        env,
+      )
+      expect(launched).toMatchObject({
+        code: 0,
+        stdout: 'pane=wA:p9 name=Acme invoices agent=acme-invoices-2\n',
+        stderr: '',
+      })
+      expect(workerRoster(db, master)).toBeNull()
+      const cmd = (args: string[]) => box.run('cli', { args: ['workdesk', 'workers', ...args], env }).exited
+      expect((await cmd(['complete'])).code).toBe(0)
+      expect(workerRoster(db, master)).toEqual([SID])
+      expect((await cmd(['unlink', SID])).code).toBe(0)
+      expect(workerRoster(db, master)).toEqual([])
+      expect((await cmd(['link', 'pane-p9'])).code).toBe(1)
+      expect((await cmd(['link', SID])).code).toBe(0)
+      expect(workerRoster(db, master)).toEqual([SID])
+    } finally {
+      db.close()
+    }
+  },
+)

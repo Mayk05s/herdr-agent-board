@@ -1,5 +1,5 @@
 import { openDb } from '../adapters/db.ts'
-import { WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
+import { supportsTopology, WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
 import { type WorkdeskMaster, workdeskStore } from '../adapters/workdesk-store.ts'
 import type { Config, Item } from '../core/types.ts'
 import { threadsConfig } from '../core/work-threads.ts'
@@ -13,11 +13,14 @@ import {
   workdeskConfig,
   workdeskTask,
 } from '../core/workdesk.ts'
+import type { BoardObservation, WorkdeskTopology } from '../core/workdesk-topology.ts'
 import { sessionsFor } from './sleep.ts'
+import { observeWorkdesk } from './workdesk-topology.ts'
 
 type Options = {
   cfg: Config
   items(): readonly Item[] | null
+  observation?(): BoardObservation | null
   onChange(): void
   log(message: string): void
 }
@@ -32,7 +35,7 @@ function masterFor(items: readonly Item[] | null, name: string): WorkdeskMaster 
   return { key: item.key, name, lane: item.category }
 }
 
-export function createWorkdeskWatcher({ cfg, items, onChange, log }: Options) {
+export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }: Options) {
   let status: WorkdeskPayload | null = null
   let config: WorkdeskConfig | null = null
   let signature = ''
@@ -56,105 +59,142 @@ export function createWorkdeskWatcher({ cfg, items, onChange, log }: Options) {
     try {
       await withWorkdeskMcp(active, signal, async mcp => {
         const tools = await mcp.tools()
-        if (tools.has('board_heartbeat')) {
+        const device =
+          active.onlyTaskId === undefined && supportsTopology(tools.get('board_heartbeat'))
+            ? active.topologyDeviceId
+            : undefined
+        async function heartbeat(topology: WorkdeskTopology | null = null): Promise<void> {
+          if (!tools.has('board_heartbeat') || signal.aborted) return
           try {
-            const result = object(await mcp.call('board_heartbeat', {}))
-            if (result?.ok !== true || !Number.isSafeInteger(result.received_at)) problem = 'heartbeat'
+            const result = object(await mcp.call('board_heartbeat', topology ? { topology } : {}))
+            const ack = object(result?.topology)
+            if (
+              result?.ok !== true ||
+              !Number.isSafeInteger(result.received_at) ||
+              (topology &&
+                (ack?.version !== 1 ||
+                  ack.device_id !== topology.device_id ||
+                  ack.observed_at !== topology.observed_at ||
+                  typeof ack.accepted !== 'boolean'))
+            )
+              problem ??= 'heartbeat'
           } catch {
-            problem = 'heartbeat'
+            problem ??= 'heartbeat'
           }
         }
-        if (!REQUIRED.every(name => tools.has(name))) {
-          problem = 'tools'
-          return
-        }
 
-        let listed: unknown
+        // Older tools and installations keep the original heartbeat-before-queue path.
+        if (!device) await heartbeat()
+        let observedTasks: Map<number, WorkdeskTask> | null = null
         try {
-          listed = object(await mcp.call('list_board_tasks', {}))?.tasks
-        } catch {
-          problem ??= 'list'
-          return
-        }
-        if (!Array.isArray(listed)) {
-          problem ??= 'list'
-          return
-        }
-        const scoped: WorkdeskTask[] = []
-        for (const raw of listed) {
-          if (active.onlyTaskId && object(raw)?.id !== active.onlyTaskId) continue
-          const task = workdeskTask(raw)
-          if (task) scoped.push(task)
-          else problem ??= 'list'
-        }
-        const tasks = [...new Map(scoped.map(task => [task.id, task])).values()]
-        const eligible = new Set(
-          tasks.filter(task => task.status === 'queued' && task.executor === null).map(task => task.id),
-        )
-        queue = eligible.size
-        const threadsOn = threadsConfig(cfg.threads)
-        if (!threadsOn) {
-          problem ??= 'threads'
-          return
-        }
-        signal.throwIfAborted()
+          if (!REQUIRED.every(name => tools.has(name))) {
+            problem = 'tools'
+            return
+          }
 
-        try {
-          const db = openDb()
-          if (!db) throw new Error('Workdesk store unavailable')
+          let listed: unknown
           try {
-            const store = workdeskStore(db)
-            store.release(active.onlyTaskId, Date.now())
-            for (const task of tasks) {
-              signal.throwIfAborted()
-              if (!threadsConfig(cfg.threads)) {
-                problem ??= 'threads'
-                return
-              }
-              const saved = store.find(task.id)
-              const resumed = saved && task.executor === saved.executor
-              if (saved?.thread_id || (!eligible.has(task.id) && !resumed)) continue
-
-              const name = saved?.executor ?? active.masters.get(projectKey(task.project)) ?? active.fallback
-              const master = masterFor(items(), name)
-              if (!master || (saved && master.key !== saved.session_key)) {
-                problem ??= 'master'
-                continue
-              }
-              if (!store.reserve(task.id, master)) continue
-              let claimed: ReturnType<typeof workdeskTask>
-              try {
-                claimed = workdeskTask(await mcp.call('claim_task', { task_id: task.id, executor: master.name }))
-              } catch (err) {
-                problem ??= err instanceof WorkdeskToolError && err.conflict ? 'conflict' : 'claim'
-                if (err instanceof WorkdeskToolError && err.conflict) eligible.delete(task.id)
-                continue
-              }
-              signal.throwIfAborted()
-              if (!threadsConfig(cfg.threads)) {
-                problem ??= 'threads'
-                return
-              }
-              if (
-                !claimed ||
-                claimed.id !== task.id ||
-                claimed.executor !== master.name ||
-                claimed.status === 'queued'
-              ) {
-                problem ??= 'claim'
-                continue
-              }
-              eligible.delete(task.id)
-              store.handoff(claimed, master, Date.now())
-            }
-            store.release(active.onlyTaskId, Date.now())
-          } finally {
-            db.close()
+            listed = object(await mcp.call('list_board_tasks', {}))?.tasks
+          } catch {
+            problem ??= 'list'
+            return
           }
-        } catch {
-          problem ??= 'handoff'
-        } finally {
+          if (!Array.isArray(listed)) {
+            problem ??= 'list'
+            return
+          }
+          const scoped: WorkdeskTask[] = []
+          for (const raw of listed) {
+            if (active.onlyTaskId && object(raw)?.id !== active.onlyTaskId) continue
+            const task = workdeskTask(raw)
+            if (task) scoped.push(task)
+            else problem ??= 'list'
+          }
+          const byId = new Map(scoped.map(task => [task.id, task]))
+          const tasks = [...byId.values()]
+          if (device && problem !== 'list' && byId.size === scoped.length) observedTasks = byId
+          const eligible = new Set(
+            tasks.filter(task => task.status === 'queued' && task.executor === null).map(task => task.id),
+          )
           queue = eligible.size
+          const threadsOn = threadsConfig(cfg.threads)
+          if (!threadsOn) {
+            problem ??= 'threads'
+            return
+          }
+          signal.throwIfAborted()
+
+          try {
+            const db = openDb()
+            if (!db) throw new Error('Workdesk store unavailable')
+            try {
+              const store = workdeskStore(db)
+              store.release(active.onlyTaskId, Date.now())
+              for (const task of tasks) {
+                signal.throwIfAborted()
+                if (!threadsConfig(cfg.threads)) {
+                  problem ??= 'threads'
+                  return
+                }
+                const saved = store.find(task.id)
+                const resumed = saved && task.executor === saved.executor
+                if (saved?.thread_id || (!eligible.has(task.id) && !resumed)) continue
+
+                const name = saved?.executor ?? active.masters.get(projectKey(task.project)) ?? active.fallback
+                const master = masterFor(items(), name)
+                if (!master || (saved && master.key !== saved.session_key)) {
+                  problem ??= 'master'
+                  continue
+                }
+                if (!store.reserve(task.id, master)) continue
+                let claimed: ReturnType<typeof workdeskTask>
+                try {
+                  claimed = workdeskTask(await mcp.call('claim_task', { task_id: task.id, executor: master.name }))
+                } catch (err) {
+                  problem ??= err instanceof WorkdeskToolError && err.conflict ? 'conflict' : 'claim'
+                  if (err instanceof WorkdeskToolError && err.conflict) eligible.delete(task.id)
+                  continue
+                }
+                signal.throwIfAborted()
+                if (!threadsConfig(cfg.threads)) {
+                  problem ??= 'threads'
+                  return
+                }
+                if (
+                  !claimed ||
+                  claimed.id !== task.id ||
+                  claimed.executor !== master.name ||
+                  claimed.status === 'queued'
+                ) {
+                  problem ??= 'claim'
+                  continue
+                }
+                eligible.delete(task.id)
+                store.handoff(claimed, master, Date.now())
+                observedTasks?.set(claimed.id, claimed)
+              }
+              store.release(active.onlyTaskId, Date.now())
+            } finally {
+              db.close()
+            }
+          } catch {
+            problem ??= 'handoff'
+            observedTasks = null
+          } finally {
+            queue = eligible.size
+          }
+        } finally {
+          // A topology failure never gates the preceding claim or thread. Fall back to presence
+          // without replacing the device snapshot when any source is partial.
+          if (device) {
+            let topology: WorkdeskTopology | null = null
+            if (observedTasks && !signal.aborted && threadsConfig(cfg.threads)) {
+              try {
+                topology = observeWorkdesk(device, observation?.() ?? null, [...observedTasks.values()])
+              } catch {}
+            }
+            await heartbeat(topology)
+          }
         }
       })
     } catch {
