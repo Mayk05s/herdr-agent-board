@@ -7,7 +7,7 @@ import { MODEL_MAX, readModel } from './model.ts'
 import { checkName } from './names.ts'
 
 export const USAGE =
-  'spawn-agent --name <Name> --cwd <folder> [--label <tab label>] [--brief-file <file> | --brief <text>] [--workspace <herdr workspace id>] [--timeout-sec 120] [--session-id <uuid> | --resume <uuid>] [--fork <uuid>] [--pane <pane id>] [--profile <id>] [--model <id or alias>] [--agent claude|pi] [--trust]'
+  'spawn-agent --name <Name> --cwd <folder> [--label <tab label>] [--brief-file <file> | --brief <text>] [--workspace <herdr workspace id>] [--timeout-sec 120] [--session-id <uuid> | --resume <uuid>] [--fork <uuid>] [--pane <pane id>] [--profile <id>] [--model <id or alias>] [--agent claude|pi] [--trust] [--workdesk-worker]'
 
 /** `spawn-agent --help`: the usage, then what is easy to get wrong. */
 export const HELP = `${USAGE}
@@ -54,6 +54,7 @@ export interface SpawnOptions {
    * user's own Claude folders. Any other dialog still stops the start.
    */
   trust?: boolean
+  workdeskWorker?: boolean
   help?: never
 }
 
@@ -80,6 +81,7 @@ const OPTIONS: Record<string, Key> = {
   keepenv: 'keepEnv',
   agent: 'agent',
   trust: 'trust',
+  workdeskworker: 'workdeskWorker',
   help: 'help',
   h: 'help',
 }
@@ -97,6 +99,7 @@ export function parseArgs(argv: readonly string[]): SpawnArgs {
   let help = false
   let keepEnv = false
   let trust = false
+  let workdeskWorker = false
   for (let i = 0; i < argv.length; i++) {
     const arg = String(argv[i])
     const m = /^--?([A-Za-z][A-Za-z-]*)(?:[=:]([\s\S]*))?$/.exec(arg)
@@ -112,6 +115,11 @@ export function parseArgs(argv: readonly string[]): SpawnArgs {
       // A flag: a value given with it (--keep-env=no) would read as one it does not take.
       if (m[2] !== undefined) throw new Error(`${arg.replace(/[=:][\s\S]*$/, '')} takes no value`)
       keepEnv = true
+      continue
+    }
+    if (key === 'workdeskWorker') {
+      if (m[2] !== undefined) throw new Error('--workdesk-worker takes no value')
+      workdeskWorker = true
       continue
     }
     if (key === 'trust') {
@@ -160,6 +168,8 @@ export function parseArgs(argv: readonly string[]): SpawnArgs {
   if (agent !== undefined && agent !== 'claude' && agent !== 'pi')
     throw new Error(`--agent must be claude or pi, not "${out.agent}"`)
   const pi = agent === 'pi'
+  if (workdeskWorker && (pi || resume !== undefined || fork !== undefined))
+    throw new Error('--workdesk-worker requires a new work session')
   if (pi && (resume !== undefined || fork !== undefined))
     throw new Error('--agent pi starts a new session: give it no --resume or --fork')
   return {
@@ -180,6 +190,7 @@ export function parseArgs(argv: readonly string[]): SpawnArgs {
     ...(keepEnv && { keepEnv }),
     ...(pi && { agent: 'pi' as const }),
     ...(trust && { trust: true }),
+    ...(workdeskWorker && { workdeskWorker: true }),
   }
 }
 
