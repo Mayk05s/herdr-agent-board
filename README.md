@@ -2232,6 +2232,44 @@ thread from anywhere (`board thread link` prints it), and `board thread open <ke
 board's window up on it. The routes are `/api/threads` (docs/design/threads, 5.3); away from the
 computer only your own logins reach them.
 
+## Workdesk assignments
+
+To let the web board hand assignments from Workdesk to project masters, turn on Board threads
+and add a `workdesk` section to the board's local `config.json`. Use the executable, arguments
+and local CA path from the installed Workdesk coordinator MCP configuration. The adapter reads
+its own private connection file. The board does not need the credential or certificate contents.
+
+```json
+{
+  "threads": true,
+  "workdesk": {
+    "executable": "/path/to/node",
+    "args": ["/path/to/master-mcp.mjs", "/path/to/private/project-master.json"],
+    "caFile": "/path/to/workdesk-root.pem",
+    "intervalSec": 120,
+    "masters": { "Board": "Board-codex-master" },
+    "fallback": "Coordinator-backup"
+  }
+}
+```
+
+The executable and optional CA path are absolute. The board launches it directly with the
+argument array. It polls every 120 seconds by default and reports presence to Workdesk on each
+poll, including when the queue is empty. The toolbar shows the remaining assignments, last poll
+time and any problem. A board without this setting does not run the watcher.
+
+The default masters are `BoxMap-master`, `MokuPilot-master`, `CV-master`, `Board-master`,
+`Tripio-master` (for Tripio, Трипио and Hermes), `LessonPilot-master` and `Workdesk-master`. Set
+`masters` to override individual projects and `fallback` for unlisted projects. The board
+claims a card only after it can resolve one named Claude Code or Codex session. It saves a local
+thread for the Workdesk ID and uses the regular reminder and wake path to tell its assignee.
+The thread includes the card's executor model. The master uses Codex by default or Claude Opus
+when selected, reports each stage to Workdesk, and sends the result for the owner's acceptance.
+
+For a scoped acceptance test, set `onlyTaskId` to the positive Workdesk ID of the test card.
+The board polls the catalogue and only claims and dispatches that card. Remove `workdesk` to
+pause the watcher, or remove `onlyTaskId` to process the full queue.
+
 ## Secrets
 
 An agent that needs a token, a password or OAuth keys it must never see used to write a script

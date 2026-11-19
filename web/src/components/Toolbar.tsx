@@ -438,6 +438,26 @@ export function Toolbar({
       <p id="connection-state" role="status" hidden={canMutate}>
         {t(canEdit ? 'mobile.readOnly' : 'live.off')}
       </p>
+      {data?.workdesk && (
+        <p
+          className="workdesk-status"
+          role="status"
+          style={{ margin: '4px 0', fontSize: 12, color: 'var(--label-2)', fontVariantNumeric: 'tabular-nums' }}
+        >
+          {t('workdesk.status', {
+            queue: data.workdesk.queue ?? '—',
+            time:
+              data.workdesk.polledAt === null
+                ? '—'
+                : new Date(data.workdesk.polledAt).toLocaleTimeString(t.lang, {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hourCycle: 'h23',
+                  }),
+          })}
+          {data.workdesk.problem && <> · {t(`workdesk.problem.${data.workdesk.problem}`)}</>}
+        </p>
+      )}
       <ColumnsHead heads={heads} only={ui.column} />
     </header>
   )
