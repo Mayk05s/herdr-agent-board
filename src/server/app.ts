@@ -89,6 +89,7 @@ import { createWorkHub, type WorkHub } from '../services/work-hub.ts'
 import { keepThreadsDb, threadsPayload, withThreadsDb } from '../services/work-threads.ts'
 import { createWorkdeskDialog } from '../services/workdesk-dialog.ts'
 import { runWorkdeskEvents, workdeskEventHandlers } from '../services/workdesk-events.ts'
+import { runWorkdeskFeed } from '../services/workdesk-feed.ts'
 import { createWorkdeskWatcher } from '../services/workdesk-watcher.ts'
 import { createBoardState } from './board-state.ts'
 import { dispatch, json, peerOf, type Route } from './http.ts'
@@ -977,6 +978,9 @@ export async function startServer({
   workdesk.configChanged()
   workdeskDialog.configChanged()
   void configureWorkdeskStream()
+  // BOARD-9: the threads of Workdesk tasks and their chats in Workdesk, one feed (`workdesk.feed`).
+  const feed = new AbortController()
+  const feedTask = runWorkdeskFeed({ cfg, log }, feed.signal)
   // Auto-compact (#378) beside it, for the same reason: one board types /compact.
   const compactor = startCompactor({ deps, onChange: refresh })
   // Shells a board before this one opened and that are gone by now are forgotten.
@@ -1043,7 +1047,8 @@ export async function startServer({
       scheduler.stop()
       workdeskStreamConfig = ''
       workdeskStream?.controller.abort()
-      await Promise.all([workdesk.stop(), workdeskDialog.stop(), workdeskStream?.task])
+      feed.abort()
+      await Promise.all([workdesk.stop(), workdeskDialog.stop(), workdeskStream?.task, feedTask])
       await boardEvents.stop()
       compactor.stop()
       backups.stop()

@@ -18,6 +18,13 @@ type State = {
     invalidList?: boolean
     deny?: string
   }
+  /** The BOARD-9 feed's tools (services/workdesk-feed.ts): the owner's messages, and the card's status after the list. */
+  feed?: {
+    messages: { id: number; kind: string; text: string }[]
+    delivered?: number
+    taskStatus?: string
+    deny?: string
+  }
 }
 const isState = (value: unknown): value is State => isRecord(value) && Array.isArray(value.tasks)
 const [, , statePath = '', logPath = '', literal = ''] = process.argv
@@ -48,6 +55,45 @@ for await (const line of createInterface({ input: process.stdin })) {
     })
   }
   if (method !== 'tools/call') continue
+
+  const feed = state.feed
+  if (
+    feed &&
+    [
+      'read_owner_messages',
+      'ack_owner_messages',
+      'post_board_thread_message',
+      'report_task',
+      'get_codex_review',
+    ].includes(params.name)
+  ) {
+    const args = params.arguments
+    if (feed.deny === params.name) send(id, response({ code: 'role_denied', status: 403 }, true))
+    else if (params.name === 'read_owner_messages')
+      send(
+        id,
+        response({
+          delivered_through: feed.delivered ?? 0,
+          messages: feed.messages.filter(m => m.id > (feed.delivered ?? 0)),
+        }),
+      )
+    else if (params.name === 'ack_owner_messages') {
+      updateJson(statePath, live => ({ ...live, feed: { ...feed, delivered: args.through } }) as State, isState)
+      send(
+        id,
+        response({
+          task_id: args.task_id,
+          assignment_id: args.assignment_id,
+          delivered_through: args.through,
+          replayed: false,
+        }),
+      )
+    } else if (params.name === 'post_board_thread_message') send(id, response({ message_id: 1, replayed: false }))
+    else if (params.name === 'report_task') send(id, response({ id: args.task_id, status: args.status }))
+    else
+      send(id, response({ task: { id: args.task_id, status: feed.taskStatus ?? 'working' }, stages: [], reviews: [] }))
+    continue
+  }
 
   if (params.name === 'board_heartbeat') {
     const snapshot = params.arguments.topology
