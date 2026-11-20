@@ -49,6 +49,8 @@
 import { type FSWatcher, mkdirSync, watch } from 'node:fs'
 import { beginReport, deferReport, settleReport, verifyReport } from '../adapters/call-receipts.ts'
 import { readCard } from '../adapters/cards.ts'
+import { herdr } from '../adapters/herdr.ts'
+import { nameForCwd, nameScript } from '../adapters/name-for-cwd.ts'
 import { archiveDir, scheduleDir } from '../adapters/paths.ts'
 import { getEntry, listEntries, logRun, removeEntry, updateEntry } from '../adapters/schedule-store.ts'
 import { itemProfile } from '../core/item-profile.ts'
@@ -334,6 +336,23 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
     for (const e of batch) wait(e, now, why, !item)
   }
 
+  /**
+   * A pane named by the user's name-for-folder script (#307, adapters/name-for-cwd.ts) gets that
+   * name back after a restart's wake, which leaves it without one. No script, no folder, no name
+   * printed, or herdr failing: nothing, as before.
+   */
+  async function nameAgain(item: Item): Promise<void> {
+    const { pane, cwd } = item
+    if (!pane || !cwd) return
+    const script = nameScript()
+    if (!script) return
+    const name = await nameForCwd(script, cwd)
+    if (!name) return
+    await herdr(['agent', 'rename', pane, name]).catch(err =>
+      log(`restart ${item.name}: ${pane} not named ${name}: ${messageOf(err)}`),
+    )
+  }
+
   const whyNot = (r: { draft?: boolean; dialog?: boolean; busy?: boolean; error: string }): string =>
     r.draft ? 'draft' : r.dialog ? 'dialog' : r.busy ? 'busy' : r.error
 
@@ -403,6 +422,7 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
       // Woken in a new tab when its pane was closed as it went to sleep (#204): the note goes there.
       item = { ...item, sleeping: false, ...(woke.pane && { pane: woke.pane }) }
       await new Promise(resolve => setTimeout(resolve, settleMs()))
+      await nameAgain(item)
       if (stopped || !getEntry(entry.id)) return
     }
     const r = await send(deps, item, promptOf(entry, Date.now()), { free: true, draft: true })
