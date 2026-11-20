@@ -25,6 +25,7 @@ import { type DetailSnapshot, useSessionDetail } from '../../hooks/useSessionDet
 import { useSheetDensity } from '../../hooks/useSheetDensity.ts'
 import { useT } from '../../i18n/I18nProvider.tsx'
 import { inTurn } from '../../models/card.ts'
+import { codexSendBlock } from '../../models/composer.ts'
 import { ConversationScroll } from '../../models/conversation-scroll.ts'
 import { helpersChip } from '../../models/helper-model.ts'
 import { restartPending } from '../../models/restart.ts'
@@ -305,6 +306,14 @@ export interface SheetViewProps {
 export function SheetView(props: SheetViewProps) {
   const { open, item, detail, form, composer, buttons, compact = false } = props
   const t = useT()
+  const [older, selectOlder] = useState<string | null>(null)
+  const old =
+    detail.key === item?.key && detail.data?.item.codexTerminal === item?.codexTerminal
+      ? detail.data?.history
+      : undefined
+  const historyKey = old && item ? JSON.stringify([item.key, item.codexTerminal, old.session]) : null
+  const showingOlder = !!historyKey && older === historyKey
+  const previous = showingOlder ? old?.conversation : undefined
   const { data, connected, canMutate, canEdit } = useBoardContext()
   // A redraw of the conversation keeps the focus on what opens the same thing (a helper's line).
   const keepFocus = useKeepFocus()
@@ -377,10 +386,23 @@ export function SheetView(props: SheetViewProps) {
               </button>
             </div>
             <Screen screen={detail.data?.screen ?? ''} form={hasForm} asking={asking} />
-            <div className="section-title">{t('thread.title')}</div>
+            <div className="section-title">
+              {t(showingOlder ? 'thread.codexPrevious' : historyKey ? 'thread.codexCurrent' : 'thread.title')}
+            </div>
+            {historyKey && (
+              <button type="button" className="button" onClick={() => selectOlder(showingOlder ? null : historyKey)}>
+                {t(showingOlder ? 'thread.codexCurrent' : 'thread.codexPrevious')}
+              </button>
+            )}
+            {item.codexUnresolved && (
+              <p className="row-value muted" role="status">
+                {t('thread.codexUnresolved')}
+              </p>
+            )}
             <div className="thread">
               <Conversation
                 detail={detail}
+                previous={previous}
                 item={item}
                 links={props.links}
                 composer={composer}
@@ -390,21 +412,24 @@ export function SheetView(props: SheetViewProps) {
           </>
         )}
       </div>
-      <Composer
-        composer={composer}
-        item={item}
-        availability={availability}
-        buttons={
-          item ? headButtons(item, t, !!data?.mokupilot, schedules, !!data?.fork, !!data?.codexFork) : NO_HEAD_BUTTONS
-        }
-        term={item ? termButton(item, data, t) : undefined}
-        changesHidden={!detail.data?.checkout}
-        present={!!openItem && detail.status !== 'missing'}
-        canMutate={canMutate}
-        on={buttons}
-        moreOpen={props.moreOpen ?? false}
-        fold={compact ? { folded: !props.actionsOpen, onToggle: () => props.onActionsToggle?.() } : undefined}
-      />
+      {!showingOlder && (
+        <Composer
+          composer={composer}
+          item={item}
+          availability={availability}
+          buttons={
+            item ? headButtons(item, t, !!data?.mokupilot, schedules, !!data?.fork, !!data?.codexFork) : NO_HEAD_BUTTONS
+          }
+          term={item ? termButton(item, data, t) : undefined}
+          changesHidden={!detail.data?.checkout}
+          present={!!openItem && detail.status !== 'missing'}
+          sendBlock={codexSendBlock(openItem, detail.key === open ? detail.data : undefined)}
+          canMutate={canMutate}
+          on={buttons}
+          moreOpen={props.moreOpen ?? false}
+          fold={compact ? { folded: !props.actionsOpen, onToggle: () => props.onActionsToggle?.() } : undefined}
+        />
+      )}
     </>
   )
 }
@@ -425,6 +450,7 @@ function Screen({ screen, form, asking }: { screen: string; form: boolean; askin
 
 interface ConversationProps {
   detail: DetailSnapshot
+  previous?: SessionDetail['conversation'] | undefined
   item: Item
   links?: SheetLinks | undefined
   /** The board's own messages at the thread's foot. */
@@ -433,20 +459,20 @@ interface ConversationProps {
   onResize?: (() => void) | undefined
 }
 
-function Conversation({ detail, item, links, composer, onResize }: ConversationProps) {
+function Conversation({ detail, previous, item, links, composer, onResize }: ConversationProps) {
   const t = useT()
   const { data } = useBoardContext()
   const actions = useSessionActions()
-  const conversation = detail.data?.conversation
+  const conversation = previous ?? detail.data?.conversation
   // The foot: the session's queue, then the board's own messages on their way or not sent.
-  const queued = detail.data?.queued ?? []
+  const queued = previous ? [] : (detail.data?.queued ?? [])
   // What left the queue settles into the conversation (models/settle.ts); a detail not read yet says nothing.
-  if (detail.data)
+  if (!previous && detail.data)
     noteQueue(
       item.key,
       queued.map(m => m.text),
     )
-  const own = composer.outbox.waiting(item.key)
+  const own = previous ? [] : composer.outbox.waiting(item.key)
   // Send now on a queued message, while the session works and its key is known (#330).
   const sendNow = canSendNow(item) ? (text: string) => actions.sendNow(item.key, text) : undefined
   const foot = (queued.length > 0 || own.length > 0) && (

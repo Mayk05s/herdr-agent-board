@@ -46,6 +46,7 @@ import { beginReport, deferReport, settleReport, verifyReport } from '../adapter
 import { readCard } from '../adapters/cards.ts'
 import { archiveDir, scheduleDir } from '../adapters/paths.ts'
 import { getEntry, listEntries, logRun, removeEntry, updateEntry } from '../adapters/schedule-store.ts'
+import { workdeskDialogWakeAllowed } from '../adapters/workdesk-dialog-store.ts'
 import { itemProfile } from '../core/item-profile.ts'
 import { t } from '../core/lang.ts'
 import { callTitle } from '../core/notices.ts'
@@ -54,6 +55,9 @@ import { cleanText, promptOf, type ScheduleEntry, targetOf } from '../core/sched
 import type { Item } from '../core/types.ts'
 import { wakeOffByKey } from '../core/wake/mode.ts'
 import { nextRun } from '../core/when.ts'
+import { threadsConfig } from '../core/work-threads.ts'
+import { workdeskConfig } from '../core/workdesk.ts'
+import { type DialogTarget, workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import { type ActionResult, checkWake, readyToSleep, send, sleepSession, wake } from './actions.ts'
 import { closeDue, listArchive } from './archive.ts'
 import { collect } from './board.ts'
@@ -93,7 +97,15 @@ const numberOf = (v: unknown): number | undefined => (typeof v === 'number' ? v 
  * Start sending due entries. `deps.cfg` is the live config: scheduleTickSec (15), scheduleWaitMin
  * (240), restartSettleSec (8). `onChange` is called after each run, so the board redraws.
  */
-export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onChange?: () => void }): {
+export function startScheduler({
+  deps,
+  onChange = () => {},
+  dialogRecipient,
+}: {
+  deps: Deps
+  onChange?: () => void
+  dialogRecipient?: (target: DialogTarget) => boolean
+}): {
   stop(): void
 } {
   const { cfg, log } = deps
@@ -110,6 +122,25 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
   let ticking = false
   let stopped = false
 
+  function workdeskDue(entry: ScheduleEntry): boolean {
+    if (entry.workdeskDialogWake !== undefined) {
+      const dialog = workdeskDialogConfig(cfg.workdeskDialog, cfg.workdesk)
+      return (
+        !!dialogRecipient &&
+        dialog?.receiver === 'launcher' &&
+        !!threadsConfig(cfg.threads) &&
+        dialog.onlyTaskId === entry.workdeskTaskId
+      )
+    }
+    if (entry.workdeskTaskId === undefined) return true
+    const watch = workdeskConfig(cfg.workdesk)
+    return !!watch && !!threadsConfig(cfg.threads) && (!watch.onlyTaskId || watch.onlyTaskId === entry.workdeskTaskId)
+  }
+
+  const canWakeDialogue = (entry: ScheduleEntry, items: Item[]): boolean =>
+    entry.workdeskDialogWake === undefined ||
+    (!!dialogRecipient && workdeskDue(entry) && workdeskDialogWakeAllowed(entry, items, dialogRecipient))
+
   async function tick(): Promise<void> {
     if (ticking || stopped) return
     ticking = true
@@ -124,7 +155,9 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
       // restart herdr-wake refused, not before its retry time.
       const tried = (e: ScheduleEntry): boolean => typeof e.tried === 'number' && e.tried > now - tickMs() * 0.9
       const later = (e: ScheduleEntry): boolean => typeof e.retryAt === 'number' && e.retryAt > now
-      const due = listEntries().filter(e => e.next <= now && !flying.has(e.key) && !tried(e) && !later(e))
+      const due = listEntries().filter(
+        e => e.next <= now && !flying.has(e.key) && !tried(e) && !later(e) && workdeskDue(e),
+      )
       if (!due.length) return
       // Fresh: whether a session sleeps or works decides what happens now.
       const items = await collect(deps)
@@ -134,10 +167,12 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
         items.find(i => i.key === key) ?? sessionProfile(readCard(key), set.list)
       const profileIdOf = (key: string): string | undefined => itemProfile(profileOf(key), set.list)?.id
       for (const entry of due) {
+        if (!workdeskDue(entry)) continue
         if (delivered.get(entry.id) === entry.next) {
           finish(entry)
           continue
         }
+        if (!canWakeDialogue(entry, items)) continue
         const { item, other } = targetOf(entry, items, profileIdOf)
         // An entry that does not wake (`noWake`, a thread's event, services/work-threads.ts): a
         // sleeping session gets it once it is awake again, however long that takes. It waits
@@ -158,7 +193,7 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
               was: profileLabel(profileOf(entry.key), set),
             })
           : ''
-        run(entry, item, held)
+        run(entry, item, held, items)
           .catch(err => log(`schedule ${entry.id}: ${messageOf(err)}`))
           .finally(() => {
             for (const k of keys) flying.delete(k)
@@ -173,7 +208,7 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
   }
 
   /** `other`: why it does not go to the session now in its pane (another profile's), '' for none. */
-  async function run(entry: ScheduleEntry, item: Item | undefined, other: string): Promise<void> {
+  async function run(entry: ScheduleEntry, item: Item | undefined, other: string, items: Item[]): Promise<void> {
     if (entry.kind === 'restart') return restart(entry, item)
     if (entry.kind === 'sleep') return sleep(entry, item)
     const receipt = entry.receipt ? verifyReport(entry) : null // Before even waking a session.
@@ -189,7 +224,7 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
     const held = item && !item.sleeping && (item.status === 'blocked' || (entry.idle && item.status === 'working'))
     let why = !item ? other || 'gone' : held ? (item.status === 'blocked' ? 'dialog' : 'busy') : ''
     if (item && !why) {
-      if (!claim(entry.id, now)) return
+      if (!canWakeDialogue(entry, items) || !claim(entry.id, now)) return
       if (item.key !== entry.key) {
         // Followed into the session that took its pane: the card and the log say the new one, the
         // prompt the one it was set for.
@@ -222,6 +257,13 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
         if (r.ok && !getEntry(entry.id)) return
         if (waitsForWake(item, r)) return hold(entry, now)
       }
+      if (
+        r.ok &&
+        entry.workdeskDialogWake !== undefined &&
+        item.sleeping &&
+        !canWakeDialogue(entry, await collect(deps))
+      )
+        return hold(entry, now)
       if (r.ok && entry.receipt) {
         const state = beginReport(entry)
         if (state !== 'dispatching') {

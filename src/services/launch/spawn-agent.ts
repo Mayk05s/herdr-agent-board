@@ -229,6 +229,7 @@ function paneCheck(pane: string, opened: string | undefined, { configDir, profil
 
 export interface SpawnResult {
   pane: string
+  session: string | null
   name: string
   agent: string
   /** The kind of agent that came up: 'claude', or 'pi' when the start command started pi. */
@@ -520,7 +521,7 @@ export async function spawnAgent(
       )
   }
   if (isCodex && o.model && text) await cardCodex(pane, o.model)
-  return { pane, name: o.name, agent, kind }
+  return { pane, name: o.name, agent, kind, session }
 }
 
 /**

@@ -53,7 +53,11 @@ try {
   if (o.help) {
     console.log(HELP)
   } else {
-    const launch = loadConfig().launch ?? {}
+    const cfg = loadConfig()
+    const launch = cfg.launch ?? {}
+    const register = o.workdeskWorker
+      ? await (await import('../services/workdesk-workers.ts')).prepareWorkerLaunch(cfg.workdesk)
+      : null
     const home = homedir()
     const r = await spawnAgent(o, {
       ...(o.agent === 'pi'
@@ -67,6 +71,16 @@ try {
       home,
       ticketNames: launch.linkedWorkspaces === true,
     })
+    if (register) {
+      try {
+        register(r.kind, r.session)
+      } catch (err) {
+        // The worker is already running. Keep the normal success line and avoid a duplicate launch.
+        console.error(
+          `spawn-agent: Workdesk worker in ${r.pane} started, registration failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
     console.log(`pane=${r.pane} name=${r.name} agent=${r.agent}${r.kind === 'claude' ? '' : ` kind=${r.kind}`}`)
   }
 } catch (err) {

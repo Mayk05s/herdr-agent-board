@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import type { ClaudeHome } from '../adapters/claude-home.ts'
 import { type CodexHome, createCodexHome } from '../adapters/codex-home.ts'
+import type { LauncherCodexRollout } from '../adapters/codex-process.ts'
+import type { HerdrPane } from '../adapters/herdr.ts'
 import { createPiHome, type PiHome } from '../adapters/pi-home.ts'
 import { createProfileHomes, type ProfileHomes } from '../adapters/profile-homes.ts'
 import { findProfileDirs, inheritedProfileDir } from '../adapters/profiles.ts'
@@ -24,6 +26,7 @@ export interface Deps {
   pi: PiHome
   /** Codex rollouts, looked up only for panes herdr reports as codex. */
   codex: CodexHome
+  launcherCodexRollout?(pane: HerdrPane): Promise<LauncherCodexRollout | null> | undefined
   /** The profiles: config.json's merged with the folders found; read again when they change, or after a minute. */
   profiles(): ProfileSet
   /**

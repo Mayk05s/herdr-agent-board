@@ -526,9 +526,9 @@ export async function send(
   if (item?.day) return toDay(item, text)
   // A sleeping session whose pane is gone wakes in a new tab: pi's (#178), Claude's that wake closed (#204).
   if (!item?.pane && !item?.sleeping) return { ok: false, error: t('err.noPane') }
-  const expectedSession = item.session ?? null
+  const expectedSession = item.codexReported ?? item.session ?? null
   const refused = (agent: HerdrAgent | null): ActionResult | null => {
-    if (!agent || agent.session !== expectedSession)
+    if (!agent || agent.session !== expectedSession || (item.codexTerminal && agent.terminal !== item.codexTerminal))
       return { ok: false, error: t('err.sessionChanged', { name: item.name }) }
     if (agent.status === 'blocked')
       return { ok: false, busy: true, dialog: true, error: t('err.blocked', { name: item.name }) }
@@ -572,8 +572,8 @@ export async function send(
       if (after) return after
       if (fresh?.kind !== agent?.kind) return { ok: false, error: t('err.sessionChanged', { name: item.name }) }
     }
-    // Codex has the same trouble with a draft: Enter sends it together with the text. Only a scheduled
-    // message looks, and only at a Codex session, so every other session makes the calls it made.
+    // Enter would send a Codex terminal draft together with a board message. The web message
+    // route and the scheduler both refuse to type over it.
     if (guardDraft && (agent?.kind === CODEX_AGENT || item.agent === CODEX_AGENT)) {
       const draft = codexDraft(await herdrText(['agent', 'read', pane, '--source', 'visible', '--ansi'], 10_000))
       if (draft) return { ok: false, busy: true, draft: true, error: t('err.draft', { name: item.name }) }

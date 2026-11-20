@@ -2,6 +2,7 @@
 // it, which buttons show), which of its controls work now, the note over the conversation while
 // the detail loads, fails or is out of date, and what the session asks under "Needs me".
 import { archiveBlock } from '../../../src/core/archive.ts'
+import { isCodexItem } from '../../../src/core/codex.ts'
 import type { ScheduleEntry } from '../../../src/core/schedule-rules.ts'
 import type { Item, Translator } from '../../../src/core/types.ts'
 import { inMokupilot } from './call.ts'
@@ -28,8 +29,12 @@ export const draftKey = (it: Pick<Item, 'session' | 'key'> | null | undefined): 
  * What the card says that warrants reading its detail again (web/app.js onData). A helper at work
  * changes the sheet too, while the session itself may wait for it.
  */
-export const detailStamp = (it: Item): string =>
-  `${it.activity}|${it.status}|${it.column}|${it.wait}|${it.doing}|${it.category}|${it.helpers?.at ?? ''}|${it.helpers?.running ?? ''}`
+export function detailStamp(it: Item): string {
+  const fields = `${it.activity}|${it.status}|${it.column}|${it.wait}|${it.doing}|${it.category}|${it.helpers?.at ?? ''}|${it.helpers?.running ?? ''}`
+  return isCodexItem(it)
+    ? `${fields}|${it.codexThread ?? ''}|${it.codexTerminal ?? ''}|${it.codexUnresolved ?? ''}|${it.codexRevision ?? ''}`
+    : fields
+}
 
 export interface BoardTurn {
   /** The board before this one (none yet: the page starts out of date). */

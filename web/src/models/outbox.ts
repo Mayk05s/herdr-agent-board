@@ -39,7 +39,14 @@ export function holds(shown: unknown, key: string): boolean {
 export const sentKey = (text: string, filesLabel: string): string => messageKey(text) || messageKey(filesLabel)
 
 /** sending: on its way; sent: the session has it, its thread not yet; failed: not sent. */
-export type OutState = 'sending' | 'sent' | 'failed'
+export type OutState = 'sending' | 'sent' | 'failed' | 'history-unavailable'
+
+export interface CodexReceipt {
+  thread: string | null
+  revision?: string
+  text: string
+  after: number
+}
 
 /** What `unsettled` reads of a message: its state, its words and when it was sent. */
 export interface Settling {
@@ -50,10 +57,13 @@ export interface Settling {
   after: number
   /** When the session took it (0 until then). */
   sentAt: number
+  codexReceipt?: CodexReceipt
 }
 
 /** What the thread shows: its turns and the session's queue (the session's detail). */
 export interface ShownThread {
+  item?: { key: string; codexRevision?: string; codexTerminal?: string }
+  codexThread?: string | null
   conversation?: readonly { role: string; text?: unknown; at: number }[] | undefined
   queued?: readonly QueuedPrompt[] | undefined
 }
@@ -68,13 +78,24 @@ export const KEEP_SENT_MS = 30_000
  */
 export function unsettled<E extends Settling>(
   entries: readonly E[],
-  { conversation = [], queued = [] }: ShownThread = {},
+  { conversation = [], queued = [], codexThread, item }: ShownThread = {},
   now = Date.now(),
   keepMs = KEEP_SENT_MS,
+  codexSeen = new Map<string, number>(),
 ): E[] {
   const shown = [...conversation.filter(m => m.role === 'user'), ...queued]
   return entries.filter(e => {
     if (e.state === 'failed') return true
+    if (e.codexReceipt) {
+      const { thread, text, after, revision } = e.codexReceipt
+      if (e.state === 'sending' || !thread || thread !== codexThread || revision !== item?.codexRevision) return true
+      const threadRevision = revision ? `${thread}:${revision}` : thread
+      const seen = codexSeen.get(threadRevision) ?? 0
+      const event = conversation.find(m => m.role === 'user' && m.at >= after && m.at > seen && m.text === text)
+      if (!event) return true
+      codexSeen.set(threadRevision, event.at)
+      return false
+    }
     if (e.state === 'sent' && now - e.sentAt > keepMs) return false
     return !shown.some(m => m.at > e.after && holds(m.text, e.key))
   })

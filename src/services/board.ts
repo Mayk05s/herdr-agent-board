@@ -7,7 +7,7 @@ import { isAbsolute, join } from 'node:path'
 import { allCards, writeCard } from '../adapters/cards.ts'
 import type { ClaudeHome } from '../adapters/claude-home.ts'
 import { helpersOf } from '../adapters/helpers.ts'
-import { paneTerminals, snapshot } from '../adapters/herdr.ts'
+import { herdrText, paneTerminals, snapshot } from '../adapters/herdr.ts'
 import { isRecord } from '../adapters/json-store.ts'
 import type { LinksIndex } from '../adapters/links.ts'
 import { callAgentsGate, taskBoard } from '../adapters/mokupilot-call.ts'
@@ -19,6 +19,7 @@ import { besideParents, type CallAgent, type CallView } from '../core/call-agent
 import { categoryFor } from '../core/categories.ts'
 import { isCodexItem } from '../core/codex.ts'
 import { compactView } from '../core/compact.ts'
+import { codexPermissionPreview, isCodexExecWrapper } from '../core/dialogs/codex-permission-preview.ts'
 import { waitingTool } from '../core/held-question.ts'
 import { type HelperSummary, summarize } from '../core/helpers.ts'
 import { t } from '../core/lang.ts'
@@ -256,6 +257,13 @@ type Base = Pick<
   Item,
   | 'key'
   | 'session'
+  | 'codexThread'
+  | 'codexRollout'
+  | 'codexRevision'
+  | 'codexReported'
+  | 'codexUnresolved'
+  | 'codexTerminal'
+  | 'terminalAgent'
   | 'pane'
   | 'workspace'
   | 'agent'
@@ -275,10 +283,15 @@ type Base = Pick<
 export interface CollectOptions {
   /** Each session's helpers (adapters/helpers.ts), for the web board. */
   helpers?: boolean
+  /** Live screen previews for blocked Codex cards in the web board. */
+  permissionPreviews?: boolean
   /** How sessions work with each other: a links index (adapters/links.ts), for the web board. */
   links?: LinksIndex | null
   /** Told every pane in herdr's snapshot with the terminal it holds (null: herdr did not say), once collected. */
   seen?: (panes: ReadonlyMap<string, string | null>) => void
+  observed?: (native: Awaited<ReturnType<typeof snapshot>>, items: readonly Item[]) => void
+  /** A Codex mutation asks for a fresh check of this target pane. */
+  freshCodexPane?: string | null
 }
 
 /**
@@ -288,7 +301,14 @@ export interface CollectOptions {
  */
 export async function collect(
   deps: Deps,
-  { helpers = false, links = null, seen: panesSeen = () => {} }: CollectOptions = {},
+  {
+    helpers = false,
+    permissionPreviews = false,
+    links = null,
+    seen: panesSeen = () => {},
+    observed,
+    freshCodexPane = null,
+  }: CollectOptions = {},
 ): Promise<Item[]> {
   const { cfg } = deps
   const [snap, asleep] = await Promise.all([snapshot(), deps.wake.sleepers()])
@@ -303,6 +323,15 @@ export async function collect(
   const items: Item[] = []
   const seen = new Set<string>()
   const archived = archivedFiles()
+  const blockedCodex = permissionPreviews ? snap.panes.filter(p => isCodexItem(p) && p.agent_status === 'blocked') : []
+  const previews = new Map(
+    await Promise.all(
+      blockedCodex.map(async p => {
+        const text = await herdrText(['agent', 'read', p.pane_id, '--source', 'visible'], 750).catch(() => '')
+        return [p.pane_id, codexPermissionPreview(text)] as const
+      }),
+    ),
+  )
 
   // A MokuPilot call agent (#326) runs with no pane and no hook: its card is told the Claude folder
   // MokuPilot started it in, where its records are, unless its own card says one.
@@ -331,7 +360,9 @@ export async function collect(
     }
     // A pi session's records are its session file, its key: none of Claude's folders has them.
     const pi = isPiItem(base) ? (deps.pi.transcriptInfo(base.session) ?? {}) : null
-    const codex = isCodexItem(base) ? (deps.codex.transcriptInfo(base.session) ?? {}) : null
+    const codex = isCodexItem(base)
+      ? (deps.codex.transcriptInfo(base.codexThread ?? base.session, base.codexRollout) ?? {})
+      : null
     const { home, path } =
       pi || codex ? { home: null, path: null } : recordsOf(deps, card, base.session, base.cwd, hit, searched)
     const info = codex ?? pi ?? home?.transcriptInfo(path) ?? {}
@@ -343,6 +374,13 @@ export async function collect(
     // A call agent's last words go to the call, its questions too: only its `board ask` asks the user.
     const told: TranscriptInfo = call ? { ...info, question: '' } : info
     const attention = attentionOf(base.status, card, told)
+    const codexDecision = !!codex && attention === 'decision'
+    const permission = codexDecision && base.pane ? previews.get(base.pane) : undefined
+    const question = permission
+      ? [permission.reason || t('card.needsDecision'), permission.command].filter(Boolean).join(' · ')
+      : codexDecision && tool?.pending && isCodexExecWrapper(tool.detail ?? '')
+        ? t('card.needsDecision')
+        : askedText(attention, card, told, tool)
     const callOf = call ? callView(call, base.key) : null
     // Its own words on the board, else what its task board says it does.
     const doing = card.doing || callOf?.tasks.find(x => x.status === 'doing')?.text || ''
@@ -386,7 +424,7 @@ export async function collect(
       ...context,
       tool,
       attention,
-      question: askedText(attention, card, told, tool),
+      question,
       askSince: attention === 'ask' ? (card.askSince ?? null) : null,
       activity: info.activity ?? base.activity ?? 0,
       column: columnOf(base.status, card, told),
@@ -420,9 +458,19 @@ export async function collect(
     !!day && !!dayReg && (session === day.session || (!session && !!day.pane && p.pane_id === day.pane))
   let dayWorkspace = ''
 
-  for (const p of snap.panes) {
+  const codexThreads = await Promise.all(
+    snap.panes.map(p =>
+      isCodexItem(p) ? deps.codex.currentThread(p, p.pane_id === freshCodexPane, deps.launcherCodexRollout?.(p)) : null,
+    ),
+  )
+  for (const [index, p] of snap.panes.entries()) {
     if (!p.agent) continue
-    const session = p.agent_session?.value ?? null
+    const reported = p.agent_session?.value ?? null
+    const active = codexThreads[index]
+    const verified = typeof active === 'object' ? active : null
+    const current = verified && 'session' in verified ? verified : null
+    const rollout = verified && 'reportedRollout' in verified ? verified.reportedRollout : current?.rollout
+    const session = current && !current.continues ? current.session : reported
     if (dayPane(p, session)) {
       dayWorkspace ||= labels.get(p.workspace_id ?? '') ?? ''
       continue
@@ -434,11 +482,24 @@ export async function collect(
     add({
       key,
       session,
+      ...(current?.continues && { codexThread: current.session }),
+      ...(rollout && { codexRollout: rollout.path, ...(rollout.revision && { codexRevision: rollout.revision }) }),
+      ...(active === 'launcher-unconfirmed' && { codexRollout: null }),
+      ...(current && !current.continues && reported && { codexReported: reported }),
+      ...(active && !current && { codexUnresolved: true }),
+      ...(isCodexItem(p) && p.terminal_id && { codexTerminal: p.terminal_id }),
+      ...((p.agent === 'claude' || isCodexItem(p)) &&
+        p.terminal_id && {
+          terminalAgent: {
+            id: p.terminal_id,
+            session: p.agent_session?.source === 'board:codex-resume' ? null : reported,
+          },
+        }),
       pane: p.pane_id,
       workspace: labels.get(p.workspace_id ?? '') ?? '',
       agent: p.agent,
       name: reg?.name || p.terminal_title_stripped || p.label || p.pane_id,
-      cwd: p.cwd ?? reg?.cwd ?? '',
+      cwd: current?.cwd || (p.cwd ?? reg?.cwd ?? ''),
       status: isAgentStatus(p.agent_status) ? p.agent_status : 'unknown',
       sleeping: false,
       focused: p.pane_id === snap.focused_pane_id,
@@ -577,5 +638,6 @@ export async function collect(
     }
   }
   panesSeen(paneTerminals(snap))
+  observed?.(snap, items)
   return items
 }

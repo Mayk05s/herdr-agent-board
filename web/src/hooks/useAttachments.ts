@@ -11,6 +11,7 @@ import { useLatest } from './useLatest.ts'
 
 export interface AttachmentsApi {
   list: readonly Attachment[]
+  hasFiles(): boolean
   add(files: readonly File[]): void
   remove(id: number): void
   clear(): void
@@ -66,6 +67,7 @@ export function useAttachments(): AttachmentsApi {
     }
 
     return {
+      hasFiles: () => current.current.length > 0,
       add(files: readonly File[]): void {
         const { t, canEdit, toast } = latest.current
         // A phone's browser comes back from the photo picker or the camera before the board's live

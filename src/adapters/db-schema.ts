@@ -189,6 +189,71 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    version: 6,
+    store: 'workdesk-dialog',
+    // Workdesk dialogue metadata. Owner text is kept outside the Board inbox and thread journal.
+    sql: `
+      CREATE TABLE workdesk_dialog_bindings (
+        task_id INTEGER PRIMARY KEY,
+        assignment_id TEXT NOT NULL UNIQUE,
+        executor TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        sid TEXT NOT NULL,
+        revision INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE workdesk_dialog_cursor (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        cursor INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE workdesk_dialog_events (
+        id INTEGER PRIMARY KEY,
+        board_task_id INTEGER NOT NULL,
+        assignment_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        executor TEXT,
+        board_status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        noticed INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE INDEX workdesk_dialog_pending ON workdesk_dialog_events (board_task_id, assignment_id, id);
+    `,
+  },
+  {
+    version: 7,
+    store: 'workdesk-dialog',
+    sql: `
+      ALTER TABLE workdesk_dialog_bindings ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;
+      CREATE TABLE workdesk_dialog_receipts (
+        assignment_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        PRIMARY KEY (assignment_id, message_id)
+      ) STRICT;
+      CREATE TABLE workdesk_dialog_messages (
+        assignment_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        sealed BLOB NOT NULL,
+        PRIMARY KEY (assignment_id, message_id),
+        FOREIGN KEY (assignment_id, message_id)
+          REFERENCES workdesk_dialog_receipts (assignment_id, message_id)
+      ) STRICT;
+    `,
+  },
+  {
+    version: 8,
+    store: 'workdesk-dialog',
+    sql: `
+      CREATE TABLE workdesk_dialog_wakes (
+        id TEXT PRIMARY KEY,
+        task_id INTEGER NOT NULL,
+        assignment_id TEXT NOT NULL,
+        schedule_id TEXT,
+        released INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE INDEX workdesk_dialog_wake_pending ON workdesk_dialog_wakes (task_id) WHERE released = 0;
+    `,
+  },
 ]
 
 /** The version the code makes a file: the last step's. */

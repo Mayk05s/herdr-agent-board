@@ -20,6 +20,8 @@ export interface LiveBoard {
   canEdit: boolean
   /** Opens a new stream and snapshot, unless the page is hidden, offline or not drawn. */
   resume(): void
+  registerReloadGuard(canReload: () => boolean): () => void
+  recheckReload(): void
   /**
    * The last session the board was asked to show (a notification clicked: the stream's `reveal`
    * event), one the board had; `n` tells two asks for the same session apart.
@@ -44,6 +46,15 @@ export function useBoard(): LiveBoard {
   const [teamOpen, setTeamOpen] = useState<TeamOpen | null>(null)
   const [threadOpen, setThreadOpen] = useState<ThreadOpen | null>(null)
   const resumeRef = useRef<() => void>(() => {})
+  const reloadGuard = useRef<(() => boolean) | null>(null)
+  const reloadCheck = useRef<() => void>(() => {})
+  const registerReloadGuard = useCallback((canReload: () => boolean) => {
+    reloadGuard.current = canReload
+    return () => {
+      if (reloadGuard.current === canReload) reloadGuard.current = null
+    }
+  }, [])
+  const recheckReload = useCallback(() => reloadCheck.current(), [])
 
   useEffect(() => {
     let started = false
@@ -82,6 +93,7 @@ export function useBoard(): LiveBoard {
       readable: isBoardPayload,
       // The page's own files changed (the plugin was updated): load the new page.
       reload: () => location.reload(),
+      canReload: () => reloadGuard.current?.() ?? true,
       data(value) {
         if (!isBoardPayload(value)) return
         latest = value
@@ -94,6 +106,7 @@ export function useBoard(): LiveBoard {
         if (!value && started) setDropped(true)
       },
     })
+    reloadCheck.current = connection.recheckReload
     // On show but not drawn (a window covered by another one, #333): suspended as while hidden,
     // until a frame comes again (models/drawn.ts).
     let undrawn = false
@@ -129,6 +142,7 @@ export function useBoard(): LiveBoard {
       document.removeEventListener('visibilitychange', visibility)
       drawn?.stop()
       started = false
+      reloadCheck.current = () => {}
       clearTimeout(retry)
       suspend()
     }
@@ -137,7 +151,32 @@ export function useBoard(): LiveBoard {
   const resume = useCallback(() => resumeRef.current(), [])
   const canMutate = connected && data?.stale === false && data.lastSuccessfulRefreshAt != null
   return useMemo(
-    () => ({ data, connected, dropped, canMutate, canEdit: connected, resume, reveal, calOpen, teamOpen, threadOpen }),
-    [data, connected, dropped, canMutate, resume, reveal, calOpen, teamOpen, threadOpen],
+    () => ({
+      data,
+      connected,
+      dropped,
+      canMutate,
+      canEdit: connected,
+      resume,
+      registerReloadGuard,
+      recheckReload,
+      reveal,
+      calOpen,
+      teamOpen,
+      threadOpen,
+    }),
+    [
+      data,
+      connected,
+      dropped,
+      canMutate,
+      resume,
+      registerReloadGuard,
+      recheckReload,
+      reveal,
+      calOpen,
+      teamOpen,
+      threadOpen,
+    ],
   )
 }

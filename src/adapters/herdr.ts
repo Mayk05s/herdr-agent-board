@@ -156,23 +156,23 @@ export function asSnapshot(result: unknown): HerdrSnapshot {
   )
 }
 
-/** How long what a pane's process said stands before it is asked again. */
-const RESUMED_MS = 10_000
-const resumed = new Map<string, { terminal: string; at: number; session: Promise<string | null> }>()
+const resuming = new Map<string, Promise<string | null>>()
 
-/**
- * The session id a Codex pane was resumed with (`codex resume <id>`), read from its foreground
- * process's argv: after a resume herdr reports no session for the pane, though the rollout is the
- * same one. Asked only for a Codex pane herdr gives no session, at most once per RESUMED_MS.
- */
+/** A Codex resume SID can fill a hole in Herdr's snapshot. Share a pending process lookup
+ * only: the shell can launch a different Codex process without changing its terminal ID. */
 function resumedSession(pane: string, terminal: string): Promise<string | null> {
-  const hit = resumed.get(pane)
-  if (hit && hit.terminal === terminal && Date.now() - hit.at < RESUMED_MS) return hit.session
-  const session = paneProcesses(pane, 5000)
-    .then(procs => procs?.foreground.map(p => resumedCodexSession(p.args)).find(id => id) ?? null)
+  const key = JSON.stringify([pane, terminal])
+  const pending = resuming.get(key)
+  if (pending) return pending
+  const lookup = paneProcesses(pane, 5000)
+    .then(procs => {
+      const ids = procs?.foreground.flatMap(p => resumedCodexSession(p.args) ?? []) ?? []
+      return ids.length === 1 ? (ids[0] ?? null) : null
+    })
     .catch(() => null)
-  resumed.set(pane, { terminal, at: Date.now(), session })
-  return session
+    .finally(() => resuming.delete(key))
+  resuming.set(key, lookup)
+  return lookup
 }
 
 /** A Codex pane herdr knows no session of, given the one it was resumed with; every other pane as it is. */
@@ -205,6 +205,7 @@ export interface HerdrAgent {
   session: string | null
   /** herdr's name for the agent, if it has one. */
   name: string | null
+  terminal?: string
 }
 
 /** `value[key]` when it is a string, else null. */
@@ -220,6 +221,7 @@ export function asAgent(answer: unknown): HerdrAgent | null {
     status: isAgentStatus(agent.agent_status) ? agent.agent_status : 'unknown',
     session: stringAt(agent.agent_session, 'value'),
     name: stringAt(agent, 'name'),
+    ...(agent.agent === CODEX_AGENT && typeof agent.terminal_id === 'string' && { terminal: agent.terminal_id }),
   }
 }
 
