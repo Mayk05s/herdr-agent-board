@@ -11,9 +11,9 @@ import type { Deps } from '../../src/services/deps.ts'
 import { isolatedHome } from '../support/env.ts'
 import { until } from '../support/sandbox.ts'
 
-const coordinator = '025b4602-d3d6-43ee-b7fc-b26fc0a3e7e5'
-const worker = '01a1f5bf-3102-7e90-bef9-9662c3db0a7c'
-const other = '01a1f7ef-1bb4-7141-b631-47d57cd8da5f'
+const coordinator = '725b4602-d3d6-43ee-b7fc-b26fc0a3e7e5'
+const worker = '71a1f5bf-3102-7e90-bef9-9662c3db0a7c'
+const other = '71a1f7ef-1bb4-7141-b631-47d57cd8da5f'
 const assignment = 'a1f42fcb-9183-41d0-b577-030828bf5e88'
 const report = (id: number, revision = 1): WorkdeskEvent => ({
   id,

@@ -112,7 +112,7 @@ test('subscribe before W1 snapshot, persist v2 notices, replay gaps and duplicat
   const rework: WorkdeskEvent = { ...common(13, 1, ASSIGNMENT, 2), type: 'owner.rework', message_id: 28 }
   const reassigned: WorkdeskEvent = { ...common(19, 2, SECOND), type: 'task.assigned_board' }
   const rawTask = { ...task(1), assignment_id: ASSIGNMENT, revision: 1 }
-  fake.write({ tasks: [], dialog: { events: [] } })
+  fake.write({ tasks: [], dialog: { delivered: 0, events: [] } })
   const w1 = createWorkdeskWatcher({ cfg, items: () => [item], onChange() {}, log() {}, streamDriven: () => true })
   const dialog = createWorkdeskDialog({ cfg, items: () => [item], onChange() {}, streamDriven: () => true })
   w1.configChanged()
@@ -138,19 +138,19 @@ test('subscribe before W1 snapshot, persist v2 notices, replay gaps and duplicat
           if (calls.length === 1) {
             // Arrives before the initial MCP list is requested.
             expect(fake.calls('list_board_tasks')).toHaveLength(0)
-            fake.write({ tasks: [rawTask], dialog: { events: [] } })
+            fake.write({ tasks: [rawTask], dialog: { delivered: 0, events: [] } })
             return stream(signal, [assigned], true)
           }
           if (calls.length === 2) {
             fake.write({
               tasks: [{ ...rawTask, status: 'doing', executor: NAME, revision: 2 }],
-              dialog: { events: [ownerEvent(21, 'choice', 1), ownerEvent(28, 'rework', 2)] },
+              dialog: { delivered: 0, events: [ownerEvent(21, 'choice', 1), ownerEvent(28, 'rework', 2)] },
             })
             return stream(signal, [assigned, reply, rework])
           }
           fake.write({
             tasks: [{ ...task(2), assignment_id: SECOND, revision: 1 }],
-            dialog: { events: [ownerEvent(21, 'choice', 1), ownerEvent(28, 'rework', 2)] },
+            dialog: { delivered: 0, events: [ownerEvent(21, 'choice', 1), ownerEvent(28, 'rework', 2)] },
           })
           return stream(signal, [rework, reassigned])
         })
@@ -186,7 +186,7 @@ test('subscribe before W1 snapshot, persist v2 notices, replay gaps and duplicat
       const db = open(openDb())
       try {
         const notices = entriesOf(db, first.id).slice(1)
-        expect(notices.length).toBeGreaterThan(0)
+        expect(notices.some(entry => entry.text?.includes('обновление диалога'))).toBe(true)
         expect(entriesOf(db, replacement.id)).toHaveLength(2)
         expect(workdeskDialogStore(db, () => [item]).cursor()).toBe(28)
         expect(fake.calls('read_owner_messages')).toEqual([])
