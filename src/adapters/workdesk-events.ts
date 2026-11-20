@@ -1,4 +1,12 @@
-import { eventCursor, type WorkdeskEvent, type WorkdeskEventsConfig, workdeskEvent } from '../core/workdesk-events.ts'
+import { object } from '../core/workdesk.ts'
+import {
+  eventCursor,
+  type WorkdeskEvent,
+  type WorkdeskEventsConfig,
+  workdeskEvent,
+  workdeskEventEndpoint,
+  workdeskHttpsUrl,
+} from '../core/workdesk-events.ts'
 
 const MAX_FRAME = 64 * 1024
 const READ_TIMEOUT = 45_000
@@ -66,11 +74,32 @@ export type WorkdeskConnection = {
   close(): void
 }
 
+async function eventToken(config: WorkdeskEventsConfig, endpoint: URL): Promise<string> {
+  if (config.configFile !== undefined) {
+    let coordinator: Record<string, unknown> | null
+    try {
+      coordinator = object(await Bun.file(config.configFile).json())
+    } catch {
+      // JSON errors can quote the credential. Report only which input failed.
+      throw new Error('Invalid Workdesk coordinator configuration')
+    }
+    const origin = workdeskHttpsUrl(coordinator?.url)?.origin
+    if (origin !== endpoint.origin) throw new Error('Workdesk SSE origin differs from coordinator configuration')
+    const token = coordinator?.token
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/.test(token))
+      throw new Error('Invalid Workdesk SSE credential')
+    return token
+  }
+  const token = (await Bun.file(config.tokenFile).text()).trim()
+  if (!/^[!-~]+$/.test(token)) throw new Error('Invalid Workdesk SSE credential')
+  return token
+}
+
 export async function connectWorkdeskEvents(
   config: WorkdeskEventsConfig,
   since: number,
   signal: AbortSignal,
-  fetcher: (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch> = fetch,
+  fetcher: (input: URL, init: BunFetchRequestInit) => Promise<Response> = fetch,
 ): Promise<WorkdeskConnection> {
   const idle = new AbortController()
   let timer: ReturnType<typeof setTimeout>
@@ -80,10 +109,10 @@ export async function connectWorkdeskEvents(
     timer = setTimeout(() => idle.abort(), READ_TIMEOUT)
     timer.unref()
   }
-  const url = new URL(config.url)
+  const url = workdeskEventEndpoint(config.url)
+  if (!url) throw new Error('Invalid Workdesk SSE endpoint')
+  const token = await eventToken(config, url)
   url.searchParams.set('since', String(since))
-  const token = (await Bun.file(config.tokenFile).text()).trim()
-  if (!/^[!-~]+$/.test(token)) throw new Error('Invalid Workdesk SSE credential')
   const ca = config.caFile ? await Bun.file(config.caFile).text() : undefined
   const combined = AbortSignal.any([signal, idle.signal])
   const close = () => {

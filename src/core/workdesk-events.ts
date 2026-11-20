@@ -74,29 +74,40 @@ export function workdeskEvent(idLine: string, eventLine: string, data: string): 
   return keys === 7 ? { ...common, type } : null
 }
 
-export type WorkdeskEventsConfig = { url: string; tokenFile: string; caFile?: string; cursorEpoch?: string }
+type WorkdeskEventsCredential = { configFile: string; tokenFile?: never } | { tokenFile: string; configFile?: never }
+
+export type WorkdeskEventsConfig = WorkdeskEventsCredential & { url: string; caFile?: string; cursorEpoch?: string }
+
+export function workdeskHttpsUrl(raw: unknown): URL | null {
+  const url = typeof raw === 'string' ? URL.parse(raw) : null
+  return url?.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash ? url : null
+}
+
+export function workdeskEventEndpoint(raw: unknown): URL | null {
+  const url = workdeskHttpsUrl(raw)
+  return url?.pathname === '/workdesk/api/board/events' ? url : null
+}
 
 export function workdeskEventsConfig(source: unknown): WorkdeskEventsConfig | null {
-  const events = object(object(source)?.events)
+  const watcher = object(source)
+  const events = object(watcher?.events)
   if (!events) return null
-  const { url, tokenFile, caFile, cursorEpoch } = events
-  if (typeof url !== 'string' || typeof tokenFile !== 'string' || !isAbsolute(tokenFile)) return null
-  const endpoint = URL.parse(url)
-  if (
-    endpoint?.protocol !== 'https:' ||
-    endpoint.username ||
-    endpoint.password ||
-    endpoint.search ||
-    endpoint.hash ||
-    endpoint.pathname !== '/workdesk/api/board/events'
-  )
-    return null
+  const { url, configFile, tokenFile, caFile = watcher?.caFile, cursorEpoch } = events
+  const endpoint = workdeskEventEndpoint(url)
+  if (!endpoint) return null
+
+  let credential: WorkdeskEventsCredential
+  if (typeof configFile === 'string' && isAbsolute(configFile) && tokenFile === undefined) credential = { configFile }
+  else if (typeof tokenFile === 'string' && isAbsolute(tokenFile) && configFile === undefined)
+    credential = { tokenFile }
+  else return null
+
   if (caFile !== undefined && (typeof caFile !== 'string' || !isAbsolute(caFile))) return null
   if (cursorEpoch !== undefined && (typeof cursorEpoch !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(cursorEpoch)))
     return null
   return {
     url: endpoint.href,
-    tokenFile,
+    ...credential,
     ...(caFile !== undefined && { caFile }),
     ...(cursorEpoch !== undefined && { cursorEpoch }),
   }

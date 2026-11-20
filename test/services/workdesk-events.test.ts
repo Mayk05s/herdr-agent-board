@@ -8,7 +8,7 @@ import { connectWorkdeskEvents, workdeskFrames } from '../../src/adapters/workde
 import { normalizeConfig } from '../../src/core/categories.ts'
 import type { Item } from '../../src/core/types.ts'
 import type { OwnerEvent } from '../../src/core/workdesk-dialog.ts'
-import type { WorkdeskEvent } from '../../src/core/workdesk-events.ts'
+import { type WorkdeskEvent, workdeskEventsConfig } from '../../src/core/workdesk-events.ts'
 import { createWorkdeskDialog } from '../../src/services/workdesk-dialog.ts'
 import { runWorkdeskEvents, workdeskEventHandlers } from '../../src/services/workdesk-events.ts'
 import { createWorkdeskWatcher } from '../../src/services/workdesk-watcher.ts'
@@ -259,4 +259,72 @@ test('reset establishes a fresh buffered snapshot, old server polls, and failed 
     controller.abort()
     await running
   }
+})
+
+test('one coordinator config supplies the SSE bearer and reuses the watcher CA after rotation', async () => {
+  const dir = isolatedHome()
+  const configFile = join(dir, 'project-master.json')
+  const caFile = join(dir, 'isolated-ca.pem')
+  await Bun.write(caFile, 'synthetic CA')
+  const url = 'https://workdesk.test:9443/workdesk/api/board/events'
+  const active = workdeskEventsConfig({ caFile, events: { url, configFile } })
+  expect(active).toEqual({ url, configFile, caFile })
+  expect(workdeskEventsConfig({ caFile, events: { url, tokenFile: configFile, configFile } })).toBeNull()
+  expect(workdeskEventsConfig({ events: { url, configFile, caFile: 'relative.pem' } })).toBeNull()
+  if (!active) throw new Error('coordinator settings rejected')
+  for (const token of ['a'.repeat(43), 'b'.repeat(43)]) {
+    await Bun.write(configFile, JSON.stringify({ url: 'https://workdesk.test:9443', token, target: 'fixture' }))
+    const controller = new AbortController()
+    const connection = await connectWorkdeskEvents(active, 3, controller.signal, async (input, init) => {
+      expect(String(input)).toBe(`${url}?since=3`)
+      expect(new Headers(init?.headers).get('authorization') === `Bearer ${token}`).toBe(true)
+      expect(init?.redirect).toBe('error')
+      expect(init?.tls?.ca).toBe('synthetic CA')
+      return stream(controller.signal, [], true)
+    })
+    try {
+      expect((await connection.events.next()).done).toBe(true)
+    } finally {
+      connection.close()
+    }
+  }
+})
+
+test('the coordinator bearer stays local when the origin, route or JSON fails validation', async () => {
+  const configFile = join(isolatedHome(), 'project-master.json')
+  const url = 'https://workdesk.test:9443/workdesk/api/board/events'
+  const token = 'c'.repeat(43)
+  const signal = new AbortController().signal
+  let calls = 0
+  const fetcher = async () => {
+    calls++
+    throw new Error('unexpected fetch')
+  }
+  for (const base of [
+    'http://workdesk.test:9443',
+    'https://unrelated.test:9443',
+    'https://workdesk.test:9444',
+    'https://user@workdesk.test:9443',
+  ]) {
+    await Bun.write(configFile, JSON.stringify({ url: base, token }))
+    await expect(connectWorkdeskEvents({ url, configFile }, 0, signal, fetcher)).rejects.toThrow(
+      'Workdesk SSE origin differs from coordinator configuration',
+    )
+  }
+  await Bun.write(configFile, JSON.stringify({ url: 'https://workdesk.test:9443', token }))
+  for (const endpoint of [
+    'http://workdesk.test:9443/workdesk/api/board/events',
+    'https://workdesk.test:9443/mcp',
+    `${url}?since=7`,
+    `${url}#other`,
+  ]) {
+    expect(workdeskEventsConfig({ events: { url: endpoint, configFile } })).toBeNull()
+    await expect(connectWorkdeskEvents({ url: endpoint, configFile }, 0, signal, fetcher)).rejects.toThrow(
+      'Invalid Workdesk SSE endpoint',
+    )
+  }
+  await Bun.write(configFile, `{"url":"https://workdesk.test:9443","token":"${token}" unexpected}`)
+  const failure: unknown = await connectWorkdeskEvents({ url, configFile }, 0, signal, fetcher).catch(error => error)
+  expect(String(failure)).toBe('Error: Invalid Workdesk coordinator configuration')
+  expect(calls).toBe(0)
 })
