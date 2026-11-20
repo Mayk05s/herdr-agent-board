@@ -1,5 +1,5 @@
 import { openDb } from '../adapters/db.ts'
-import { type ProtectedDialogSink, workdeskDialogStore } from '../adapters/workdesk-dialog-store.ts'
+import { workdeskDialogStore } from '../adapters/workdesk-dialog-store.ts'
 import { WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
 import type { Config, Item } from '../core/types.ts'
 import { threadsConfig } from '../core/work-threads.ts'
@@ -10,8 +10,6 @@ import {
   type DialogStatus,
   OWNER_EVENT_LIMIT,
   ownerEvents,
-  ownerMessages,
-  validCursor,
   type WorkdeskDialogConfig,
   workdeskDialogConfig,
 } from '../core/workdesk-dialog.ts'
@@ -20,10 +18,16 @@ type Options = {
   cfg: Config
   items(): readonly Item[] | null
   onChange(): void
-  sink?: ProtectedDialogSink
 }
 
-const idle = (): DialogStatus => ({ pending: null, more: null, polledAt: null, problem: null, blocked: {} })
+const idle = (): DialogStatus => ({
+  delivery: 'awaiting_recipient',
+  pending: null,
+  more: null,
+  polledAt: null,
+  problem: null,
+  blocked: {},
+})
 const MAX_DISCOVERY_PAGES = 10
 
 function toolProblem(error: unknown, fallback: DialogProblem): DialogProblem {
@@ -34,7 +38,7 @@ function toolProblem(error: unknown, fallback: DialogProblem): DialogProblem {
   return fallback
 }
 
-export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
+export function createWorkdeskDialog({ cfg, items, onChange }: Options) {
   let status: DialogStatus | null = null
   let config: WorkdeskDialogConfig | null = null
   let signature = ''
@@ -118,58 +122,10 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
               }
               if ('problem' in resolved) return resolved.problem
               const { binding } = resolved
-              const notice = store.notice(group, binding, Date.now())
-              if (notice) return notice
-              if (!sink?.permits(binding)) return 'protected_delivery_unavailable'
-
-              const { task_id, assignment_id, executor, acknowledged } = binding
-              const key = { task_id, assignment_id, executor }
-              const cursor = store.cursor()
-              let data: unknown
-              try {
-                data = await mcp.call('read_owner_messages', { ...key, after: acknowledged })
-              } catch (error) {
-                return toolProblem(error, 'read')
-              }
-              signal.throwIfAborted()
-              if (!threadsConfig(cfg.threads)) return 'threads_disabled'
-              const page = ownerMessages(data, binding, acknowledged)
-              if (!page) return 'invalid_page'
-              // Only deliver a prefix already covered by the durable discovery cursor.
-              const messages = page.entries.filter(message => message.id <= cursor)
-              const through = messages.at(-1)?.id
-              if (through === undefined) return 'invalid_page'
-              try {
-                const problem = store.stage(group, binding, page.revision, messages, through, sink)
-                if (problem) return problem
-              } catch {
-                return 'protected_delivery_failed'
-              }
-
-              const authority = store.current(group, binding)
-              if ('problem' in authority) return authority.problem
-              if (!sink.permits(authority.binding)) return 'protected_delivery_unavailable'
-              signal.throwIfAborted()
-              try {
-                const receipt = object(await mcp.call('ack_owner_messages', { ...key, through }))
-                if (
-                  receipt?.task_id !== task_id ||
-                  receipt.assignment_id !== assignment_id ||
-                  !validCursor(receipt.delivered_through) ||
-                  receipt.delivered_through < through ||
-                  typeof receipt.replayed !== 'boolean'
-                )
-                  return 'ack'
-              } catch (error) {
-                return toolProblem(error, 'ack')
-              }
-              // Once the request has been sent a remote ACK may have happened even if this
-              // process dies. The next read uses the local prefix and replays its receipts.
-              store.confirm(binding, through)
-              return null
+              return store.notice(group, binding, Date.now()) ?? 'protected_delivery_unavailable'
             }
 
-            const pending = store.pending()
+            const pending = store.pending(active.onlyTaskId)
             if (next.problem === 'role_denied') {
               next.pending = pending.reduce((count, group) => count + group.count, 0)
               return
@@ -179,7 +135,7 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
               const problem = await deliver(group)
               if (problem) next.blocked[problem] = (next.blocked[problem] ?? 0) + group.count
             }
-            next.pending = store.pending().reduce((count, group) => count + group.count, 0)
+            next.pending = store.pending(active.onlyTaskId).reduce((count, group) => count + group.count, 0)
           } finally {
             db.close()
           }
@@ -214,11 +170,11 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
   return {
     view: () => status,
     configChanged(): void {
-      const next = JSON.stringify(cfg.workdeskDialog ?? null)
+      const next = JSON.stringify(cfg.workdeskDialog ? [cfg.workdeskDialog, cfg.workdesk] : null)
       if (signature === next) return
       signature = next
       current?.abort()
-      config = workdeskDialogConfig(cfg.workdeskDialog)
+      config = workdeskDialogConfig(cfg.workdeskDialog, cfg.workdesk)
       if (config) publish(idle())
       else if (cfg.workdeskDialog == null || cfg.workdeskDialog === false) {
         if (status) publish(null)

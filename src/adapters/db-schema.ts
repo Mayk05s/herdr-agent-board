@@ -192,8 +192,7 @@ export const MIGRATIONS: readonly Migration[] = [
   {
     version: 6,
     store: 'workdesk-dialog',
-    // Workdesk dialogue v2. The inbox and receipts contain metadata only. Text needs a
-    // separate authenticated delivery sink and never goes in the work thread or journal.
+    // Workdesk dialogue metadata. Owner text is kept outside the Board inbox and thread journal.
     sql: `
       CREATE TABLE workdesk_dialog_bindings (
         task_id INTEGER PRIMARY KEY,
@@ -201,8 +200,7 @@ export const MIGRATIONS: readonly Migration[] = [
         executor TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         sid TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        acknowledged INTEGER NOT NULL DEFAULT 0
+        revision INTEGER NOT NULL
       ) STRICT;
       CREATE TABLE workdesk_dialog_cursor (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -220,11 +218,6 @@ export const MIGRATIONS: readonly Migration[] = [
         noticed INTEGER NOT NULL DEFAULT 0
       ) STRICT;
       CREATE INDEX workdesk_dialog_pending ON workdesk_dialog_events (board_task_id, assignment_id, id);
-      CREATE TABLE workdesk_dialog_receipts (
-        assignment_id TEXT NOT NULL,
-        message_id INTEGER NOT NULL,
-        PRIMARY KEY (assignment_id, message_id)
-      ) STRICT;
     `,
   },
 ]

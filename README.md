@@ -2285,33 +2285,26 @@ The explicit spawn flag sets coverage to incomplete until confirmed again. Only 
 and Codex sessions in Herdr's working or blocked state count. Missing or incomplete coverage
 is shown as unknown in Workdesk. A complete roster with no active workers shows zero.
 
-### Workdesk owner dialogue (local staging)
+### Workdesk owner dialogue metadata
 
-The optional `workdeskDialog` entry uses the same `executable`, `args`, `caFile` and
-`intervalSec` settings as the Workdesk adapter. Use a trusted local adapter for the same
-Workdesk instance with a separate board-role connection file. Keep the credential in
-that file's existing private storage. Leave the setting absent or false on running
-installations while authenticated agent delivery is pending.
+Set `workdeskDialog` to an object to enable the metadata poller. It uses the existing
+`workdesk` executable, arguments and CA file. Set `workdeskDialog.intervalSec` to change
+the dialogue poll interval (60 seconds by default). The W1 interval, project routing
+and topology continue to use `workdesk`. Optional `workdeskDialog.onlyTaskId` limits
+local notices to one task while keeping other discovered metadata for later.
 
-The dialog poller waits for `list_owner_events`, `read_owner_messages` and
-`ack_owner_messages` in the adapter's tool catalogue. It keeps only event metadata in the
-durable inbox and continues its discovery separately from the assignment poll. A v2 claim
-records the assignment UUID, Board thread UUID and native session ID in one transaction.
-An earlier claim without this identity waits with `assignment_unverified`. An operator
-can pin a verified legacy tuple in `workdeskDialog.legacyBindings`, an array of objects
-with `taskId`, `assignmentId`, `threadId` and `sessionId`. The watcher confirms the
-current claim through the board-role `list_board_tasks` and the original local handoff
-through the existing thread and its native SID. It leaves the event pending when the
-card is absent from the active list, the source differs, or the session is unavailable.
-A matching thread receives a generic update notice. `GET /api/board` shows `workdeskDialog.pending`,
-`more` (the source has further pages), `polledAt`, `problem` and per-reason `blocked` counts.
+The adapter must advertise `list_owner_events`, `read_owner_messages` and
+`ack_owner_messages`. This stage only calls the event index and, for a pinned older
+handoff, the normal assignment list. An older handoff can have a full pin in
+`workdeskDialog.legacyBindings`, with `taskId`, `assignmentId`, `threadId` and
+`sessionId`. The watcher checks the assignment, original Board thread and current
+native assignee. A bound local thread receives a generic notice. Shared and mirrored
+threads receive no notice.
 
-Owner text and acknowledgments require a durable delivery sink with authenticated
-agent access for the current assignment. The server currently leaves those events
-pending with `protected_delivery_unavailable`. An observed Herdr session ID identifies
-the intended recipient, and agent access still requires a credential bound to the
-calling session. The normal thread view contains the generic notice. This change adds
-a database migration for the inbox, cursors, receipts and bindings.
+`GET /api/board` shows `workdeskDialog.delivery: "awaiting_recipient"`,
+`pending`, `more`, `polledAt`, and per-reason `blocked` counts. Event metadata and
+its cursor survive a restart. This stage keeps owner content in Workdesk and leaves
+all delivery acknowledgments pending.
 
 ## Secrets
 

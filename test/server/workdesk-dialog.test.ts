@@ -13,7 +13,7 @@ test('Workdesk dialog discovery is independent of W1 and publishes only safe wai
   const assignment = 'a1f42fcb-9183-41d0-b577-030828bf5e88'
   const privateText = 'synthetic owner dialogue: never visible'
   fake.write({
-    tasks: [task(7)],
+    tasks: [],
     dialog: {
       assignment,
       task: 7,
@@ -35,7 +35,7 @@ test('Workdesk dialog discovery is independent of W1 and publishes only safe wai
       messages: [],
     },
   })
-  const { url } = await serveBoard(box, { threads: true, workdeskDialog: fake.config })
+  const { url } = await serveBoard(box, { threads: true, workdesk: fake.config, workdeskDialog: { onlyTaskId: 7 } })
   const body = async () => (await (await fetch(`${url}/api/board`)).json()) as BoardPayload
   expect((await body()).workdeskDialog).toBeDefined()
   let payload = await body()
@@ -44,6 +44,7 @@ test('Workdesk dialog discovery is independent of W1 and publishes only safe wai
     payload = await body()
   }
   expect(payload.workdeskDialog).toEqual({
+    delivery: 'awaiting_recipient',
     pending: 1,
     more: false,
     polledAt: expect.any(Number),
@@ -52,11 +53,11 @@ test('Workdesk dialog discovery is independent of W1 and publishes only safe wai
   })
   expect(JSON.stringify(payload)).not.toContain(privateText)
   expect(JSON.stringify(payload)).not.toContain(assignment)
-  expect(payload.workdesk).toBeUndefined()
+  expect(payload.workdesk).toBeDefined()
   expect(
     fake
       .calls()
-      .filter(call => call.method === 'tools/call')
+      .filter(call => call.method === 'tools/call' && call.params.name?.includes('owner_'))
       .map(call => call.params.name),
   ).toEqual(['list_owner_events'])
   const forged = await fetch(`${url}/api/workdesk/owner-messages?session=forged-SID&task_id=7`, {
@@ -114,7 +115,7 @@ test('ordinary Web and CLI thread views only expose a generic update, even with 
   const { url } = await serveBoard(box, {
     threads: true,
     workdesk: fake.config,
-    workdeskDialog: { ...fake.config, intervalSec: 1 },
+    workdeskDialog: { intervalSec: 1 },
   })
   const readStatus = async () => ((await (await fetch(`${url}/api/board`)).json()) as BoardPayload).workdeskDialog
   let status = await readStatus()

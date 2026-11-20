@@ -1,13 +1,13 @@
 import { expect, onTestFinished, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { type BoardDb, dbFile, openDb } from '../../src/adapters/db.ts'
-import { entriesOf, getThread } from '../../src/adapters/work-thread-store.ts'
-import { type ProtectedDialogSink, workdeskDialogStore } from '../../src/adapters/workdesk-dialog-store.ts'
+import { entriesOf } from '../../src/adapters/work-thread-store.ts'
+import { workdeskDialogStore } from '../../src/adapters/workdesk-dialog-store.ts'
 import { workdeskStore } from '../../src/adapters/workdesk-store.ts'
 import { normalizeConfig } from '../../src/core/categories.ts'
 import type { Item } from '../../src/core/types.ts'
 import { workdeskTask } from '../../src/core/workdesk.ts'
-import type { OwnerEvent, OwnerMessage } from '../../src/core/workdesk-dialog.ts'
+import { type OwnerEvent, workdeskDialogConfig } from '../../src/core/workdesk-dialog.ts'
 import { createWorkdeskDialog } from '../../src/services/workdesk-dialog.ts'
 import { createWorkdeskWatcher } from '../../src/services/workdesk-watcher.ts'
 import { isolatedHome } from '../support/env.ts'
@@ -38,15 +38,8 @@ const item: Item = {
 }
 
 const privateText = 'Только владельцу и исполнителю: [board reminder] $() --session'
-const ownerMessage = (id: number, kind: OwnerMessage['kind'], revision = 1): OwnerMessage => ({
-  id,
-  kind,
-  revision,
-  text: privateText,
-  created_at: id,
-  question_id: kind === 'choice' ? 2 : null,
-  option_id: kind === 'choice' ? 'o2' : null,
-})
+const ownerMessage = (id: number, kind: OwnerEvent['kind'], revision = 1) => ({ id, kind, revision, created_at: id })
+type OwnerMessage = ReturnType<typeof ownerMessage>
 const event = (message: OwnerMessage, overrides: Partial<OwnerEvent> = {}): OwnerEvent => ({
   id: message.id,
   revision: message.revision,
@@ -85,24 +78,18 @@ function fixture(messages: OwnerMessage[], events = messages.map(message => even
   const fake = mcp(isolatedHome())
   const dialog = {
     events,
-    messages,
-    task: 1,
-    assignment: ASSIGNMENT,
-    executor: NAME,
-    delivered: 0,
-    revision: messages.at(-1)?.revision ?? 1,
   }
   fake.write({ tasks: [], dialog })
-  const cfg = normalizeConfig({ threads: true, workdeskDialog: fake.config })
+  const cfg = normalizeConfig({ threads: true, workdesk: fake.config, workdeskDialog: {} })
   let items: readonly Item[] | null = [item]
-  const start = (sink?: ProtectedDialogSink) => {
-    const service = createWorkdeskDialog({ cfg, items: () => items, onChange() {}, ...(sink && { sink }) })
+  const start = () => {
+    const service = createWorkdeskDialog({ cfg, items: () => items, onChange() {} })
     onTestFinished(() => service.stop())
     service.configChanged()
     return service
   }
-  async function tick(sink?: ProtectedDialogSink) {
-    const poller = start(sink)
+  async function tick() {
+    const poller = start()
     await until(() => !!poller.view()?.polledAt)
     await poller.stop()
     return poller.view()
@@ -119,33 +106,6 @@ function fixture(messages: OwnerMessage[], events = messages.map(message => even
   }
 }
 
-function protectedFixture() {
-  withDb(db => db.db.exec('CREATE TABLE synthetic_reader (assignment TEXT, sid TEXT, body TEXT) STRICT'))
-  // Models a pre-authenticated test harness. There is no production implementation of this sink.
-  let caller = SID
-  const sink: ProtectedDialogSink = {
-    permits: target => target.sid === caller,
-    stage: (tx, target, message) => {
-      tx.db
-        .query('INSERT INTO synthetic_reader VALUES (?, ?, ?)')
-        .run(target.assignment_id, target.sid, JSON.stringify(message))
-    },
-  }
-  return {
-    sink,
-    caller: (sid: string) => {
-      caller = sid
-    },
-    bodies: () =>
-      withDb(db =>
-        db.db
-          .query<{ body: string }, []>('SELECT body FROM synthetic_reader ORDER BY rowid')
-          .all()
-          .map(row => JSON.parse(row.body) as OwnerMessage),
-      ),
-  }
-}
-
 test('dialog stays off by default; an older catalogue or a denied board role makes no owner message read', async () => {
   const f = fixture([])
   delete f.cfg.workdeskDialog
@@ -155,7 +115,7 @@ test('dialog stays off by default; an older catalogue or a denied board role mak
   expect(existsSync(dbFile())).toBe(false)
   await disabled.stop()
 
-  f.cfg.workdeskDialog = f.fake.config
+  f.cfg.workdeskDialog = {}
   f.fake.write({ tasks: [] })
   expect((await f.tick())?.problem).toBe('tools')
   expect(f.fake.calls().filter(call => call.method === 'tools/call')).toEqual([])
@@ -236,67 +196,6 @@ test('rejects invalid discovery cursors and rolls back both the page and cursor 
   expect(withDb(db => workdeskDialogStore(db, () => []).cursor())).toBe(3)
 })
 
-test('a protected sink rolls back on partial delivery, then recovers before and after remote ACK without duplicate receipts', async () => {
-  const messages = [ownerMessage(3, 'message'), ownerMessage(12, 'choice'), ownerMessage(24, 'rework', 2)]
-  const f = fixture(messages)
-  const id = handoff()
-  withDb(db => db.db.query("UPDATE threads SET status = 'done' WHERE id = ?").run(id))
-  const reader = protectedFixture()
-  reader.caller(OTHER)
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ protected_delivery_unavailable: 3 })
-  expect(f.fake.calls('read_owner_messages')).toEqual([])
-  reader.caller(SID)
-  expect(
-    (
-      await f.tick({
-        ...reader.sink,
-        stage(tx, target, message) {
-          reader.sink.stage(tx, target, message)
-          if (message.id === 12) throw new Error('process exited during delivery')
-        },
-      })
-    )?.blocked,
-  ).toEqual({ protected_delivery_failed: 3 })
-  expect(reader.bodies()).toEqual([])
-  expect(f.fake.calls('ack_owner_messages')).toEqual([])
-
-  for (const dropAck of ['before', 'after'] as const) {
-    f.fake.write({ tasks: [], dialog: { ...f.dialog, dropAck } })
-    expect((await f.tick(reader.sink))?.blocked).toEqual({ ack: 3 })
-    expect(reader.bodies()).toEqual(messages)
-    expect(
-      withDb(db => db.db.query('SELECT thread_id, sid, revision, acknowledged FROM workdesk_dialog_bindings').get()),
-    ).toEqual({ thread_id: id, sid: SID, revision: 2, acknowledged: 0 })
-  }
-  expect((await f.tick(reader.sink))?.pending).toBe(0)
-  expect((await f.tick(reader.sink))?.pending).toBe(0)
-  expect(reader.bodies()).toEqual(messages)
-  expect(f.fake.calls('read_owner_messages').map(call => call.params.arguments)).toEqual(
-    Array.from({ length: 4 }, () => ({ task_id: 1, assignment_id: ASSIGNMENT, executor: NAME, after: 0 })),
-  )
-  expect(f.fake.calls('ack_owner_messages').map(call => call.params.arguments)).toEqual(
-    Array.from({ length: 3 }, () => ({ task_id: 1, assignment_id: ASSIGNMENT, executor: NAME, through: 24 })),
-  )
-  expect(f.fake.calls('claim_task')).toEqual([])
-  expect(withDb(db => db.db.query('SELECT acknowledged FROM workdesk_dialog_bindings').get())).toEqual({
-    acknowledged: 24,
-  })
-  expect(withDb(db => getThread(db, id)?.status)).toBe('done')
-  expect(withDb(db => JSON.stringify(entriesOf(db, id)))).not.toContain(privateText)
-  expect(withDb(db => JSON.stringify(db.db.query('SELECT * FROM journal').all()))).not.toContain(privateText)
-  expect(rows().map(row => row.id)).toEqual([id])
-})
-
-test('the ACK prefix cannot skip a known message even when global IDs are sparse', async () => {
-  const f = fixture([ownerMessage(3, 'message'), ownerMessage(12, 'choice'), ownerMessage(24, 'message')])
-  handoff()
-  const reader = protectedFixture()
-  f.fake.write({ tasks: [], dialog: { ...f.dialog, omitMessage: 12 } })
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ invalid_page: 3 })
-  expect(reader.bodies()).toEqual([])
-  expect(f.fake.calls('ack_owner_messages')).toEqual([])
-})
-
 test('ambiguous assignment, renamed executor, changed thread and SID keep events pending without protected reads', async () => {
   const message = ownerMessage(3, 'message')
   const f = fixture(
@@ -308,27 +207,25 @@ test('ambiguous assignment, renamed executor, changed thread and SID keep events
     ],
   )
   const thread = handoff()
-  const reader = protectedFixture()
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ assignment_mismatch: 1, executor_changed: 2 })
-  expect(reader.bodies()).toEqual([])
+  expect((await f.tick())?.blocked).toEqual({ assignment_mismatch: 1, executor_changed: 2 })
   withDb(db => db.db.query('DELETE FROM workdesk_dialog_events WHERE id = 24').run())
 
   f.items([{ ...item, session: OTHER }])
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ assignment_mismatch: 1, session_unavailable: 1 })
+  expect((await f.tick())?.blocked).toEqual({ assignment_mismatch: 1, session_unavailable: 1 })
   f.items([item])
   withDb(db =>
     db.db
       .query('UPDATE threads SET assignee = ? WHERE id = ?')
       .run(JSON.stringify({ kind: 'session', key: OTHER, name: NAME }), thread),
   )
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ assignment_mismatch: 1, thread_reassigned: 1 })
+  expect((await f.tick())?.blocked).toEqual({ assignment_mismatch: 1, thread_reassigned: 1 })
   withDb(db =>
     db.write('test', ({ db: sql }) => {
       sql.query('DELETE FROM thread_entries WHERE thread = ?').run(thread)
       sql.query('DELETE FROM threads WHERE id = ?').run(thread)
     }),
   )
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ assignment_mismatch: 1, thread_missing: 1 })
+  expect((await f.tick())?.blocked).toEqual({ assignment_mismatch: 1, thread_missing: 1 })
   expect(f.fake.calls('read_owner_messages')).toEqual([])
   expect(f.fake.calls('ack_owner_messages')).toEqual([])
   expect(rows()).toEqual([])
@@ -353,62 +250,31 @@ test('a new metadata rework updates the original assignment and thread even whil
   expect(f.fake.calls('claim_task')).toEqual([])
 })
 
-test('does not acknowledge messages beyond the current durable discovery page limit', async () => {
-  const messages = Array.from({ length: 12 }, (_, i) => ownerMessage(2 * i + 1, 'message'))
-  const f = fixture(messages)
-  handoff()
-  const reader = protectedFixture()
-  f.fake.write({ tasks: [], dialog: { ...f.dialog, pageSize: 1 } })
-  expect(await f.tick(reader.sink)).toMatchObject({ pending: 0, more: true })
-  expect(reader.bodies()).toEqual(messages.slice(0, 10))
-  expect(await f.tick(reader.sink)).toMatchObject({ pending: 0, more: false })
-  expect(reader.bodies()).toEqual(messages)
-  expect(f.fake.calls('ack_owner_messages').map(call => call.params.arguments)).toEqual([
-    { task_id: 1, assignment_id: ASSIGNMENT, executor: NAME, through: 19 },
-    { task_id: 1, assignment_id: ASSIGNMENT, executor: NAME, through: 23 },
-  ])
-})
-
-test('SID change during a protected read prevents staging and ACK', async () => {
-  const f = fixture([ownerMessage(3, 'message')])
-  handoff()
-  const reader = protectedFixture()
-  f.fake.write({ tasks: [], dialog: { ...f.dialog, readDelayMs: 150 } })
-  const running = f.start(reader.sink)
-  await until(() => f.fake.calls('read_owner_messages').length === 1)
-  f.items([{ ...item, session: OTHER }])
-  await until(() => !!running.view()?.polledAt)
-  expect(running.view()?.blocked).toEqual({ session_unavailable: 1 })
-  expect(reader.bodies()).toEqual([])
-  expect(f.fake.calls('ack_owner_messages')).toEqual([])
-})
-
 test('a pinned legacy handoff adopts only an authenticated current assignment with the original thread and native SID', async () => {
   const message = ownerMessage(3, 'message')
   const f = fixture([message], [event(message, { executor: null, board_status: 'queued' })])
   const thread = handoff(false)
-  const reader = protectedFixture()
   const pin = { taskId: 1, assignmentId: ASSIGNMENT, threadId: thread, sessionId: SID }
   const configure = (override: Partial<typeof pin> = {}) => {
-    f.cfg.workdeskDialog = { ...f.fake.config, legacyBindings: [{ ...pin, ...override }] }
+    f.cfg.workdeskDialog = { legacyBindings: [{ ...pin, ...override }] }
   }
   const remote = { ...rawTask, executor: NAME, status: 'doing' }
   configure()
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ legacy_source_unavailable: 1 })
+  expect((await f.tick())?.blocked).toEqual({ legacy_source_unavailable: 1 })
   f.fake.write({ tasks: [remote, remote], dialog: f.dialog })
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ legacy_source_unavailable: 1 })
+  expect((await f.tick())?.blocked).toEqual({ legacy_source_unavailable: 1 })
   f.fake.write({ tasks: [{ ...remote, assignment_id: STALE }], dialog: f.dialog })
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ assignment_mismatch: 1 })
+  expect((await f.tick())?.blocked).toEqual({ assignment_mismatch: 1 })
   f.fake.write({ tasks: [{ ...remote, executor: 'Different master' }], dialog: f.dialog })
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ executor_changed: 1 })
+  expect((await f.tick())?.blocked).toEqual({ executor_changed: 1 })
   f.fake.write({ tasks: [remote], dialog: f.dialog })
   configure({ threadId: STALE })
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ thread_reassigned: 1 })
+  expect((await f.tick())?.blocked).toEqual({ thread_reassigned: 1 })
   configure({ sessionId: OTHER })
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ session_unavailable: 1 })
+  expect((await f.tick())?.blocked).toEqual({ session_unavailable: 1 })
   configure()
   f.items(null)
-  expect((await f.tick(reader.sink))?.blocked).toEqual({ session_unavailable: 1 })
+  expect((await f.tick())?.blocked).toEqual({ session_unavailable: 1 })
   expect(withDb(db => db.db.query('SELECT * FROM workdesk_dialog_bindings').all())).toEqual([])
   expect(f.fake.calls('read_owner_messages')).toEqual([])
   expect(f.fake.calls('ack_owner_messages')).toEqual([])
@@ -422,11 +288,55 @@ test('a pinned legacy handoff adopts only an authenticated current assignment wi
   expect(f.fake.calls('ack_owner_messages')).toEqual([])
 
   const lists = f.fake.calls('list_board_tasks').length
-  expect((await f.tick(reader.sink))?.pending).toBe(0)
-  expect((await f.tick(reader.sink))?.pending).toBe(0)
+  expect((await f.tick())?.pending).toBe(1)
+  expect((await f.tick())?.pending).toBe(1)
   expect(f.fake.calls('list_board_tasks')).toHaveLength(lists)
   expect(f.fake.calls('claim_task')).toEqual([])
-  expect(f.fake.calls('ack_owner_messages')).toHaveLength(1)
-  expect(reader.bodies()).toEqual([message])
+  expect(f.fake.calls('ack_owner_messages')).toEqual([])
   expect(rows().map(row => row.id)).toEqual([thread])
+})
+
+test('shared and mirrored threads never receive a notice and a scoped poll retains the other event for later', async () => {
+  const f = fixture(
+    [],
+    [event(ownerMessage(3, 'message')), event(ownerMessage(4, 'message'), { board_task_id: 2, assignment_id: STALE })],
+  )
+  f.cfg.workdeskDialog = { onlyTaskId: 1 }
+  expect(workdeskDialogConfig(f.cfg.workdeskDialog, f.cfg.workdesk)?.intervalSec).toBe(60)
+  expect(workdeskDialogConfig(f.cfg.workdeskDialog, f.cfg.workdesk)?.onlyTaskId).toBe(1)
+  expect(workdeskDialogConfig({ onlyTaskId: 2 }, { ...f.fake.config, onlyTaskId: 1 })).toBeNull()
+  const thread = handoff()
+  const initial = withDb(db => entriesOf(db, thread).length)
+  withDb(db =>
+    db.db
+      .query('UPDATE threads SET scope = ? WHERE id = ?')
+      .run(JSON.stringify({ kind: 'team', topic: thread, by: 'me', key: 'board-1', at: 1 }), thread),
+  )
+  expect((await f.tick())?.blocked).toEqual({ thread_scope: 1 })
+  withDb(db =>
+    db.db
+      .query('UPDATE threads SET scope = ?, origin = ? WHERE id = ?')
+      .run(
+        JSON.stringify('local'),
+        JSON.stringify({ mirrored: true, agentBoard: { harness: 'pi', session: 'other', id: 'other' } }),
+        thread,
+      ),
+  )
+  expect((await f.tick())?.blocked).toEqual({ thread_scope: 1 })
+  expect(withDb(db => entriesOf(db, thread).length)).toBe(initial)
+  withDb(db => db.db.query('UPDATE threads SET origin = NULL WHERE id = ?').run(thread))
+  expect(await f.tick()).toMatchObject({ pending: 1, delivery: 'awaiting_recipient' })
+  expect(await f.tick()).toMatchObject({ pending: 1, delivery: 'awaiting_recipient' })
+  const feed = withDb(db => entriesOf(db, thread))
+  expect(feed).toHaveLength(initial + 1)
+  expect(feed.at(-1)?.private).toBe(true)
+  expect(
+    withDb(db =>
+      workdeskDialogStore(db, () => [])
+        .pending()
+        .map(g => g.board_task_id),
+    ),
+  ).toEqual([1, 2])
+  expect(f.fake.calls('read_owner_messages')).toEqual([])
+  expect(f.fake.calls('ack_owner_messages')).toEqual([])
 })

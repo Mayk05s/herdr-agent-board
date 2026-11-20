@@ -1,31 +1,16 @@
+import { isMirrored } from '../core/thread-import.ts'
 import type { Item } from '../core/types.ts'
 import type { WorkdeskTask } from '../core/workdesk.ts'
-import type {
-  DialogProblem,
-  DialogTarget,
-  LegacyDialogBinding,
-  OwnerEvent,
-  OwnerMessage,
-} from '../core/workdesk-dialog.ts'
+import type { DialogProblem, DialogTarget, LegacyDialogBinding, OwnerEvent } from '../core/workdesk-dialog.ts'
 import { workdeskAgent } from '../core/workdesk-topology.ts'
-import type { BoardDb, Tx } from './db.ts'
+import type { BoardDb } from './db.ts'
 import { appendEntry, getThread } from './work-thread-store.ts'
 import { workdeskHandoffReader } from './workdesk-store.ts'
 
 type Handoff = NonNullable<ReturnType<ReturnType<typeof workdeskHandoffReader>>>
-type Binding = DialogTarget & { revision: number; acknowledged: number }
+type Binding = DialogTarget & { revision: number }
 type Pending = { board_task_id: number; assignment_id: string; count: number }
 type Resolved = { binding: Binding } | { problem: DialogProblem }
-
-/**
- * Only a protected reader can supply this, after establishing its durable recipient and
- * authenticated read path. It must stage synchronously using tx, never through the common
- * work thread. The board server does not yet have a sink with those guarantees.
- */
-export interface ProtectedDialogSink {
-  permits(target: DialogTarget): boolean
-  stage(tx: Tx, target: DialogTarget, message: OwnerMessage): void
-}
 
 export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | null) {
   const cursor = () =>
@@ -40,9 +25,9 @@ export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | 
   function localTarget(handoff: Handoff, target: DialogTarget): DialogProblem | null {
     const thread = getThread(db, target.thread_id)
     if (!thread) return 'thread_missing'
+    if (thread.scope !== 'local' || isMirrored(thread)) return 'thread_scope'
     if (
       thread.id !== handoff.thread_id ||
-      thread.scope !== 'local' ||
       thread.assignee?.kind !== 'session' ||
       thread.assignee.key !== handoff.session_key ||
       thread.assignee.name !== target.executor
@@ -111,14 +96,15 @@ export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | 
         return true
       })
     },
-    pending(): Pending[] {
+    pending(onlyTaskId?: number): Pending[] {
       return db.db
-        .query<Pending, []>(`
-        SELECT board_task_id, assignment_id, COUNT(*) AS count
-        FROM workdesk_dialog_events
-        GROUP BY board_task_id, assignment_id ORDER BY MIN(id)
-      `)
-        .all()
+        .query<Pending, [number | null]>(`
+          SELECT board_task_id, assignment_id, COUNT(*) AS count
+          FROM workdesk_dialog_events
+          WHERE (?1 IS NULL OR board_task_id = ?1)
+          GROUP BY board_task_id, assignment_id ORDER BY MIN(id)
+        `)
+        .all(onlyTaskId ?? null)
     },
     adoptLegacy(group: Pending, pin: LegacyDialogBinding, task: WorkdeskTask): Resolved {
       return db.write('workdesk-dialog', ({ db: sql }) => {
@@ -143,7 +129,6 @@ export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | 
           thread_id: pin.threadId,
           sid: pin.sessionId,
           revision: task.assignment.revision,
-          acknowledged: 0,
         }
         const problem = localTarget(handoff, binding)
         if (problem) return { problem }
@@ -165,7 +150,6 @@ export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | 
       })
     },
     resolve,
-    current,
     notice(group: Pending, expected: Binding, now: number): DialogProblem | null {
       return db.write('workdesk-dialog', tx => {
         const resolved = current(group, expected)
@@ -190,56 +174,10 @@ export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | 
             type: 'note',
             author: { kind: 'owner' },
             at: now,
-            text: 'В Workdesk появилось обновление диалога по этой карточке.',
+            text: 'В Workdesk появилось обновление диалога по этой карточке. Доставка ответа ожидает подключения получателя.',
+            private: true,
           })
         return null
-      })
-    },
-    stage(
-      group: Pending,
-      expected: Binding,
-      revision: number,
-      messages: OwnerMessage[],
-      through: number,
-      sink: ProtectedDialogSink,
-    ): DialogProblem | null {
-      return db.write('workdesk-dialog', tx => {
-        const resolved = current(group, expected)
-        if ('problem' in resolved) return resolved.problem
-        const { binding } = resolved
-        if (binding.acknowledged !== expected.acknowledged || binding.revision > revision) return 'invalid_page'
-        if (!sink.permits(binding)) return 'protected_delivery_unavailable'
-        const known = tx.db
-          .query<OwnerEvent, [number, string, number, number]>(`
-          SELECT * FROM workdesk_dialog_events
-          WHERE board_task_id = ? AND assignment_id = ? AND id > ? AND id <= ?
-        `)
-          .all(binding.task_id, binding.assignment_id, binding.acknowledged, through)
-        const page = new Map(messages.map(message => [message.id, message]))
-        if (
-          known.some(event => {
-            const message = page.get(event.id)
-            return message?.kind !== event.kind || message.revision !== event.revision
-          })
-        )
-          return 'invalid_page'
-        const receipt = tx.db.query('INSERT OR IGNORE INTO workdesk_dialog_receipts VALUES (?, ?)')
-        for (const message of messages) {
-          if (receipt.run(binding.assignment_id, message.id).changes) sink.stage(tx, binding, message)
-        }
-        tx.db.query('UPDATE workdesk_dialog_bindings SET revision = ? WHERE task_id = ?').run(revision, binding.task_id)
-        return null
-      })
-    },
-    confirm(expected: Binding, through: number): void {
-      db.write('workdesk-dialog', ({ db: sql }) => {
-        sql
-          .query(`UPDATE workdesk_dialog_bindings SET acknowledged = MAX(acknowledged, ?)
-                   WHERE task_id = ? AND assignment_id = ?`)
-          .run(through, expected.task_id, expected.assignment_id)
-        sql
-          .query('DELETE FROM workdesk_dialog_events WHERE board_task_id = ? AND assignment_id = ? AND id <= ?')
-          .run(expected.task_id, expected.assignment_id, through)
       })
     },
   }
