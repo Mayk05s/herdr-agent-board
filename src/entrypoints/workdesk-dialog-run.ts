@@ -98,6 +98,7 @@ async function run(): Promise<number> {
   const readPath = isolation?.dialogReadPath
   let sealingKey: string
   if (unifiedOnly) {
+    check(readOnly, 'Unified native launcher requires deliver=false until protected intake is connected')
     process.umask(0o007)
     check(
       workdeskUnifiedEnabled(cfg) && typeof readPath === 'string' && isAbsolute(readPath),
