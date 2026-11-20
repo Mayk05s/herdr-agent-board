@@ -105,10 +105,10 @@ const FLAGS: Record<string, { values: readonly string[]; bare: readonly string[]
   new: { values: ['--lane', '--parent', '--to'], bare: ['--doing'] },
   post: {
     values: ['--status', '--summary', '--waiting', '--file', '--link', '--reply'],
-    bare: ['--private', '--workdesk'],
+    bare: ['--private'],
   },
   done: { values: ['--summary', '--file', '--link', '--reply'], bare: ['--private'] },
-  ask: { values: [], bare: ['--workdesk'] },
+  ask: { values: [], bare: [] },
   set: { values: ['--title', '--assignee', '--lane', '--parent'], bare: [] },
   show: { values: ['--last', '--since'], bare: ['--full'] },
   list: { values: ['--lane', '--status'], bare: ['--mine', '--all', '--done'] },
@@ -376,7 +376,6 @@ class Run {
           links: a.all('--link'),
           ...(reply && { replyTo: findEntry(this.db, head.id, reply).id }),
           ...(a.has('--private') && { private: true }),
-          ...(a.has('--workdesk') && { workdesk: true }),
         })
         const n = w.entry.files?.length ?? 0
         return this.wrote(w, n ? [`${n} ${n === 1 ? 'file' : 'files'}`] : [])
@@ -385,7 +384,7 @@ class Run {
         const [key, ...words] = a.words
         const head = this.thread(key)
         const question = words.join(' ')
-        const w = askOwner(this.write, head, question, a.has('--workdesk'))
+        const w = askOwner(this.write, head, question)
         if (this.ctx.actor.kind === 'session') this.ctx.setAsk?.(w.head.waitingOn)
         return this.wrote(w)
       }

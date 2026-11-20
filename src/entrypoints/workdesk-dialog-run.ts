@@ -10,6 +10,7 @@ import { ROOT } from '../adapters/paths.ts'
 import { object } from '../core/workdesk.ts'
 import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import { WORKDESK_DIALOG_TOOL } from '../services/workdesk-dialog-session.ts'
+import { WORKDESK_POST_TOOL, workdeskUnifiedEnabled } from '../services/workdesk-unified.ts'
 
 type Result = Record<string, unknown> | null
 type Pending = (result: unknown) => void
@@ -124,6 +125,7 @@ async function run(): Promise<number> {
     const child = board
     return deadline(boardReplies, id, () => child?.send({ kind: 'workdesk-dialog', id, op, ...args }))
   }
+  const postEnabled = workdeskUnifiedEnabled(cfg)
   const mcp = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -158,10 +160,15 @@ async function run(): Promise<number> {
               description: WORKDESK_DIALOG_TOOL.description,
               inputSchema: WORKDESK_DIALOG_TOOL.inputSchema,
             },
+            ...(postEnabled ? [WORKDESK_POST_TOOL] : []),
           ],
         })
-      if (msg.method !== 'tools/call' || args?.name !== WORKDESK_DIALOG_TOOL.name || !ready || closing)
-        return reply(unavailable)
+      if (msg.method !== 'tools/call' || !ready || closing) return reply(unavailable)
+      if (postEnabled && args?.name === WORKDESK_POST_TOOL.name) {
+        const posted = object(await askBoard('post', { sid, arguments: args.arguments }))
+        return reply(posted ? { content: [{ type: 'text', text: JSON.stringify(posted) }] } : unavailable)
+      }
+      if (args?.name !== WORKDESK_DIALOG_TOOL.name) return reply(unavailable)
       const response = object(
         await askBoard('tool', {
           request: {

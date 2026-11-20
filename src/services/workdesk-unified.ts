@@ -1,10 +1,11 @@
-import { type BoardDb, openDb, type Tx } from '../adapters/db.ts'
-import { appendEntry, findEntry, getThread, ThreadError } from '../adapters/work-thread-store.ts'
+import { type BoardDb, openDb } from '../adapters/db.ts'
+import { appendEntry, findEntry, getThread } from '../adapters/work-thread-store.ts'
 import { WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
 import { workdeskHandoffReader } from '../adapters/workdesk-store.ts'
 import { isMirrored } from '../core/thread-import.ts'
-import type { ThreadEntry, ThreadHead, ThreadStatus } from '../core/work-threads.ts'
-import { object, workdeskMcpConfig, workdeskTask } from '../core/workdesk.ts'
+import type { Item } from '../core/types.ts'
+import { cleanText, type ThreadEntry, type ThreadHead, type ThreadStatus } from '../core/work-threads.ts'
+import { object, validAssignmentId, workdeskMcpConfig, workdeskTask } from '../core/workdesk.ts'
 import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import type { WorkdeskEvent } from '../core/workdesk-events.ts'
 
@@ -51,19 +52,91 @@ function eligible(entry: ThreadEntry, head: ThreadHead, target: NonNullable<Retu
   )
 }
 
-export function enqueueWorkdeskEntry(
-  tx: Tx,
-  cfg: Record<string, unknown> | null,
-  head: ThreadHead,
-  entry: ThreadEntry,
+export const WORKDESK_POST_TOOL = {
+  name: 'post_workdesk_message',
+  description:
+    'Explicitly send a public message to the owner of your assigned Workdesk thread. Use the same request_id when retrying. Returns the durable Board entry UUID and queue status.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      request_id: { type: 'string', format: 'uuid' },
+      kind: { type: 'string', enum: ['message', 'question'] },
+      text: { type: 'string', minLength: 1, maxLength: 12000 },
+    },
+    required: ['request_id', 'text'],
+    additionalProperties: false,
+  },
+} as const
+
+export function workdeskUnifiedEnabled(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
+  return settings(cfg) !== null
+}
+
+export function queueNativeWorkdeskMessage(
+  cfg: { workdesk?: unknown; workdeskDialog?: unknown },
+  sid: string,
+  items: readonly Item[] | null,
+  args: unknown,
 ) {
-  const config = cfg && settings(cfg)
-  const target = config && binding(tx, config)
-  if (!config || !target || !eligible(entry, head, target))
-    throw new ThreadError('workdesk_scope', 'Only the assigned session can send an explicit local message to Workdesk')
-  tx.db
-    .query('INSERT INTO workdesk_unified_outbox (entry_id,task_id,assignment_id,thread_id,kind) VALUES (?,?,?,?,?)')
-    .run(entry.id, config.pin.taskId, config.pin.assignmentId, head.id, entry.type)
+  const config = settings(cfg)
+  const input = object(args)
+  const requestId = input?.request_id
+  const kind = input?.kind ?? 'message'
+  const type = kind === 'question' ? 'ask' : 'note'
+  const text = typeof input?.text === 'string' ? cleanText(input.text, 12001) : ''
+  if (
+    !config ||
+    sid !== config.pin.sessionId ||
+    !validAssignmentId(requestId) ||
+    !input ||
+    (kind !== 'message' && kind !== 'question') ||
+    Object.keys(input).some(key => key !== 'request_id' && key !== 'text' && key !== 'kind') ||
+    !text ||
+    text.length > (type === 'ask' ? 4000 : 12000)
+  )
+    return null
+  const matches = items?.filter(item => item.key === sid || item.session === sid)
+  if (
+    matches?.length !== 1 ||
+    matches[0]?.key !== sid ||
+    matches[0].session !== sid ||
+    matches[0].agent !== 'codex' ||
+    matches[0].sleeping
+  )
+    return null
+  const db = openDb({ create: false })
+  if (!db) return null
+  try {
+    return db.write('workdesk-unified', tx => {
+      const target = binding(tx, config)
+      if (!target || target.head.status === 'done' || target.head.status === 'dropped') return null
+      const prior = tx.db
+        .query<{ entry_id: string; state: string }, [string, string]>(
+          'SELECT entry_id,state FROM workdesk_unified_outbox WHERE assignment_id=? AND request_id=?',
+        )
+        .get(config.pin.assignmentId, requestId)
+      if (prior) {
+        const saved = findEntry(db, target.head.id, prior.entry_id)
+        return eligible(saved, target.head, target) && saved.type === type && saved.text === text
+          ? { entry_uuid: prior.entry_id, state: prior.state, replayed: true }
+          : null
+      }
+      const { entry } = appendEntry(tx, target.head.id, {
+        at: Date.now(),
+        author: { kind: 'session', key: sid, name: target.executor },
+        type,
+        text,
+      })
+      tx.db
+        .query(
+          'INSERT INTO workdesk_unified_outbox (entry_id,request_id,task_id,assignment_id,thread_id,kind) VALUES (?,?,?,?,?,?)',
+        )
+        .run(entry.id, requestId, config.pin.taskId, config.pin.assignmentId, target.head.id, entry.type)
+      return { entry_uuid: entry.id, state: 'pending', replayed: false }
+    })
+  } finally {
+    db.close()
+  }
 }
 
 export function applyWorkdeskThreadEvent(cfg: { workdesk?: unknown; workdeskDialog?: unknown }, event: WorkdeskEvent) {

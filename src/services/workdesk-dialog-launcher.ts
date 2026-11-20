@@ -8,6 +8,7 @@ import { threadsConfig } from '../core/work-threads.ts'
 import { object } from '../core/workdesk.ts'
 import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import { createWorkdeskDialogSession } from './workdesk-dialog-session.ts'
+import { queueNativeWorkdeskMessage } from './workdesk-unified.ts'
 
 type Attachment = ReturnType<ReturnType<typeof createWorkdeskDialogSession>['attach']>
 type Recipient = { attachment: Attachment; sink: ProtectedDialogSink; signature: string; readOnly: boolean }
@@ -96,7 +97,16 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
     try {
       if (msg.op === 'attach') result = attach(msg)
       else if (msg.op === 'tool') result = delivery()?.attachment.handleCodexRequest(msg.request) ?? null
-      else if (msg.op === 'detach') detach()
+      else if (msg.op === 'post' && delivery()) {
+        const expected = pin()
+        if (expected && msg.sid === expected.sessionId) {
+          const posted = queueNativeWorkdeskMessage(cfg, expected.sessionId, items(), msg.arguments)
+          if (posted) {
+            result = posted
+            onChange()
+          }
+        }
+      } else if (msg.op === 'detach') detach()
     } catch {
       // A refusal contains no credential or owner data.
     }

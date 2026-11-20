@@ -260,13 +260,15 @@ export const MIGRATIONS: readonly Migration[] = [
     sql: `
       CREATE TABLE workdesk_unified_outbox (
         entry_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
         task_id INTEGER NOT NULL,
         assignment_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         kind TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending',
         payload TEXT,
-        message_id INTEGER
+        message_id INTEGER,
+        UNIQUE (assignment_id, request_id)
       ) STRICT;
       CREATE TABLE workdesk_unified_status (
         assignment_id TEXT PRIMARY KEY,
