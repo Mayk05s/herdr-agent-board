@@ -299,7 +299,7 @@ export const keyOf = (lane: string, n: number): string => `${lane}-${n}`
  */
 export const THREAD_KEY = /^[a-z0-9_-]{1,64}-\d{1,9}(@[a-z0-9_-]{1,40})?$/
 /** The first characters of an id, as Team's refs are: 8 hex. */
-export const ID_REF = /^[0-9a-f]{8}$/
+export const ID_REF = /^[0-9a-f]{8}(-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$/
 /** The number a key ends in. */
 export const keyNumber = (key: string): number => {
   const k = key.replace(/@.*$/, '')
