@@ -3,7 +3,7 @@ import { type ProtectedDialogSink, workdeskDialogStore } from '../adapters/workd
 import { WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
 import type { Config, Item } from '../core/types.ts'
 import { threadsConfig } from '../core/work-threads.ts'
-import { object, type WorkdeskMcpConfig, workdeskMcpConfig } from '../core/workdesk.ts'
+import { object, type WorkdeskTask, workdeskTask } from '../core/workdesk.ts'
 import {
   DIALOG_TOOLS,
   type DialogProblem,
@@ -12,6 +12,8 @@ import {
   ownerEvents,
   ownerMessages,
   validCursor,
+  type WorkdeskDialogConfig,
+  workdeskDialogConfig,
 } from '../core/workdesk-dialog.ts'
 
 type Options = {
@@ -34,7 +36,7 @@ function toolProblem(error: unknown, fallback: DialogProblem): DialogProblem {
 
 export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
   let status: DialogStatus | null = null
-  let config: WorkdeskMcpConfig | null = null
+  let config: WorkdeskDialogConfig | null = null
   let signature = ''
   let timer: ReturnType<typeof setTimeout> | undefined
   let current: AbortController | null = null
@@ -46,7 +48,7 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
     onChange()
   }
 
-  async function poll(active: WorkdeskMcpConfig, signal: AbortSignal): Promise<void> {
+  async function poll(active: WorkdeskDialogConfig, signal: AbortSignal): Promise<void> {
     const next: DialogStatus = { ...idle(), pending: status?.pending ?? null, polledAt: Date.now() }
     try {
       await withWorkdeskMcp(active, signal, async mcp => {
@@ -82,9 +84,38 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
               }
             }
 
+            let legacyTasks: Map<number, WorkdeskTask | null> | undefined
+            async function readLegacyTasks(): Promise<Map<number, WorkdeskTask | null>> {
+              const tasks = new Map<number, WorkdeskTask | null>()
+              if (!tools.has('list_board_tasks')) return tasks
+              const response = object(await mcp.call('list_board_tasks', {}))
+              signal.throwIfAborted()
+              if (!Array.isArray(response?.tasks)) return tasks
+              for (const raw of response.tasks) {
+                const id = object(raw)?.id
+                if (typeof id !== 'number' || !active.legacyBindings.has(id)) continue
+                tasks.set(id, tasks.has(id) ? null : workdeskTask(raw))
+              }
+              return tasks
+            }
+
             async function deliver(group: ReturnType<typeof store.pending>[number]): Promise<DialogProblem | null> {
               if (!threadsConfig(cfg.threads)) return 'threads_disabled'
-              const resolved = store.resolve(group)
+              let resolved = store.resolve(group)
+              const pin = active.legacyBindings.get(group.board_task_id)
+              if (pin && 'problem' in resolved && resolved.problem === 'assignment_unverified') {
+                if (pin.assignmentId !== group.assignment_id) return 'assignment_mismatch'
+                try {
+                  legacyTasks ??= await readLegacyTasks()
+                } catch (error) {
+                  signal.throwIfAborted()
+                  return toolProblem(error, 'legacy_source_unavailable')
+                }
+                if (!threadsConfig(cfg.threads)) return 'threads_disabled'
+                const remote = legacyTasks.get(pin.taskId)
+                if (!remote) return 'legacy_source_unavailable'
+                resolved = store.adoptLegacy(group, pin, remote)
+              }
               if ('problem' in resolved) return resolved.problem
               const { binding } = resolved
               const notice = store.notice(group, binding, Date.now())
@@ -187,7 +218,7 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink }: Options) {
       if (signature === next) return
       signature = next
       current?.abort()
-      config = workdeskMcpConfig(cfg.workdeskDialog)
+      config = workdeskDialogConfig(cfg.workdeskDialog)
       if (config) publish(idle())
       else if (cfg.workdeskDialog == null || cfg.workdeskDialog === false) {
         if (status) publish(null)

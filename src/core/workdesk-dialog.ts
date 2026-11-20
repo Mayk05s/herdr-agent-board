@@ -1,4 +1,5 @@
-import { object, validAssignmentId, validTaskId } from './workdesk.ts'
+import { object, validAssignmentId, validTaskId, type WorkdeskMcpConfig, workdeskMcpConfig } from './workdesk.ts'
+import { stableWorkdeskSid } from './workdesk-topology.ts'
 
 export const OWNER_EVENT_LIMIT = 50
 export const DIALOG_TOOLS = ['list_owner_events', 'read_owner_messages', 'ack_owner_messages'] as const
@@ -25,6 +26,45 @@ export type OwnerMessage = {
   created_at: number
 }
 
+export type LegacyDialogBinding = {
+  taskId: number
+  assignmentId: string
+  threadId: string
+  sessionId: string
+}
+
+export type WorkdeskDialogConfig = WorkdeskMcpConfig & { legacyBindings: Map<number, LegacyDialogBinding> }
+
+export function workdeskDialogConfig(raw: unknown): WorkdeskDialogConfig | null {
+  const mcp = workdeskMcpConfig(raw)
+  if (!mcp) return null
+  const entries = object(raw)?.legacyBindings
+  const legacyBindings = new Map<number, LegacyDialogBinding>()
+  if (entries === undefined) return { ...mcp, legacyBindings }
+  if (!Array.isArray(entries)) return null
+  const assignments = new Set<string>()
+  const threads = new Set<string>()
+  for (const entry of entries) {
+    const pin = object(entry)
+    if (!pin) return null
+    const { taskId, assignmentId, threadId, sessionId } = pin
+    if (
+      !validTaskId(taskId) ||
+      !validAssignmentId(assignmentId) ||
+      !validAssignmentId(threadId) ||
+      !stableWorkdeskSid(sessionId) ||
+      legacyBindings.has(taskId) ||
+      assignments.has(assignmentId) ||
+      threads.has(threadId)
+    )
+      return null
+    legacyBindings.set(taskId, { taskId, assignmentId, threadId, sessionId })
+    assignments.add(assignmentId)
+    threads.add(threadId)
+  }
+  return { ...mcp, legacyBindings }
+}
+
 export type DialogTarget = { task_id: number; assignment_id: string; executor: string; thread_id: string; sid: string }
 type Page<T> = { entries: T[]; cursor: number; more: boolean }
 
@@ -39,6 +79,7 @@ export type DialogProblem =
   | 'store'
   | 'awaiting_claim'
   | 'assignment_unverified'
+  | 'legacy_source_unavailable'
   | 'assignment_mismatch'
   | 'executor_changed'
   | 'thread_missing'

@@ -1,10 +1,18 @@
 import type { Item } from '../core/types.ts'
-import type { DialogProblem, DialogTarget, OwnerEvent, OwnerMessage } from '../core/workdesk-dialog.ts'
+import type { WorkdeskTask } from '../core/workdesk.ts'
+import type {
+  DialogProblem,
+  DialogTarget,
+  LegacyDialogBinding,
+  OwnerEvent,
+  OwnerMessage,
+} from '../core/workdesk-dialog.ts'
 import { workdeskAgent } from '../core/workdesk-topology.ts'
 import type { BoardDb, Tx } from './db.ts'
 import { appendEntry, getThread } from './work-thread-store.ts'
 import { workdeskHandoffReader } from './workdesk-store.ts'
 
+type Handoff = NonNullable<ReturnType<ReturnType<typeof workdeskHandoffReader>>>
 type Binding = DialogTarget & { revision: number; acknowledged: number }
 type Pending = { board_task_id: number; assignment_id: string; count: number }
 type Resolved = { binding: Binding } | { problem: DialogProblem }
@@ -25,39 +33,44 @@ export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | 
       ?.cursor ?? 0
   const findBinding = db.db.query<Binding, [number]>('SELECT * FROM workdesk_dialog_bindings WHERE task_id = ?')
 
+  const latestEvent = db.db.query<{ executor: string | null }, [number, string]>(`
+    SELECT executor FROM workdesk_dialog_events WHERE board_task_id = ? AND assignment_id = ? ORDER BY id DESC LIMIT 1
+  `)
+
+  function localTarget(handoff: Handoff, target: DialogTarget): DialogProblem | null {
+    const thread = getThread(db, target.thread_id)
+    if (!thread) return 'thread_missing'
+    if (
+      thread.id !== handoff.thread_id ||
+      thread.scope !== 'local' ||
+      thread.assignee?.kind !== 'session' ||
+      thread.assignee.key !== handoff.session_key ||
+      thread.assignee.name !== target.executor
+    )
+      return 'thread_reassigned'
+    const matches = items()?.filter(item => item.session === target.sid || item.key === handoff.session_key) ?? []
+    const item = matches[0]
+    if (
+      matches.length !== 1 ||
+      item?.session !== target.sid ||
+      item.key !== handoff.session_key ||
+      !workdeskAgent(item.agent)
+    )
+      return 'session_unavailable'
+    return null
+  }
+
   function resolve(group: Pending): Resolved {
     const handoff = workdeskHandoffReader(db)(group.board_task_id)
     if (!handoff?.thread_id) return { problem: 'awaiting_claim' }
     const binding = findBinding.get(group.board_task_id)
     if (!binding) return { problem: 'assignment_unverified' }
     if (binding.assignment_id !== group.assignment_id) return { problem: 'assignment_mismatch' }
-    const latest = db.db
-      .query<{ executor: string | null }, [number, string]>(`
-      SELECT executor FROM workdesk_dialog_events WHERE board_task_id = ? AND assignment_id = ? ORDER BY id DESC LIMIT 1
-    `)
-      .get(group.board_task_id, group.assignment_id)
+    const latest = latestEvent.get(group.board_task_id, group.assignment_id)
     if (binding.executor !== handoff.executor || (latest?.executor && latest.executor !== binding.executor))
       return { problem: 'executor_changed' }
-    const thread = getThread(db, binding.thread_id)
-    if (!thread) return { problem: 'thread_missing' }
-    if (
-      thread.id !== handoff.thread_id ||
-      thread.scope !== 'local' ||
-      thread.assignee?.kind !== 'session' ||
-      thread.assignee.key !== handoff.session_key ||
-      thread.assignee.name !== binding.executor
-    )
-      return { problem: 'thread_reassigned' }
-    const matches = items()?.filter(item => item.session === binding.sid || item.key === handoff.session_key) ?? []
-    const item = matches[0]
-    if (
-      matches.length !== 1 ||
-      item?.session !== binding.sid ||
-      item.key !== handoff.session_key ||
-      !workdeskAgent(item.agent)
-    )
-      return { problem: 'session_unavailable' }
-    return { binding }
+    const problem = localTarget(handoff, binding)
+    return problem ? { problem } : { binding }
   }
 
   function current(group: Pending, expected: Binding): Resolved {
@@ -106,6 +119,50 @@ export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | 
         GROUP BY board_task_id, assignment_id ORDER BY MIN(id)
       `)
         .all()
+    },
+    adoptLegacy(group: Pending, pin: LegacyDialogBinding, task: WorkdeskTask): Resolved {
+      return db.write('workdesk-dialog', ({ db: sql }) => {
+        if (findBinding.get(group.board_task_id)) return resolve(group)
+        const handoff = workdeskHandoffReader(db)(pin.taskId)
+        if (!handoff?.thread_id) return { problem: 'awaiting_claim' }
+        if (handoff.thread_id !== pin.threadId) return { problem: 'thread_reassigned' }
+        // Old handoffs can be adopted only when their original key is itself a verified native SID.
+        if (handoff.session_key !== pin.sessionId) return { problem: 'session_unavailable' }
+        if (
+          group.board_task_id !== pin.taskId ||
+          group.assignment_id !== pin.assignmentId ||
+          task.id !== pin.taskId ||
+          task.assignment?.id !== pin.assignmentId
+        )
+          return { problem: 'assignment_mismatch' }
+        if (task.status === 'queued' || task.executor !== handoff.executor) return { problem: 'executor_changed' }
+        const binding: Binding = {
+          task_id: pin.taskId,
+          assignment_id: pin.assignmentId,
+          executor: handoff.executor,
+          thread_id: pin.threadId,
+          sid: pin.sessionId,
+          revision: task.assignment.revision,
+          acknowledged: 0,
+        }
+        const problem = localTarget(handoff, binding)
+        if (problem) return { problem }
+        const latest = latestEvent.get(group.board_task_id, group.assignment_id)
+        if (!latest || (latest.executor !== null && latest.executor !== binding.executor))
+          return { problem: 'executor_changed' }
+        sql
+          .query(`INSERT INTO workdesk_dialog_bindings (task_id, assignment_id, executor, thread_id, sid, revision)
+                   VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+          .run(
+            binding.task_id,
+            binding.assignment_id,
+            binding.executor,
+            binding.thread_id,
+            binding.sid,
+            binding.revision,
+          )
+        return resolve(group)
+      })
     },
     resolve,
     current,

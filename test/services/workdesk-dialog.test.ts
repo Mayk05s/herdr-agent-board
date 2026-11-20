@@ -382,3 +382,51 @@ test('SID change during a protected read prevents staging and ACK', async () => 
   expect(reader.bodies()).toEqual([])
   expect(f.fake.calls('ack_owner_messages')).toEqual([])
 })
+
+test('a pinned legacy handoff adopts only an authenticated current assignment with the original thread and native SID', async () => {
+  const message = ownerMessage(3, 'message')
+  const f = fixture([message], [event(message, { executor: null, board_status: 'queued' })])
+  const thread = handoff(false)
+  const reader = protectedFixture()
+  const pin = { taskId: 1, assignmentId: ASSIGNMENT, threadId: thread, sessionId: SID }
+  const configure = (override: Partial<typeof pin> = {}) => {
+    f.cfg.workdeskDialog = { ...f.fake.config, legacyBindings: [{ ...pin, ...override }] }
+  }
+  const remote = { ...rawTask, executor: NAME, status: 'doing' }
+  configure()
+  expect((await f.tick(reader.sink))?.blocked).toEqual({ legacy_source_unavailable: 1 })
+  f.fake.write({ tasks: [remote, remote], dialog: f.dialog })
+  expect((await f.tick(reader.sink))?.blocked).toEqual({ legacy_source_unavailable: 1 })
+  f.fake.write({ tasks: [{ ...remote, assignment_id: STALE }], dialog: f.dialog })
+  expect((await f.tick(reader.sink))?.blocked).toEqual({ assignment_mismatch: 1 })
+  f.fake.write({ tasks: [{ ...remote, executor: 'Different master' }], dialog: f.dialog })
+  expect((await f.tick(reader.sink))?.blocked).toEqual({ executor_changed: 1 })
+  f.fake.write({ tasks: [remote], dialog: f.dialog })
+  configure({ threadId: STALE })
+  expect((await f.tick(reader.sink))?.blocked).toEqual({ thread_reassigned: 1 })
+  configure({ sessionId: OTHER })
+  expect((await f.tick(reader.sink))?.blocked).toEqual({ session_unavailable: 1 })
+  configure()
+  f.items(null)
+  expect((await f.tick(reader.sink))?.blocked).toEqual({ session_unavailable: 1 })
+  expect(withDb(db => db.db.query('SELECT * FROM workdesk_dialog_bindings').all())).toEqual([])
+  expect(f.fake.calls('read_owner_messages')).toEqual([])
+  expect(f.fake.calls('ack_owner_messages')).toEqual([])
+
+  f.items([item])
+  expect((await f.tick())?.blocked).toEqual({ protected_delivery_unavailable: 1 })
+  expect(withDb(db => db.db.query('SELECT thread_id, assignment_id, sid FROM workdesk_dialog_bindings').get())).toEqual(
+    { thread_id: thread, assignment_id: ASSIGNMENT, sid: SID },
+  )
+  expect(f.fake.calls('read_owner_messages')).toEqual([])
+  expect(f.fake.calls('ack_owner_messages')).toEqual([])
+
+  const lists = f.fake.calls('list_board_tasks').length
+  expect((await f.tick(reader.sink))?.pending).toBe(0)
+  expect((await f.tick(reader.sink))?.pending).toBe(0)
+  expect(f.fake.calls('list_board_tasks')).toHaveLength(lists)
+  expect(f.fake.calls('claim_task')).toEqual([])
+  expect(f.fake.calls('ack_owner_messages')).toHaveLength(1)
+  expect(reader.bodies()).toEqual([message])
+  expect(rows().map(row => row.id)).toEqual([thread])
+})

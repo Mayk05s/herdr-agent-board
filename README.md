@@ -2297,8 +2297,13 @@ The dialog poller waits for `list_owner_events`, `read_owner_messages` and
 `ack_owner_messages` in the adapter's tool catalogue. It keeps only event metadata in the
 durable inbox and continues its discovery separately from the assignment poll. A v2 claim
 records the assignment UUID, Board thread UUID and native session ID in one transaction.
-An earlier claim without this identity waits with `assignment_unverified`. A matching
-thread receives a generic update notice. `GET /api/board` shows `workdeskDialog.pending`,
+An earlier claim without this identity waits with `assignment_unverified`. An operator
+can pin a verified legacy tuple in `workdeskDialog.legacyBindings`, an array of objects
+with `taskId`, `assignmentId`, `threadId` and `sessionId`. The watcher confirms the
+current claim through the board-role `list_board_tasks` and the original local handoff
+through the existing thread and its native SID. It leaves the event pending when the
+card is absent from the active list, the source differs, or the session is unavailable.
+A matching thread receives a generic update notice. `GET /api/board` shows `workdeskDialog.pending`,
 `more` (the source has further pages), `polledAt`, `problem` and per-reason `blocked` counts.
 
 Owner text and acknowledgments require a durable delivery sink with authenticated
