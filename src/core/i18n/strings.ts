@@ -242,6 +242,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.focus': 'Could not go to {name}: {why}',
     'err.emptyMessage': 'Empty message',
     'err.blocked': '{name} waits for a decision in the terminal',
+    'err.blockedNoDialog': 'herdr says {name} waits for a decision, but its screen shows no dialog',
+    'err.anywayUnsent':
+      'The message is typed into {name}, but its screen did not show it in the input box, so it was not sent. Check it in herdr',
     'err.working': '{name} is working',
     'err.draft': '{name} has unsent text in its input box',
     'err.sessionChanged': '{name}: another session is in that pane now, refresh the board',
@@ -263,6 +266,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.qa.herdrMidway':
       'herdr failed midway ({why}). The dialog of {name} may be partly filled in: finish it in herdr',
     'err.qa.unconfirmed': 'The keys went to {name}, but its screen never showed the dialog closing. Check it in herdr',
+    'err.qa.same':
+      'The keys went to {name}, and its screen still shows the same dialog: it may be asking again, or the keys did not take. Check it in herdr',
     'qa.stopped': 'Stopped midway',
     'qa.perm.more': ['{n} more line: see the terminal screen', '{n} more lines: see the terminal screen'],
     'qa.step.start': 'the start',
@@ -537,6 +542,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'queue.sending': 'Sending…',
     'queue.failed': 'Not sent',
     'queue.edit': 'Edit',
+    'queue.anyway': 'Send anyway',
     'toast.dismissed': '{name}: no reply needed',
     'toast.unparked': '{name}: off {col}',
     'toast.focused': '{name} is open in herdr',
@@ -911,6 +917,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.focus': 'Не перешёл в {name}: {why}',
     'err.emptyMessage': 'Пустое сообщение',
     'err.blocked': '{name} ждёт решения в терминале',
+    'err.blockedNoDialog': 'herdr говорит, что {name} ждёт решения, но на экране нет диалога',
+    'err.anywayUnsent':
+      'Сообщение напечатано в {name}, но на экране его не видно в поле ввода, поэтому оно не отправлено. Проверь в herdr',
     'err.working': '{name} сейчас работает',
     'err.draft': '{name}: в поле ввода недописанный текст',
     'err.sessionChanged': '{name}: в панели теперь другая сессия, обнови доску',
@@ -933,6 +942,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
       'herdr сломался на полпути ({why}). Диалог {name} может быть заполнен частично: доделай его в herdr',
     'err.qa.unconfirmed':
       'Клавиши ушли в {name}, но на экране так и не было видно, что диалог закрылся. Проверь в herdr',
+    'err.qa.same':
+      'Клавиши ушли в {name}, а на экране всё тот же диалог: либо сессия спрашивает снова, либо клавиши не дошли. Проверь в herdr',
     'qa.stopped': 'Остановлено на полпути',
     'qa.perm.more': [
       'Ещё {n} строка: смотри экран терминала',
@@ -1202,6 +1213,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'queue.sending': 'Отправляется…',
     'queue.failed': 'Не отправлено',
     'queue.edit': 'Изменить',
+    'queue.anyway': 'Отправить всё равно',
     'toast.dismissed': '{name}: ответа не ждёт',
     'toast.unparked': '{name}: убрана из {col}',
     'toast.focused': '{name} открыта в herdr',
