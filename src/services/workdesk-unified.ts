@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite'
-import { lstatSync } from 'node:fs'
-import { dirname, isAbsolute } from 'node:path'
+import { chmodSync, lstatSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join } from 'node:path'
 import { type BoardDb, openDb } from '../adapters/db.ts'
 import { appendEntry, getThread } from '../adapters/work-thread-store.ts'
 import { WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
@@ -229,6 +229,66 @@ function openQueue(config: NonNullable<ReturnType<typeof settings>>) {
   }
 }
 
+function receiptDir(config: NonNullable<ReturnType<typeof settings>>) {
+  const path = config.isolation.receiptDir
+  if (typeof path !== 'string' || !isAbsolute(path)) return null
+  const stat = lstatSync(path)
+  return stat.isDirectory() && stat.uid === config.isolation.senderUid && (stat.mode & 0o777) === 0o755 ? path : null
+}
+
+export function importWorkdeskReceipts(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
+  const config = settings(cfg)
+  if (!config?.isolation.receiptDir) return
+  try {
+    const dir = receiptDir(config)
+    if (!dir) return
+    const receipts = readdirSync(dir).flatMap(name => {
+      const id = name.replace(/\.json$/, '')
+      if (name !== `${id}.json` || !validAssignmentId(id)) return []
+      const file = join(dir, name)
+      const stat = lstatSync(file)
+      if (!stat.isFile() || stat.uid !== config.isolation.senderUid || (stat.mode & 0o777) !== 0o444 || stat.size > 512)
+        return []
+      const receipt = object(JSON.parse(readFileSync(file, 'utf8')))
+      return receipt?.assignment === config.pin.assignmentId &&
+        receipt.thread === config.pin.threadId &&
+        (receipt.state === 'sent' || receipt.state === 'conflict')
+        ? [{ id, state: receipt.state, at: stat.mtimeMs }]
+        : []
+    })
+    if (!receipts.length) return
+    const db = openDb({ create: false })
+    if (!db) return
+    try {
+      db.write('workdesk-unified', tx => {
+        const target = binding(tx, config)
+        if (
+          !target ||
+          target.executor !== config.isolation.executor ||
+          target.head.status === 'done' ||
+          target.head.status === 'dropped'
+        )
+          return
+        const existing = tx.db.query('SELECT 1 FROM thread_entries WHERE id=?')
+        for (const receipt of receipts) {
+          if (existing.get(receipt.id)) continue
+          appendEntry(tx, target.head.id, {
+            id: receipt.id,
+            at: Math.trunc(receipt.at),
+            author: { kind: 'session', key: target.sid, name: target.executor },
+            type: 'system',
+            text: receipt.state === 'sent' ? 'Сообщение доставлено в Workdesk.' : 'Workdesk отклонил отправку.',
+          })
+        }
+      })
+    } finally {
+      db.close()
+    }
+  } catch {
+    // Receipt access is optional and never affects regular Board polling.
+  }
+}
+
 export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
   const startup = settings(cfg)
   if (!startup || !isolated(startup, 'senderUid')) return null
@@ -239,6 +299,38 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
     if (!config || !isolated(config, 'senderUid') || controller.signal.aborted) return
     const db = openQueue(config)
     try {
+      const dir = receiptDir(config)
+      if (!dir) return
+      const terminal = db
+        .query<Pending, [number, string, string, string, string]>(
+          "SELECT entry_id,state FROM outbox WHERE task_id=? AND assignment_id=? AND thread_id=? AND sid=? AND executor=? AND state IN ('sent','conflict')",
+        )
+        .all(
+          config.pin.taskId,
+          config.pin.assignmentId,
+          config.pin.threadId,
+          config.pin.sessionId,
+          config.isolation.executor as string,
+        )
+      for (const receipt of terminal) {
+        if (!validAssignmentId(receipt.entry_id)) continue
+        const path = join(dir, `${receipt.entry_id}.json`)
+        try {
+          lstatSync(path)
+          continue
+        } catch {}
+        const temp = join(dir, `.${receipt.entry_id}.tmp`)
+        try {
+          unlinkSync(temp)
+        } catch {}
+        writeFileSync(
+          temp,
+          JSON.stringify({ assignment: config.pin.assignmentId, thread: config.pin.threadId, state: receipt.state }),
+          { mode: 0o444, flag: 'wx' },
+        )
+        chmodSync(temp, 0o444)
+        renameSync(temp, path)
+      }
       const row = db
         .query<Pending, [number, string, string, string, string]>(
           "SELECT * FROM outbox WHERE task_id=? AND assignment_id=? AND thread_id=? AND sid=? AND executor=? AND state='pending' ORDER BY rowid LIMIT 1",
@@ -251,8 +343,9 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
           config.isolation.executor as string,
         )
       if (!row) return
-      const mark = (state: string, messageId: number | null = null) =>
+      const mark = (state: string, messageId: number | null = null) => {
         db.run('UPDATE outbox SET state=?,message_id=? WHERE entry_id=?', [state, messageId, row.entry_id])
+      }
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])
       const claim = await withWorkdeskMcp(config.board, signal, async mcp => {
         const reply = object(await mcp.call('list_board_tasks', {}))

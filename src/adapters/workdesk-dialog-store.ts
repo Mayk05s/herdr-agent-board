@@ -36,7 +36,10 @@ export interface ProtectedDialogSink {
   contains(tx: Tx, target: DialogTarget, message: OwnerMessage): boolean
 }
 
-export function workdeskDialogStore(db: BoardDb, items: () => readonly Item[] | null) {
+export function workdeskDialogStore(
+  db: Pick<BoardDb, 'db' | 'write'>,
+  items: () => readonly Pick<Item, 'key' | 'session' | 'agent'>[] | null,
+) {
   const cursor = () =>
     db.db.query<{ cursor: number }, []>('SELECT cursor FROM workdesk_dialog_cursor WHERE singleton = 1').get()
       ?.cursor ?? 0

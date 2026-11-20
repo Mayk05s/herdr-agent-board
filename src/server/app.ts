@@ -1,4 +1,4 @@
-import { applyWorkdeskThreadEvent } from '../services/workdesk-unified.ts'
+import { applyWorkdeskThreadEvent, importWorkdeskReceipts } from '../services/workdesk-unified.ts'
 // The web board: a small HTTP server (Bun.serve) on 127.0.0.1 that serves web/, the board's data
 // and live updates (Server-Sent Events), and takes the same actions as the terminal board.
 // Runs inside the terminal board's process (entrypoints/tui.ts); `bun src/entrypoints/server.ts` runs it alone.
@@ -950,7 +950,13 @@ export async function startServer({
   // A login by password's ssh runs in a session of its own: ended with the board too.
   process.on('exit', endLogins)
 
-  const poll = setInterval(refresh, Math.max(1, cfg.refreshSec ?? 2) * 1000)
+  const poll = setInterval(
+    () => {
+      importWorkdeskReceipts(cfg)
+      refresh()
+    },
+    Math.max(1, cfg.refreshSec ?? 2) * 1000,
+  )
   const watchers = [
     watchFolder(cards, 150, refresh, log),
     // Entries added or cancelled by agents (`board remind`), and runs the scheduler made.

@@ -3,13 +3,13 @@
 // transient transport capabilities go into configuration, arguments or logs.
 import { createHash, randomBytes } from 'node:crypto'
 import { closeSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { loadConfig } from '../adapters/config-file.ts'
 import { snapshot } from '../adapters/herdr.ts'
 import { ROOT } from '../adapters/paths.ts'
 import { object } from '../core/workdesk.ts'
 import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
-import { WORKDESK_DIALOG_TOOL } from '../services/workdesk-dialog-session.ts'
+import { createWorkdeskDialogSession, WORKDESK_DIALOG_TOOL } from '../services/workdesk-dialog-session.ts'
 import { queueNativeWorkdeskMessage, WORKDESK_POST_TOOL, workdeskUnifiedEnabled } from '../services/workdesk-unified.ts'
 
 type Result = Record<string, unknown> | null
@@ -94,23 +94,28 @@ async function run(): Promise<number> {
     !seen.panes.some(p => p.agent === 'codex' && p.agent_session?.value === sid),
     'The pinned Codex session is still present in Herdr',
   )
-  let sealingKey: string | undefined
+  const isolation = object(object(object(cfg.workdesk)?.unified)?.isolation)
+  const readPath = isolation?.dialogReadPath
+  let sealingKey: string
   if (unifiedOnly) {
     process.umask(0o007)
-    check(workdeskUnifiedEnabled(cfg), 'Isolated Workdesk writer unavailable')
+    check(
+      workdeskUnifiedEnabled(cfg) && typeof readPath === 'string' && isAbsolute(readPath),
+      'Isolated Workdesk writer or read path unavailable',
+    )
   } else {
     await freePort(Number(cfg.port ?? 12422))
-    try {
-      sealingKey = readFileSync(3, 'ascii').trim()
-    } catch {
-      throw new LaunchError('The retained 32-byte sealing key is required on FD 3')
-    } finally {
-      try {
-        closeSync(3)
-      } catch {}
-    }
-    check(/^[A-Za-z0-9_-]{43}$/.test(sealingKey), 'The retained 32-byte sealing key is required on FD 3')
   }
+  try {
+    sealingKey = readFileSync(3, 'ascii').trim()
+  } catch {
+    throw new LaunchError('The retained 32-byte sealing key is required on FD 3')
+  } finally {
+    try {
+      closeSync(3)
+    } catch {}
+  }
+  check(/^[A-Za-z0-9_-]{43}$/.test(sealingKey), 'The retained 32-byte sealing key is required on FD 3')
   const codex = Bun.which('codex')
   check(codex, 'Codex CLI unavailable')
 
@@ -132,6 +137,7 @@ async function run(): Promise<number> {
     return deadline(boardReplies, id, () => child?.send({ kind: 'workdesk-dialog', id, op, ...args }))
   }
   const postEnabled = unifiedOnly
+  let reader: ReturnType<ReturnType<typeof createWorkdeskDialogSession>['attach']> | undefined
   const mcp = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -161,15 +167,11 @@ async function run(): Promise<number> {
       if (msg.method === 'tools/list')
         return reply({
           tools: [
-            ...(!unifiedOnly
-              ? [
-                  {
-                    name: WORKDESK_DIALOG_TOOL.name,
-                    description: WORKDESK_DIALOG_TOOL.description,
-                    inputSchema: WORKDESK_DIALOG_TOOL.inputSchema,
-                  },
-                ]
-              : []),
+            {
+              name: WORKDESK_DIALOG_TOOL.name,
+              description: WORKDESK_DIALOG_TOOL.description,
+              inputSchema: WORKDESK_DIALOG_TOOL.inputSchema,
+            },
             ...(postEnabled ? [WORKDESK_POST_TOOL] : []),
           ],
         })
@@ -182,16 +184,13 @@ async function run(): Promise<number> {
           return reply(unavailable)
         }
       }
-      if (unifiedOnly || args?.name !== WORKDESK_DIALOG_TOOL.name) return reply(unavailable)
-      const response = object(
-        await askBoard('tool', {
-          request: {
-            id,
-            method: 'item/tool/call',
-            params: { threadId: sid, tool: WORKDESK_DIALOG_TOOL.name, arguments: args.arguments ?? {} },
-          },
-        }),
-      )
+      if (args?.name !== WORKDESK_DIALOG_TOOL.name) return reply(unavailable)
+      const request = {
+        id,
+        method: 'item/tool/call',
+        params: { threadId: sid, tool: WORKDESK_DIALOG_TOOL.name, arguments: args.arguments ?? {} },
+      }
+      const response = object(unifiedOnly ? reader?.handleCodexRequest(request) : await askBoard('tool', { request }))
       const result = object(response?.result)
       if (result?.success !== true || !Array.isArray(result.contentItems)) return reply(unavailable)
       return reply({ content: result.contentItems.map(item => ({ type: 'text', text: object(item)?.text })) })
@@ -316,10 +315,19 @@ async function run(): Promise<number> {
     const observed = object(await call('thread/read', { threadId: sid, includeTurns: false }))
     check(object(observed?.thread)?.id === sid, 'Private App Server did not retain the pinned SID')
     native = { thread: { id: sid } }
-    if (!unifiedOnly) await bootBoard()
+    if (unifiedOnly) {
+      const executor = isolation?.executor
+      check(typeof executor === 'string' && typeof readPath === 'string', 'Pinned reader unavailable')
+      reader = createWorkdeskDialogSession(
+        Buffer.from(sealingKey, 'base64url'),
+        () => (ready ? [{ key: sid, session: sid, agent: 'codex' }] : null),
+        readPath,
+      ).attach({ task_id: pin.taskId, assignment_id: pin.assignmentId, thread_id: pin.threadId, sid, executor })
+    } else await bootBoard()
     const status = object(await call('mcpServerStatus/list', { threadId: sid, serverName: 'board_workdesk_dialogue' }))
     check(
-      JSON.stringify(status).includes(unifiedOnly ? WORKDESK_POST_TOOL.name : WORKDESK_DIALOG_TOOL.name),
+      JSON.stringify(status).includes(WORKDESK_DIALOG_TOOL.name) &&
+        (!unifiedOnly || JSON.stringify(status).includes(WORKDESK_POST_TOOL.name)),
       'Pinned dialogue tool is unavailable',
     )
     if (unifiedOnly) {
@@ -339,6 +347,7 @@ async function run(): Promise<number> {
     return await Promise.race([tui.exited, app.exited.then(() => 1)])
   } finally {
     closing = true
+    reader?.close()
     process.off('SIGUSR1', restartBoard)
     process.off('SIGTERM', stop)
     process.off('SIGHUP', stop)

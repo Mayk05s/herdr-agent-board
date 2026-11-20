@@ -10,10 +10,10 @@ type Pending = Handoff & { task_id: number; thread_id: string }
 const PARKED = 8_640_000_000_000_000 // beyond any normal due time, still a valid Date
 const AUTHOR = { kind: 'owner' } as const
 
-export const workdeskHandoffTable = (db: BoardDb): boolean =>
+export const workdeskHandoffTable = (db: Pick<BoardDb, 'db'>): boolean =>
   !!db.db.query("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'workdesk_handoffs'").get()
 
-export function workdeskHandoffReader(db: BoardDb): (id: number) => Handoff | null {
+export function workdeskHandoffReader(db: Pick<BoardDb, 'db'>): (id: number) => Handoff | null {
   if (!workdeskHandoffTable(db)) return () => null
   const query = db.db.query<Handoff, [number]>(
     'SELECT executor, session_key, thread_id, schedule_id FROM workdesk_handoffs WHERE task_id = ?',

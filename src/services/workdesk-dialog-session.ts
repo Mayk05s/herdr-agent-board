@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite'
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { openDb } from '../adapters/db.ts'
 import { type ProtectedDialogSink, workdeskDialogStore } from '../adapters/workdesk-dialog-store.ts'
@@ -31,7 +32,11 @@ const context = (target: DialogTarget, id: number) =>
  * start/resume result. It forwards only server requests from that child's inherited
  * control pipe. This module opens no listener and holds its key in the watcher.
  */
-export function createWorkdeskDialogSession(key: Uint8Array, items: () => readonly Item[] | null) {
+export function createWorkdeskDialogSession(
+  key: Uint8Array,
+  items: () => readonly Pick<Item, 'key' | 'session' | 'agent'>[] | null,
+  readPath?: string,
+) {
   if (key.byteLength !== 32) throw new Error('Invalid Workdesk dialogue sealing key')
   const sealingKey = Buffer.from(key)
   const active = new Map<string, DialogTarget>()
@@ -71,20 +76,35 @@ export function createWorkdeskDialogSession(key: Uint8Array, items: () => readon
   }
 
   function read(target: DialogTarget, after: number) {
+    function page(sql: Database) {
+      const db = {
+        db: sql,
+        write: () => {
+          throw new Error('Read-only dialogue')
+        },
+      }
+      if (!sink.permits(target) || !workdeskDialogStore(db, items).permitsRead(target)) return null
+      const rows = sql
+        .query<{ message_id: number; sealed: Uint8Array }, [string, number, number]>(`
+        SELECT message_id, sealed FROM workdesk_dialog_messages
+        WHERE assignment_id = ? AND message_id > ? ORDER BY message_id LIMIT ?
+      `)
+        .all(target.assignment_id, after, LIMIT + 1)
+      const messages = rows.slice(0, LIMIT).map(row => unseal(target, row.message_id, row.sealed))
+      return { messages, cursor: messages.at(-1)?.id ?? after, more: rows.length > LIMIT }
+    }
+    if (readPath) {
+      const sql = new Database(readPath, { readonly: true })
+      try {
+        return sql.transaction(() => page(sql))()
+      } finally {
+        sql.close()
+      }
+    }
     const db = openDb({ create: false })
     if (!db) return null
     try {
-      return db.write('workdesk-dialog', ({ db: sql }) => {
-        if (!sink.permits(target) || !workdeskDialogStore(db, items).permitsRead(target)) return null
-        const rows = sql
-          .query<{ message_id: number; sealed: Uint8Array }, [string, number, number]>(`
-          SELECT message_id, sealed FROM workdesk_dialog_messages
-          WHERE assignment_id = ? AND message_id > ? ORDER BY message_id LIMIT ?
-        `)
-          .all(target.assignment_id, after, LIMIT + 1)
-        const messages = rows.slice(0, LIMIT).map(row => unseal(target, row.message_id, row.sealed))
-        return { messages, cursor: messages.at(-1)?.id ?? after, more: rows.length > LIMIT }
-      })
+      return db.write('workdesk-dialog', ({ db: sql }) => page(sql))
     } finally {
       db.close()
     }
