@@ -13,7 +13,7 @@ import {
   workdeskConfig,
   workdeskTask,
 } from '../core/workdesk.ts'
-import type { BoardObservation, WorkdeskTopology } from '../core/workdesk-topology.ts'
+import { type BoardObservation, stableWorkdeskSid, type WorkdeskTopology } from '../core/workdesk-topology.ts'
 import { sessionsFor } from './sleep.ts'
 import { observeWorkdesk } from './workdesk-topology.ts'
 
@@ -32,7 +32,8 @@ function masterFor(items: readonly Item[] | null, name: string): WorkdeskMaster 
   const matches = sessionsFor(items ?? [], name)
   const item = matches[0]
   if (matches.length !== 1 || !item || (item.agent !== 'claude' && item.agent !== 'codex')) return null
-  return { key: item.key, name, lane: item.category }
+  const sid = item.session
+  return { key: item.key, name, lane: item.category, ...(stableWorkdeskSid(sid) && { sid }) }
 }
 
 export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }: Options) {

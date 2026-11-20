@@ -2285,6 +2285,27 @@ The explicit spawn flag sets coverage to incomplete until confirmed again. Only 
 and Codex sessions in Herdr's working or blocked state count. Missing or incomplete coverage
 is shown as unknown in Workdesk. A complete roster with no active workers shows zero.
 
+### Workdesk owner dialogue metadata
+
+Set `workdeskDialog` to an object to enable the metadata poller. It uses the existing
+`workdesk` executable, arguments and CA file. Set `workdeskDialog.intervalSec` to change
+the dialogue poll interval (60 seconds by default). The W1 interval, project routing
+and topology continue to use `workdesk`. Optional `workdeskDialog.onlyTaskId` limits
+local notices to one task while keeping other discovered metadata for later.
+
+The adapter must advertise `list_owner_events`, `read_owner_messages` and
+`ack_owner_messages`. This stage only calls the event index and, for a pinned older
+handoff, the normal assignment list. An older handoff can have a full pin in
+`workdeskDialog.legacyBindings`, with `taskId`, `assignmentId`, `threadId` and
+`sessionId`. The watcher checks the assignment, original Board thread and current
+native assignee. A bound local thread receives a generic notice. Shared and mirrored
+threads receive no notice.
+
+`GET /api/board` shows `workdeskDialog.delivery: "awaiting_recipient"`,
+`pending`, `more`, `polledAt`, and per-reason `blocked` counts. Event metadata and
+its cursor survive a restart. This stage keeps owner content in Workdesk and leaves
+all delivery acknowledgments pending.
+
 ## Secrets
 
 An agent that needs a token, a password or OAuth keys it must never see used to write a script

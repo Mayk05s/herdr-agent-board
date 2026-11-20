@@ -2,6 +2,7 @@ import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { isRecord, readJson, updateJson } from '../../src/adapters/json-store.ts'
 import type { WorkdeskTask } from '../../src/core/workdesk.ts'
+import type { OwnerEvent } from '../../src/core/workdesk-dialog.ts'
 
 type State = {
   tasks: WorkdeskTask[]
@@ -11,11 +12,18 @@ type State = {
   topology?: boolean
   rejectHeartbeat?: boolean
   invalidList?: boolean
+  dialog?: {
+    events: OwnerEvent[]
+    pageSize?: number
+    invalidList?: boolean
+    deny?: string
+  }
 }
 const isState = (value: unknown): value is State => isRecord(value) && Array.isArray(value.tasks)
 const [, , statePath = '', logPath = '', literal = ''] = process.argv
 const send = (id: number, result: unknown) => console.log(JSON.stringify({ jsonrpc: '2.0', id, result }))
 const tools = ['board_heartbeat', 'list_board_tasks', 'claim_task', 'report_task']
+const dialogTools = ['list_owner_events', 'read_owner_messages', 'ack_owner_messages']
 const response = (data: unknown, isError = false) => ({ structuredContent: data, isError })
 
 for await (const line of createInterface({ input: process.stdin })) {
@@ -27,7 +35,10 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (method === 'initialize') send(id, { protocolVersion: '2024-11-05' })
   if (method === 'tools/list') {
     send(id, {
-      tools: (state.missing ? ['start_codex_review', 'get_codex_review'] : tools).map(name => ({
+      tools: (state.missing
+        ? ['start_codex_review', 'get_codex_review']
+        : [...tools, ...(state.dialog ? dialogTools : [])]
+      ).map(name => ({
         name,
         ...(state.topology &&
           name === 'board_heartbeat' && {
@@ -51,6 +62,27 @@ for await (const line of createInterface({ input: process.stdin })) {
     )
   }
   if (params.name === 'list_board_tasks') send(id, response({ tasks: state.invalidList ? null : state.tasks }))
+  if (state.dialog && dialogTools.includes(params.name)) {
+    const dialog = state.dialog
+    const { after } = params.arguments
+    if (dialog.deny === params.name) {
+      send(id, response({ code: 'role_denied', status: 403 }, true))
+    } else if (params.name === 'list_owner_events') {
+      const remaining = dialog.events.filter(e => e.id > after)
+      const events = remaining.slice(0, dialog.pageSize ?? params.arguments.limit)
+      send(
+        id,
+        response({
+          events,
+          cursor: dialog.invalidList ? after + 999 : (events.at(-1)?.id ?? after),
+          more: remaining.length > events.length,
+        }),
+      )
+    } else {
+      // This path is outside the metadata watcher. Fail tests if it tries to call it.
+      send(id, response({ code: 'unexpected_dialog_call', status: 403 }, true))
+    }
+  }
   if (params.name !== 'claim_task') continue
 
   const { task_id, executor } = params.arguments

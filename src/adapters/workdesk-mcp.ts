@@ -1,5 +1,5 @@
 // The local Workdesk adapter speaks MCP over newline-delimited JSON-RPC on stdio.
-import { object, type WorkdeskConfig } from '../core/workdesk.ts'
+import { object, type WorkdeskMcpConfig } from '../core/workdesk.ts'
 
 const RPC_TIMEOUT_MS = 15_000
 const MAX_FRAME = 8 * 1024 * 1024
@@ -12,11 +12,17 @@ export function supportsTopology(schema: unknown): boolean {
 
 export class WorkdeskToolError extends Error {
   readonly conflict: boolean
+  readonly code: 'assignment_mismatch' | 'conflict' | 'role_denied' | 'invalid_cursor' | null
 
   constructor(result: unknown) {
     super('Workdesk tool failed')
     const body = object(result)
-    this.conflict = body?.code === 'conflict' && body.status === 409
+    const code = body?.code
+    this.conflict = code === 'conflict' && body?.status === 409
+    this.code =
+      code === 'assignment_mismatch' || code === 'conflict' || code === 'role_denied' || code === 'invalid_cursor'
+        ? code
+        : null
   }
 }
 
@@ -42,7 +48,7 @@ async function* messages(stream: ReadableStream<Uint8Array>): AsyncGenerator<Rec
 }
 
 export async function withWorkdeskMcp<T>(
-  config: WorkdeskConfig,
+  config: WorkdeskMcpConfig,
   signal: AbortSignal,
   run: (mcp: {
     tools(): Promise<Map<string, unknown>>

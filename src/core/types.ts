@@ -222,6 +222,7 @@ export interface Config {
   threads?: unknown
   /** Trusted local Workdesk watcher settings, read only by the board server. */
   workdesk?: unknown
+  workdeskDialog?: unknown
   /** The model rule (#429, an object), as config.json has it: read through core/model-check.ts modelsConfig. */
   models?: unknown
   [extra: string]: unknown

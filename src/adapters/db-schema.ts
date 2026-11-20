@@ -189,6 +189,37 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    version: 6,
+    store: 'workdesk-dialog',
+    // Workdesk dialogue metadata. Owner text is kept outside the Board inbox and thread journal.
+    sql: `
+      CREATE TABLE workdesk_dialog_bindings (
+        task_id INTEGER PRIMARY KEY,
+        assignment_id TEXT NOT NULL UNIQUE,
+        executor TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        sid TEXT NOT NULL,
+        revision INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE workdesk_dialog_cursor (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        cursor INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE workdesk_dialog_events (
+        id INTEGER PRIMARY KEY,
+        board_task_id INTEGER NOT NULL,
+        assignment_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        executor TEXT,
+        board_status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        noticed INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE INDEX workdesk_dialog_pending ON workdesk_dialog_events (board_task_id, assignment_id, id);
+    `,
+  },
 ]
 
 /** The version the code makes a file: the last step's. */
