@@ -669,8 +669,5 @@
 :root[data-look="terminal"] .away-lane,
 :root[data-look="terminal"] .away-time { color: var(--t-dim); }
 :root[data-look="terminal"] .away-kind { background: none; padding: 0; border-radius: 0; }
-:root[data-look="terminal"] .away-owner .away-kind,
 :root[data-look="terminal"] .away-error .away-kind { --kind: var(--t-red); }
-:root[data-look="terminal"] .away-done .away-kind { --kind: var(--t-cyan); }
-:root[data-look="terminal"] .away-ext .away-kind { --kind: var(--t-amber); }
 :root[data-look="terminal"] .away-open:hover { background: none; text-decoration: underline; }

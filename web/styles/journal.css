@@ -1,7 +1,7 @@
 /* The away journal's strip (#489, web/src/components/journal/AwayStrip.tsx): "While you were away"
    under the toolbar, a row per session that moved, each a button that opens its card. The kinds
-   wear their columns' colors: waits on you and stopped on an error red, finished cyan, waits on
-   someone else yellow. One line per row on a wide board; on a phone the line goes under the name.
+   wear their columns' colors (orange, purple and the accent, as the column heads in both styles),
+   and stopped on an error red. One line per row on a wide board; on a phone the line goes under the name.
    The toolbar's "Since 23:56" is a pill like the others (toolbar.css), lit while the strip is open. */
 
 .away-strip {
@@ -66,10 +66,10 @@
   color: var(--kind);
   background: color-mix(in srgb, var(--kind) 14%, transparent);
 }
-.away-owner .away-kind,
+.away-owner .away-kind { --kind: var(--orange); }
 .away-error .away-kind { --kind: var(--red); }
-.away-done .away-kind { --kind: #1aa1b8; }
-.away-ext .away-kind { --kind: #c99700; }
+.away-done .away-kind { --kind: var(--accent); }
+.away-ext .away-kind { --kind: var(--purple); }
 .away-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .away-lane { color: var(--label-3); font-size: 12px; white-space: nowrap; }
 .away-line { overflow: hidden; color: var(--label-2); text-overflow: ellipsis; white-space: nowrap; }
@@ -89,5 +89,5 @@ p.away-note { margin: 0; }
   }
   .away-lane { display: none; }
   .away-time { grid-column: 3; grid-row: 1; }
-  .away-line { grid-column: 1 / -1; grid-row: 2; white-space: normal; }
+  .away-line { grid-column: 1 / -1; grid-row: 2; white-space: normal; overflow-wrap: anywhere; }
 }
