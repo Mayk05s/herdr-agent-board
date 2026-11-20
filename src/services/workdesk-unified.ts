@@ -1,4 +1,6 @@
-import { type BoardDb, openDb } from '../adapters/db.ts'
+import { lstatSync } from 'node:fs'
+import { type BoardDb, dbFile, openDb } from '../adapters/db.ts'
+import { stateDir } from '../adapters/paths.ts'
 import { appendEntry, findEntry, getThread } from '../adapters/work-thread-store.ts'
 import { WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
 import { workdeskHandoffReader } from '../adapters/workdesk-store.ts'
@@ -10,11 +12,41 @@ import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import type { WorkdeskEvent } from '../core/workdesk-events.ts'
 
 function settings(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
-  const board = workdeskMcpConfig(object(cfg.workdesk)?.unified)
+  const raw = object(object(cfg.workdesk)?.unified)
+  const board = workdeskMcpConfig(raw)
+  const isolation = object(raw?.isolation)
   const dialog = workdeskDialogConfig(cfg.workdeskDialog, cfg.workdesk)
   const id = dialog?.onlyTaskId
   const pin = id === undefined ? undefined : dialog?.legacyBindings.get(id)
-  return board && dialog && pin ? { board, dialog, pin } : null
+  return board && pin && isolation ? { board, pin, isolation } : null
+}
+
+function isolated(config: NonNullable<ReturnType<typeof settings>>, role: 'writerUid' | 'senderUid') {
+  const { writerUid, senderUid, interactiveUid, sharedGid } = config.isolation
+  const uids = [writerUid, senderUid, interactiveUid]
+  if (
+    process.platform !== 'darwin' ||
+    ![...uids, sharedGid].every(id => typeof id === 'number' && Number.isSafeInteger(id) && id > 0) ||
+    new Set(uids).size !== uids.length ||
+    process.getuid?.() !== config.isolation[role]
+  )
+    return false
+  try {
+    const directory = lstatSync(stateDir())
+    const database = lstatSync(dbFile())
+    return (
+      directory.isDirectory() &&
+      database.isFile() &&
+      directory.uid === writerUid &&
+      database.uid === writerUid &&
+      directory.gid === sharedGid &&
+      database.gid === sharedGid &&
+      (directory.mode & 0o777) === 0o770 &&
+      (database.mode & 0o777) === 0o660
+    )
+  } catch {
+    return false
+  }
 }
 
 function binding(db: Pick<BoardDb, 'db'>, config: NonNullable<ReturnType<typeof settings>>) {
@@ -69,7 +101,8 @@ export const WORKDESK_POST_TOOL = {
 } as const
 
 export function workdeskUnifiedEnabled(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
-  return settings(cfg) !== null
+  const config = settings(cfg)
+  return !!config && isolated(config, 'writerUid')
 }
 
 export function queueNativeWorkdeskMessage(
@@ -86,6 +119,7 @@ export function queueNativeWorkdeskMessage(
   const text = typeof input?.text === 'string' ? cleanText(input.text, 12001) : ''
   if (
     !config ||
+    !isolated(config, 'writerUid') ||
     sid !== config.pin.sessionId ||
     !validAssignmentId(requestId) ||
     !input ||
@@ -192,12 +226,13 @@ export function applyWorkdeskThreadEvent(cfg: { workdesk?: unknown; workdeskDial
 type Pending = { entry_id: string; kind: string; payload: string | null }
 
 export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
-  if (!settings(cfg)) return async () => {}
+  const startup = settings(cfg)
+  if (!startup || !isolated(startup, 'senderUid')) return null
   let current: Promise<void> | undefined
   const controller = new AbortController()
   async function flush() {
     const config = settings(cfg)
-    if (!config || controller.signal.aborted) return
+    if (!config || !isolated(config, 'senderUid') || controller.signal.aborted) return
     const db = openDb({ create: false })
     if (!db) return
     try {
@@ -218,7 +253,7 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
       const entry = findEntry(db, target.head.id, row.entry_id)
       if (!eligible(entry, target.head, target)) return mark('conflict')
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])
-      const claim = await withWorkdeskMcp(config.dialog, signal, async mcp => {
+      const claim = await withWorkdeskMcp(config.board, signal, async mcp => {
         const reply = object(await mcp.call('list_board_tasks', {}))
         return Array.isArray(reply?.tasks) ? reply.tasks.map(workdeskTask).find(t => t?.id === config.pin.taskId) : null
       })
@@ -242,7 +277,10 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
             }
       const frozen = JSON.stringify(payload)
       if (row.payload !== null && row.payload !== frozen) return mark('conflict')
-      if (!binding(db, config) || JSON.stringify(settings(cfg)) !== JSON.stringify(config)) return
+      const currentTarget = binding(db, config)
+      if (!currentTarget || currentTarget.executor !== target.executor || currentTarget.sid !== target.sid)
+        return mark('conflict')
+      if (controller.signal.aborted || JSON.stringify(settings(cfg)) !== JSON.stringify(config)) return
       db.write('workdesk-unified', tx => {
         tx.db
           .query('UPDATE workdesk_unified_outbox SET payload=?,state=? WHERE entry_id=?')
@@ -251,7 +289,7 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
       try {
         const result =
           row.kind === 'ask'
-            ? await withWorkdeskMcp(config.dialog, signal, mcp => mcp.call('report_task', payload))
+            ? await withWorkdeskMcp(config.board, signal, mcp => mcp.call('report_task', payload))
             : await withWorkdeskMcp(config.board, signal, mcp => mcp.call('post_board_thread_message', payload))
         if (row.kind === 'ask') {
           if (object(result)?.status === 'waiting') mark('sent')
@@ -284,7 +322,6 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
           current = undefined
         })
   }, 1000)
-  timer.unref()
   return async () => {
     clearInterval(timer)
     controller.abort()
