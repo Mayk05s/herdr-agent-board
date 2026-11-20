@@ -90,6 +90,8 @@ export interface SessionDetail {
   item: Item
   /** Its latest turns, oldest first. */
   conversation: ConversationTurn[]
+  codexThread?: string | null
+  history?: { session: string; conversation: ConversationTurn[] }
   /** The user's messages Claude has not taken in yet, oldest first (only while its Claude runs). */
   queued?: QueuedPrompt[]
   /** The terminal's screen while a dialog holds the session. */

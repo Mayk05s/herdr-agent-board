@@ -33,6 +33,7 @@ import {
   sshVersion,
   writePidRecord,
 } from '../adapters/ssh.ts'
+import { connectWorkdeskEvents } from '../adapters/workdesk-events.ts'
 import { messageGate } from '../core/message-gate.ts'
 import { pageWithLook } from '../core/omarchy-theme.ts'
 import type { BackupPayload, CalendarPayload, TimePayload } from '../core/payload.ts'
@@ -45,10 +46,13 @@ import { toastBody } from '../core/team-unread.ts'
 import { MAX_NAME } from '../core/team-wire.ts'
 import { boardPorts, forwardSpec, publicHosts, sshArgs, tunnelConfig, tunnelProblems } from '../core/tunnel.ts'
 import type { Config } from '../core/types.ts'
+import { object, validTaskId, workdeskConfig } from '../core/workdesk.ts'
+import { type WorkdeskEvent, workdeskEventsConfig } from '../core/workdesk-events.ts'
 import { teamDesktop } from '../integrations/team-toast.ts'
 import { createAccess } from '../services/access.ts'
 import { backupView, startBackups } from '../services/backup.ts'
 import { createBackupServer } from '../services/backup-server.ts'
+import { createBoardEvents } from '../services/board-events.ts'
 import { createCalendarSync } from '../services/calendar.ts'
 import { createCalendarReminders } from '../services/calendar-reminders.ts'
 import { startCompactor } from '../services/compactor.ts'
@@ -79,12 +83,17 @@ import {
 import { createWakeControl, startWakeStart } from '../services/wake/control.ts'
 import { createWorkHub, type WorkHub } from '../services/work-hub.ts'
 import { keepThreadsDb, threadsPayload } from '../services/work-threads.ts'
+import { createWorkdeskDialog } from '../services/workdesk-dialog.ts'
+import { connectWorkdeskDialogLauncher } from '../services/workdesk-dialog-launcher.ts'
+import { runWorkdeskEvents, workdeskEventHandlers } from '../services/workdesk-events.ts'
+import { createWorkdeskWatcher } from '../services/workdesk-watcher.ts'
 import { createBoardState } from './board-state.ts'
 import { dispatch, json, peerOf, type Route } from './http.ts'
 import { createRemoteListener } from './remote.ts'
 import { accessRoutes } from './routes/access.ts'
 import { archiveRoutes } from './routes/archive.ts'
 import { backupRoutes } from './routes/backup.ts'
+import { boardEventRoutes } from './routes/board-events.ts'
 import { boardRoutes } from './routes/board.ts'
 import { calendarRoutes, eventReveal } from './routes/calendar.ts'
 import { fsRoutes } from './routes/fs.ts'
@@ -615,6 +624,117 @@ export async function startServer({
     const shown = line && reminders.line()
     return shown ? { ...line, reminders: shown } : line
   }
+  const boardEvents = createBoardEvents(deps)
+  const localEventRoutes = boardEventRoutes(boardEvents)
+  // First live trial: no coordinator prompt, W1 and the protected receiver keep their own polling.
+  type TrialStatus = {
+    state: 'connecting' | 'connected' | 'fallback'
+    boardTaskId: number
+    cursor: number | null
+    latestEvent: { id: number; type: WorkdeskEvent['type']; at: number } | null
+  }
+  let trialStatus: TrialStatus | null = null
+  let workdeskStream: { controller: AbortController; task: Promise<void> } | undefined
+  let workdeskStreamConfig = ''
+  async function configureWorkdeskStream() {
+    const signature = JSON.stringify([cfg.workdesk, cfg.workdeskDialog, cfg.boardEvents])
+    if (signature === workdeskStreamConfig) return
+    workdeskStreamConfig = signature
+    const prior = workdeskStream
+    prior?.controller.abort()
+    await prior?.task
+    if (signature !== workdeskStreamConfig || workdeskStream !== prior) return
+    workdeskStream = undefined
+    trialStatus = null
+    const config = workdeskEventsConfig(cfg.workdesk)
+    const watch = workdeskConfig(cfg.workdesk)
+    const eventSettings = object(object(cfg.workdesk)?.events)
+    const taskId = eventSettings?.onlyTaskId
+    const dispatchAfter = validTaskId(eventSettings?.dispatchAssignmentsAfter)
+      ? eventSettings.dispatchAssignmentsAfter
+      : undefined
+    if (!config || !watch || cfg.boardEvents !== true || !validTaskId(taskId)) return
+    const controller = new AbortController()
+    const current: TrialStatus = {
+      state: 'connecting',
+      boardTaskId: taskId,
+      cursor: null,
+      latestEvent: null,
+    }
+    trialStatus = current
+    // Reuse the global transport cursor from the scoped trial. Only assignment
+    // dispatch widens. Owner dialogue and the journal publisher retain the trial scope.
+    const source = boardEvents.source(JSON.stringify([config.url, taskId, config.cursorEpoch]), taskId, dispatchAfter)
+    const handlers = workdeskEventHandlers(workdesk, workdeskDialog, taskId)
+    const task = runWorkdeskEvents({
+      signal: controller.signal,
+      cursor: {
+        read() {
+          current.cursor = source.read()
+          return current.cursor
+        },
+        reset() {
+          source.reset()
+          current.cursor = 0
+          current.latestEvent = null
+        },
+        commit(event) {
+          source.commit(event)
+          current.cursor = event.id
+          if (event.board_task_id === taskId)
+            current.latestEvent = { id: event.id, type: event.type, at: event.created_at }
+        },
+      },
+      connect: (since, signal) => connectWorkdeskEvents(config, since, signal),
+      connectionHealthy(ok) {
+        current.state = ok ? 'connected' : 'fallback'
+        boardEvents.health('workdesk.events', ok)
+      },
+      reconcile: handlers.reconcile,
+      async apply(event, signal) {
+        if (
+          event.type === 'task.assigned_board' &&
+          dispatchAfter !== undefined &&
+          event.id > dispatchAfter &&
+          source.dispatchReady()
+        ) {
+          await workdesk.reconcile(signal, event.board_task_id, {
+            eventId: event.id,
+            assignmentId: event.assignment_id,
+          })
+          return
+        }
+        await handlers.apply(event, signal)
+      },
+    }).catch(() => {
+      if (!controller.signal.aborted) {
+        current.state = 'fallback'
+        log('Workdesk SSE consumer stopped')
+      }
+    })
+    workdeskStream = { controller, task }
+  }
+  const workdesk = createWorkdeskWatcher({
+    cfg,
+    items: () => (board.stale() ? null : board.items()),
+    observation: () => board.observation(),
+    onChange: () => board.publish(),
+    log,
+  })
+  const dialogLauncher = connectWorkdeskDialogLauncher(
+    cfg,
+    () => board.observation()?.items ?? null,
+    () => board.publish(),
+  )
+  deps.launcherCodexRollout ??= dialogLauncher.codexRollout
+  const workdeskDialog = createWorkdeskDialog({
+    cfg,
+    items: () => board.observation()?.items ?? null,
+    sink: dialogLauncher.sink,
+    recipientReady: dialogLauncher.ready,
+    recipientDelivering: dialogLauncher.delivering,
+    onChange: () => board.publish(),
+  })
   const board = createBoardState({
     deps,
     launches,
@@ -634,6 +754,9 @@ export async function startServer({
     backup: backupLine,
     time: timeLine,
     calendar: calendarLine,
+    workdesk: workdesk.view,
+    workdeskDialog: workdeskDialog.view,
+    observeSessions: (snapshot, items) => boardEvents.observe(snapshot, items, Date.now()),
     // Threads (#379): while config.json turns them on, the revision and the count that waits on
     // the owner (two queries a refresh); off, nothing is read.
     threads: () => {
@@ -811,7 +934,10 @@ export async function startServer({
       // the CLI and agents send no Origin, and the presence switch itself says what it says.
       if (req.method !== 'GET' && path.startsWith('/api/') && path !== '/api/presence' && ownOrigin(req))
         presence.touch()
-      return await dispatch(routes, req, url, path, guards, () => peerOf(srv, req))
+      if (req.method === 'GET' && path === '/api/board-events/status')
+        return trialStatus ? json(200, trialStatus) : json(404, { error: 'disabled' })
+      const selected = path === '/api/board-events' || path === '/api/board-events/ack' ? localEventRoutes : routes
+      return await dispatch(selected, req, url, path, guards, () => peerOf(srv, req))
     } catch (err) {
       // The path only: a query can carry the page's token.
       log(`${req.method} ${url ? url.pathname : req.url.split('?')[0]}: ${messageOf(err)}`)
@@ -862,7 +988,10 @@ export async function startServer({
   ]
   refresh()
   // The port makes it one board per machine, so one scheduler; claims cover an overlap.
-  const scheduler = startScheduler({ deps, onChange: refresh })
+  const scheduler = startScheduler({ deps, onChange: refresh, dialogRecipient: dialogLauncher.sink.permits })
+  workdesk.configChanged()
+  workdeskDialog.configChanged()
+  void configureWorkdeskStream()
   // Auto-compact (#378) beside it, for the same reason: one board types /compact.
   const compactor = startCompactor({ deps, onChange: refresh })
   // Shells a board before this one opened and that are gone by now are forgotten.
@@ -914,6 +1043,10 @@ export async function startServer({
       // The calendar turned on or off: its timer started or stopped, its reminders' too.
       calendar.configChanged()
       reminders.configChanged()
+      workdesk.configChanged()
+      dialogLauncher.configChanged()
+      workdeskDialog.configChanged()
+      await configureWorkdeskStream()
       team.refresh()
       holdLoopback6()
       await board.refresh()
@@ -923,6 +1056,11 @@ export async function startServer({
       for (const watcher of watchers) watcher.close()
       omarchy?.close()
       scheduler.stop()
+      workdeskStreamConfig = ''
+      workdeskStream?.controller.abort()
+      dialogLauncher.close()
+      await Promise.all([workdesk.stop(), workdeskDialog.stop(), workdeskStream?.task])
+      await boardEvents.stop()
       compactor.stop()
       backups.stop()
       wake.stop()

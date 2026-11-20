@@ -212,10 +212,10 @@ export function askSleep(fields: Omit<RestartAsk, 'text'> & { moveTo?: string })
   return { entry: addEntry({ ...fields, kind: 'sleep', idle: true, text: '', at: now, next: now }), again: false }
 }
 
-/** Change an entry that still exists: `change(entry)` returns the new entry or undefined. */
+/** Change an entry that still exists: return the replacement, null to delete, or undefined to leave it. */
 export function updateEntry(
   id: unknown,
-  change: (entry: ScheduleEntry) => ScheduleEntry | undefined,
+  change: (entry: ScheduleEntry) => ScheduleEntry | null | undefined,
 ): ScheduleEntry | null | undefined {
   if (!ID.test(String(id))) return undefined
   mkdirSync(scheduleDir(), { recursive: true }) // the lock lives next to the file

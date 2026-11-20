@@ -422,3 +422,92 @@ test('discarding clears the box, the files and the stored draft — not while th
   expect([p.state.text, p.state.files.length, p.storage.has('board.draft.sa')]).toEqual(['', 0, false])
   expect(p.log.at(-1)).toBe('focus')
 })
+
+test('Codex keeps transport success until an exact new event in the addressed thread, even after the wait', async () => {
+  const codex = item({ key: 'old', session: 'old', agent: 'codex', codexThread: 'current', codexTerminal: 'term' })
+  const p = page([codex])
+  p.open('old')
+  p.state.detail = {
+    codexThread: 'old',
+    conversation: [{ role: 'user', text: 'Build /tmp/demo 100%', at: p.clock.now - 50 }],
+  }
+  p.box.input('Build /tmp/demo 100%')
+  const sent = p.box.send()
+  p.answer({ ok: true })
+  await sent
+  p.clock.now += 31_001
+  p.timers.find(timer => timer.ms === REDRAW_AFTER_SEND_MS)?.run()
+  expect(p.waiting('old')).toMatchObject([{ state: 'history-unavailable' }])
+  p.state.detail = {
+    codexThread: 'current',
+    conversation: [{ role: 'user', text: 'Build /tmp/other 100%', at: p.clock.now }],
+  }
+  p.box.settle()
+  expect(p.waiting('old')).toHaveLength(1)
+  p.state.detail = {
+    codexThread: 'old',
+    conversation: [{ role: 'user', text: 'Build /tmp/demo 100%', at: p.clock.now }],
+  }
+  p.box.settle()
+  expect(p.waiting('old')).toHaveLength(1)
+  p.state.detail = { ...p.state.detail, codexThread: 'current' }
+  p.box.settle()
+  expect(p.waiting('old')).toEqual([])
+})
+
+test('a failed Codex send retries the same operation against the same terminal and thread', async () => {
+  const codex = item({ key: 'old', session: 'old', agent: 'codex', codexThread: 'current', codexTerminal: 'term' })
+  const p = page([codex])
+  p.open('old')
+  p.box.input('Synthetic retry')
+  const sent = p.box.send()
+  p.answer({ ok: false, error: 'Transport failed' })
+  await sent
+  const [failed] = p.waiting('old')
+  expect(failed).toMatchObject({ state: 'failed', error: 'Transport failed' })
+  codex.codexThread = 'next'
+  const retry = p.box.retry(failed?.id ?? '')
+  expect(p.posts.map(x => x.body)).toEqual([
+    {
+      text: 'Synthetic retry',
+      files: [],
+      session: 'old',
+      requestId: failed?.id,
+      codexThread: 'current',
+      codexTerminal: 'term',
+    },
+    {
+      text: 'Synthetic retry',
+      files: [],
+      session: 'old',
+      requestId: failed?.id,
+      codexThread: 'current',
+      codexTerminal: 'term',
+    },
+  ])
+  p.answer({ ok: false, error: 'Thread changed' })
+  await retry
+  expect(p.waiting('old')).toMatchObject([{ state: 'failed', error: 'Thread changed' }])
+})
+
+test('one recorded Codex event settles at most one identical submission', async () => {
+  const codex = item({ key: 'codex', session: 'sid', agent: 'codex' })
+  const p = page([codex])
+  p.open('codex')
+  for (let i = 0; i < 2; i++) {
+    p.box.input('Identical synthetic submission')
+    const sent = p.box.send()
+    p.answer({ ok: true })
+    await sent
+  }
+  p.clock.now++
+  const entry = { role: 'user', text: 'Identical synthetic submission', at: p.clock.now }
+  p.state.detail = { codexThread: 'sid', conversation: [entry] }
+  p.box.settle()
+  expect(p.waiting('codex')).toHaveLength(1)
+  p.box.settle()
+  expect(p.waiting('codex')).toHaveLength(1)
+  p.state.detail = { codexThread: 'sid', conversation: [entry, { ...entry, at: entry.at + 1 }] }
+  p.box.settle()
+  expect(p.waiting('codex')).toEqual([])
+})

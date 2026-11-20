@@ -1,7 +1,23 @@
 // The message box under the conversation: Enter sends, Shift+Enter breaks the line; files come in
 // through the clip, a paste or a drop and upload at once, and the message carries their paths.
 // When it can send, what its buttons say, and the toast once it went.
-import type { Translator } from '../../../src/core/types.ts'
+import { isCodexItem } from '../../../src/core/codex.ts'
+import type { Item, Translator } from '../../../src/core/types.ts'
+
+import type { ShownThread } from './outbox.ts'
+
+export function codexSendBlock(item: Item | null | undefined, detail?: ShownThread | null) {
+  if (!item || !isCodexItem(item)) return null
+  if (item.status === 'blocked') return 'compose.codexDialog'
+  if (item.codexUnresolved) return 'compose.codexUnresolved'
+  if (
+    item.codexRevision !== detail?.item?.codexRevision ||
+    (detail?.codexThread !== undefined && detail.codexThread !== (item.codexThread ?? item.session)) ||
+    (detail?.item?.codexTerminal && detail.item.codexTerminal !== item.codexTerminal)
+  )
+    return 'compose.codexRefreshing'
+  return null
+}
 
 export type AttachmentStatus = 'uploading' | 'done' | 'error'
 

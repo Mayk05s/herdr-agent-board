@@ -20,12 +20,10 @@ export interface ConnectionOptions {
    * One it cannot read is not taken, and the page is not connected until a board it can read comes.
    */
   readable?: (value: BoardMessage) => boolean
-  /**
-   * The page's own files changed (the plugin was updated): a board of another `version` than the
-   * one before came. Loads the new page; that board is not taken. One the page cannot read counts
-   * too: right after an update, that is how a new board most likely looks to the old page.
-   */
+  /** Load the updated page when the board announces a different version. */
   reload?: () => void
+  /** While reload is deferred, keep accepting updates that the current page can read. */
+  canReload?: () => boolean
   data: (value: BoardMessage) => void
   connected: (value: boolean) => void
 }
@@ -40,21 +38,30 @@ export function boardConnection({
   snapshot,
   readable = () => true,
   reload,
+  canReload = () => true,
   data,
   connected,
 }: ConnectionOptions) {
   let epoch = 0
   let stream: BoardStream | null = null
   let controller: AbortController | null = null
-  // The version of the board before, through every resume (the old page's state.version).
   let version: string | null = null
-  /** Whether `value` is of another version than the board before it: then the page reloads. */
+  let pendingReload = false
+  function recheckReload(): boolean {
+    if (!pendingReload || !reload || !canReload()) return false
+    pendingReload = false
+    reload()
+    return true
+  }
+
   function updated(value: BoardMessage): boolean {
     if (!reload) return false
     const next = typeof value.version === 'string' ? value.version : null
-    if (version && next && next !== version) return true
-    version = next
-    return false
+    if (next) {
+      version ??= next
+      pendingReload = next !== version
+    }
+    return recheckReload()
   }
   function suspend(): void {
     ++epoch
@@ -87,8 +94,16 @@ export function boardConnection({
       try {
         const value: unknown = JSON.parse(event.data)
         if (!isBoard(value)) return
-        if (updated(value)) return reload?.()
-        if (!readable(value)) return connected(false)
+        if (updated(value)) return
+        if (!readable(value)) {
+          if (pendingReload) {
+            // The existing page cannot take this update. A delayed GET or transport reconnect
+            // must not make the previous board writable again.
+            eventReceived = true
+            hasSnapshot = false
+          }
+          return connected(false)
+        }
         eventReceived = true
         hasSnapshot = true
         transportReady = true
@@ -99,7 +114,7 @@ export function boardConnection({
     snapshot(controller.signal)
       .then(value => {
         if (current !== epoch || eventReceived || !isBoard(value)) return
-        if (updated(value)) return reload?.()
+        if (updated(value)) return
         if (!readable(value)) return connected(false)
         hasSnapshot = true
         data(value)
@@ -109,7 +124,7 @@ export function boardConnection({
         if (current === epoch && !eventReceived) connected(false)
       })
   }
-  return { resume, suspend }
+  return { resume, suspend, recheckReload }
 }
 
 /** What `dialogHistory` needs of `window.history`. */

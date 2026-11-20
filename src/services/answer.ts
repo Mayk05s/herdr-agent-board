@@ -660,7 +660,12 @@ export async function codexApprovalIdentity(item: Item): Promise<string | null> 
     )
       return null
     const session = isRecord(agent.agent_session) ? agent.agent_session.value : null
-    if ((session ?? null) !== item.session) return null
+    if (
+      item.codexUnresolved ||
+      (session ?? null) !== (item.codexReported ?? item.session) ||
+      (item.codexTerminal && item.codexTerminal !== agent.terminal_id)
+    )
+      return null
     return JSON.stringify([item.pane, agent.terminal_id, agent.state_change_seq, session])
   } catch {
     return null

@@ -5,13 +5,22 @@
 // thread (the session's outbox, models/outbox.ts), goes out once and carries the draft's id; the
 // draft stays stored until the session has the message, and one not sent stays at the foot with
 // Retry and Edit. The page's state and effects come in as `deps`.
+import { isCodexItem } from '../../../src/core/codex.ts'
 import type { Item, Translator } from '../../../src/core/types.ts'
-import { type Attachment, canSubmit, isUploading, sentText, uploadedPaths } from './composer.ts'
+import { type Attachment, canSubmit, codexSendBlock, isUploading, sentText, uploadedPaths } from './composer.ts'
 import type { Draft, DraftBook } from './drafts.ts'
-import { newestAt, type OutState, type ShownThread, sentKey, unsettled } from './outbox.ts'
+import {
+  type CodexReceipt,
+  KEEP_SENT_MS,
+  newestAt,
+  type OutState,
+  type ShownThread,
+  sentKey,
+  unsettled,
+} from './outbox.ts'
 import { draftKey } from './sheet.ts'
 
-export type SendResult = { ok: true } | { ok: false; error: string }
+export type SendResult = { ok: true; codexReceipt?: unknown } | { ok: false; error: string }
 
 /** One of the board's messages at the foot of its session's thread. */
 export interface OutboxEntry {
@@ -33,6 +42,14 @@ export interface OutboxEntry {
   error: string
   /** When the session took it (0 until then). */
   sentAt: number
+  codexReceipt?: CodexReceipt
+  /** Keep the intended recipient when the transport is retried. */
+  codexTarget?: {
+    session: string | null
+    codexThread: string | null
+    codexTerminal: string | null
+    codexRevision: string | null
+  }
 }
 
 export interface ComposerPage {
@@ -84,6 +101,8 @@ export interface ComposerSession {
   input(text: string): void
   send(): Promise<void>
   discard(): void
+  /** Files held for delivery or retry, after they have left the composer itself. */
+  hasUnsentAttachments(): boolean
   /**
    * The board's messages the thread of `key` shows at its foot now, the sheet open on `open` with
    * its `detail` as read so far.
@@ -99,8 +118,8 @@ export interface ComposerSession {
 
 /** A message sent: the conversation is read again a little later, with the reply on its way. */
 export const RELOAD_AFTER_SEND_MS = 800
-/** A message sent and still unseen in the transcript by then goes all the same (outbox.ts KEEP_SENT_MS). */
-export const REDRAW_AFTER_SEND_MS = 31_000
+/** Redraw sent bubbles after the transcript has had time to catch up. */
+export const REDRAW_AFTER_SEND_MS = KEEP_SENT_MS + 1000
 /** "Write" opens the sheet, then the box takes the focus. */
 export const COMPOSE_FOCUS_MS = 50
 
@@ -111,6 +130,7 @@ export function composerSession(deps: ComposerDeps): ComposerSession {
   let filesFor: string | null = null // the session the files were added for; outlives a close
   let open: string | null = null // the session open as of the last opening
   let onTheirWay: ReadonlySet<string> = new Set()
+  const codexSeen = new Map<string, number>()
   const outbox = new Map<string, readonly OutboxEntry[]>() // session -> the board's messages its thread does not show yet
 
   function save(text: string): void {
@@ -143,9 +163,14 @@ export function composerSession(deps: ComposerDeps): ComposerSession {
     )
 
   /** What the thread of `key` shows of its outbox: the open session's settles against its detail. */
-  function shown(key: string, openKey: string | null, detail: ShownThread | null): readonly OutboxEntry[] {
+  function shown(
+    key: string,
+    openKey: string | null,
+    detail: ShownThread | null,
+    seen = new Map(codexSeen),
+  ): readonly OutboxEntry[] {
     const list = entries(key)
-    return openKey === key ? unsettled(list, detail ?? {}, deps.now()) : list
+    return openKey === key ? unsettled(list, detail ?? {}, deps.now(), KEEP_SENT_MS, seen) : list
   }
 
   /** A message gone for good: its previews, unless the box shows them again. */
@@ -166,7 +191,13 @@ export function composerSession(deps: ComposerDeps): ComposerSession {
     if (page.open === key) deps.foot()
     if (it?.sleeping) deps.busy(key, page.t('busy.waking'))
     const r: SendResult = it
-      ? await deps.post(key, { text: entry.text, files: entry.files, session: it.session ?? null, requestId: id })
+      ? await deps.post(key, {
+          text: entry.text,
+          files: entry.files,
+          session: it.session ?? null,
+          requestId: id,
+          ...entry.codexTarget,
+        })
       : { ok: false, error: page.t('detail.missing') }
     mark(key, false)
     deps.busy(key, null)
@@ -175,19 +206,36 @@ export function composerSession(deps: ComposerDeps): ComposerSession {
     const onShow = openNow === key
     if (r.ok && it) {
       drafts.clear(draftKey(it), id)
-      patch(key, id, { state: 'sent', sentAt: deps.now() })
+      const receipt = r.codexReceipt
+      const codexReceipt =
+        receipt &&
+        typeof receipt === 'object' &&
+        'thread' in receipt &&
+        (typeof receipt.thread === 'string' || receipt.thread === null) &&
+        'text' in receipt &&
+        typeof receipt.text === 'string' &&
+        'after' in receipt &&
+        typeof receipt.after === 'number'
+          ? {
+              thread: receipt.thread,
+              text: receipt.text,
+              after: receipt.after,
+              ...('revision' in receipt && typeof receipt.revision === 'string' && { revision: receipt.revision }),
+            }
+          : entry.codexReceipt
+      patch(key, id, { state: 'sent', sentAt: deps.now(), ...(codexReceipt && { codexReceipt }) })
       // A pane with no Claude session has no transcript to show it in.
-      if (!it.session)
+      if (!it.session && !entry.codexTarget)
         put(
           key,
           entries(key).filter(e => e.id !== id),
         )
-      if (!onShow || !it.session) deps.toast(sentText(it.name, entry.files.length, t))
+      if (!onShow || (!it.session && !entry.codexTarget)) deps.toast(sentText(it.name, entry.files.length, t))
       deps.later(() => {
         if (deps.page().open === key) deps.reload(key)
       }, RELOAD_AFTER_SEND_MS)
-      // Still unseen in the transcript by then, it goes all the same.
       deps.later(() => {
+        if (entry.codexTarget && find(key, id)?.state === 'sent') patch(key, id, { state: 'history-unavailable' })
         if (deps.page().open === key) deps.changed()
       }, REDRAW_AFTER_SEND_MS)
     } else {
@@ -238,24 +286,42 @@ export function composerSession(deps: ComposerDeps): ComposerSession {
       if (!canSubmit({ canMutate: page.canMutate, key, sending, text, files, uploading: isUploading(page.files) }))
         return
       const it = key ? page.item(key) : undefined
-      if (!key || !it) return
+      if (!key || !it || codexSendBlock(it, page.detail)) return
       save(page.text)
       // The draft stays stored until the session has the message: a reload before that keeps it.
       const request = draft ?? drafts.save(draftKey(it), page.text)
       if (!request) return
       const label = `${t('msg.files', { n: files.length })}:`
       // It leaves the box for the foot of the thread at once, written as the server types it.
+      const full = [text, files.length ? `${label}\n${files.join('\n')}` : ''].filter(Boolean).join('\n\n')
+      const codexTarget = isCodexItem(it)
+        ? {
+            session: it.session,
+            codexThread: it.codexThread ?? it.session,
+            codexTerminal: it.codexTerminal ?? null,
+            codexRevision: it.codexRevision ?? null,
+          }
+        : null
       const entry: OutboxEntry = {
         id: request.id,
         text,
         files,
         attached: page.files.filter(a => a.status === 'done'),
-        full: [text, files.length ? `${label}\n${files.join('\n')}` : ''].filter(Boolean).join('\n\n'),
+        full,
         key: sentKey(text, label),
         after: newestAt(page.detail) || deps.now() - 60_000,
         state: 'sending',
         error: '',
         sentAt: 0,
+        ...(codexTarget && {
+          codexTarget,
+          codexReceipt: {
+            thread: codexTarget.codexThread,
+            text: full,
+            after: deps.now(),
+            ...(codexTarget.codexRevision && { revision: codexTarget.codexRevision }),
+          },
+        }),
       }
       put(key, [...entries(key), entry])
       draft = null
@@ -273,13 +339,21 @@ export function composerSession(deps: ComposerDeps): ComposerSession {
       deps.focus()
     },
 
+    hasUnsentAttachments() {
+      for (const entries of outbox.values()) {
+        if (entries.some(entry => entry.files.length && (entry.state === 'sending' || entry.state === 'failed')))
+          return true
+      }
+      return false
+    },
+
     waiting: (key, open, detail) => (key ? shown(key, open, detail) : []),
 
     settle() {
       const { open: key, detail } = deps.page()
       if (!key) return
       const list = entries(key)
-      const left = shown(key, key, detail)
+      const left = shown(key, key, detail, codexSeen)
       if (left.length === list.length) return
       for (const e of list) if (!left.includes(e)) forget(e)
       put(key, left)
@@ -289,15 +363,16 @@ export function composerSession(deps: ComposerDeps): ComposerSession {
     async retry(id) {
       const page = deps.page()
       const key = page.open
-      if (!key || !find(key, id)) return
-      if (page.canMutate && !onTheirWay.has(key)) return deliver(key, id)
+      if (!key || find(key, id)?.state !== 'failed') return
+      if (page.canMutate && !onTheirWay.has(key) && !codexSendBlock(page.item(key), page.detail))
+        return deliver(key, id)
     },
 
     edit(id) {
       const page = deps.page()
       const key = page.open
       const entry = key ? find(key, id) : undefined
-      if (!key || !entry) return
+      if (!key || entry?.state !== 'failed') return
       put(
         key,
         entries(key).filter(e => e !== entry),

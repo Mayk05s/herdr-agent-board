@@ -22,7 +22,7 @@ import {
   pickInstead,
   readClipboardImages,
 } from '../../models/clipboard-image.ts'
-import { composerView, sendIsStop, sendsOnKey } from '../../models/composer.ts'
+import { type codexSendBlock, composerView, sendIsStop, sendsOnKey } from '../../models/composer.ts'
 import { focusHere, remotePage } from '../../models/remote-page.ts'
 import type { HeadButtons, SheetAvailability } from '../../models/sheet.ts'
 import type { termButton } from '../../models/terminal.ts'
@@ -88,6 +88,7 @@ export interface ComposerProps {
   changesHidden: boolean
   /** The open session is on the board and its detail does not say it is gone. */
   present: boolean
+  sendBlock?: ReturnType<typeof codexSendBlock>
   canMutate: boolean
   on?: SessionButtons | undefined
   /** The menu of the buttons is open. */
@@ -107,6 +108,7 @@ export function Composer({
   term = { hidden: false, hasShell: false, title: '' },
   changesHidden,
   present,
+  sendBlock = null,
   canMutate,
   on = {},
   moreOpen = false,
@@ -120,7 +122,8 @@ export function Composer({
   /** `.over`: the row leaves it to More (More itself: nothing is left over). */
   const over = (id: string) => row.over.has(id) && 'over'
   const { text, attachments, sending, messageRef } = composer
-  const view = composerView({ present, sending, canMutate, text, attachments }, t)
+  const view = composerView({ present: present && !sendBlock, sending, canMutate, text, attachments }, t)
+  const sendNoteId = sendBlock ? 'composer-send-note' : undefined
   // A side question (/btw) instead of a message, where the board can ask one: the box's switch, or "/btw …".
   const aside = useAsideBox(text, composer.input)
   // The /model and /effort messages sent from here: the meter reads the screen after each.
@@ -307,12 +310,17 @@ export function Composer({
       </div>
       {aside.deck}
       <Attachments list={attachments} onRemove={composer.removeFile} />
+      {sendBlock && (
+        <p className="row-value muted" id={sendNoteId} role="status">
+          {t(sendBlock)} {!view.discardHidden && t('compose.draftKept')}
+        </p>
+      )}
       <form
         className={classNames('composer-box', aside.on && 'aside')}
         id="composer"
         onSubmit={e => {
           e.preventDefault()
-          if (aside.submit()) return
+          if (sendBlock || aside.submit()) return
           if (changesMeter(text)) setAsked(n => n + 1)
           composer.send()
         }}
@@ -366,6 +374,7 @@ export function Composer({
             aside.on ? 'aside.placeholder' : remotePage() ? 'compose.placeholderPhone' : 'compose.placeholder',
           )}
           aria-label={t('compose.label')}
+          aria-describedby={sendNoteId}
           ref={messageRef}
           value={text}
           onChange={e => composer.input(e.currentTarget.value)}
@@ -396,9 +405,10 @@ export function Composer({
             unsent: !!item && composer.outbox.waiting(item.key).some(e => e.state === 'failed'),
           })}
           focusBox={() => messageRef.current?.focus()}
-          title={aside.question === null ? view.sendTitle : t('aside.toggle')}
+          title={sendBlock ? t(sendBlock) : aside.question === null ? view.sendTitle : t('aside.toggle')}
+          describedBy={sendNoteId}
           label={t(aside.question === null ? 'compose.sendLabel' : 'aside.toggle')}
-          disabled={aside.question === null ? view.sendDisabled : !aside.question}
+          disabled={!!sendBlock || (aside.question === null ? view.sendDisabled : !aside.question)}
         />
       </form>
       {item && <SessionMeter key={item.key} item={item} asked={asked} fold={fold} />}

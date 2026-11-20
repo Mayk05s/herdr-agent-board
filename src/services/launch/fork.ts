@@ -54,15 +54,15 @@ export function canCodexFork(): boolean {
  */
 export async function forkSession(deps: Deps, app: ForkApp, item: Item, body: unknown): Promise<ForkResult> {
   const b = isRecord(body) ? body : {}
-  const codex = isCodexItem(item) && isCodexSession(item.session ?? '')
-  if ((!callable(item) && !codex) || !item.session)
-    return { ok: false, error: t('fork.err.notClaude', { name: item.name }) }
-  const transcript = codex ? deps.codex.transcriptInfo(item.session) : item.transcript
-  if (!transcript) return { ok: false, error: t('fork.err.noTranscript', { session: item.session }) }
+  const session = item.codexThread ?? item.session
+  const codex = isCodexItem(item) && isCodexSession(session ?? '')
+  if ((!callable(item) && !codex) || !session) return { ok: false, error: t('fork.err.notClaude', { name: item.name }) }
+  const transcript = codex ? deps.codex.transcriptInfo(session) : item.transcript
+  if (!transcript) return { ok: false, error: t('fork.err.noTranscript', { session }) }
   if (codex && !canCodexFork()) return { ok: false, error: t('fork.err.codexMissing') }
   // Claude finds a session by the folder it ran in.
   const cwd = codex
-    ? await deps.codex.cwdOf(item.session)
+    ? await deps.codex.cwdOf(session)
     : item.transcript
       ? (await cwdOf(item.transcript)) || item.cwd
       : item.cwd
@@ -88,9 +88,9 @@ export async function forkSession(deps: Deps, app: ForkApp, item: Item, body: un
   const started = await app.launches.start(
     { name, cwd, category: item.category, workspace, message, parent: item.key },
     items,
-    { fork: item.session, ...(codex && { codexFork: true }) },
+    { fork: session, ...(codex && { codexFork: true }) },
   )
   if (!started.ok) return { ok: false, error: started.error, field: started.field }
-  deps.log(`fork ${item.name}: ${name} from ${item.session} in ${cwd}`)
+  deps.log(`fork ${item.name}: ${name} from ${session} in ${cwd}`)
   return { ok: true, id: started.id, name, launch: app.launches.list().find(l => l.id === started.id) ?? null }
 }

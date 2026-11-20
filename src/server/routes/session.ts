@@ -105,11 +105,12 @@ function byBoard(item: Item, conv: ConversationTurn[]): ConversationTurn[] {
 
 async function detail(app: SessionApp, item: Item) {
   const { deps } = app
-  const { transcript, claudeRoot, alive, since, pipe, ...shown } = item
+  const { transcript, claudeRoot, alive, since, pipe, codexReported, codexRollout, ...shown } = item
   // queued: the user's messages Claude has not taken in yet (queueWindow).
   // A pi session's turns are in its session file, its key.
+  const codexThread = isCodexItem(item) ? (item.codexThread ?? item.session) : null
   const thread = isCodexItem(item)
-    ? deps.codex.sessionThread(item.session ?? '', 60)
+    ? deps.codex.sessionThread(codexThread ?? '', 60, codexRollout)
     : isPiItem(item)
       ? deps.pi.sessionThread(item.session ?? '', 60)
       : deps.claude.sessionThread(transcript ?? '', 60, queueWindow(deps, item), { compactions: !!item.compact })
@@ -148,7 +149,22 @@ async function detail(app: SessionApp, item: Item) {
   }
   const helpers = own.helpers.map(publicHelper)
   const queued = alive ? thread.queued : []
-  return { item: shown, conversation, queued, helpers, workflows: own.workflows, screen, dialog, checkout }
+  const history =
+    item.codexThread && item.session
+      ? { session: item.session, conversation: deps.codex.sessionThread(item.session, 60).conversation }
+      : null
+  return {
+    item: shown,
+    conversation,
+    queued,
+    helpers,
+    workflows: own.workflows,
+    screen,
+    dialog,
+    checkout,
+    ...(isCodexItem(item) && { codexThread: item.codexUnresolved ? null : codexThread }),
+    ...(history && { history }),
+  }
 }
 
 function message(app: SessionApp, item: Item, body: Body): Promise<Result> {
@@ -158,17 +174,38 @@ function message(app: SessionApp, item: Item, body: Body): Promise<Result> {
     (p): p is string => typeof p === 'string' && p.startsWith(uploadsDir()),
   )
   const list = files.length ? `${t('msg.files', { n: files.length })}:\n${files.join('\n')}` : ''
-  // The card is for one session: a pane that holds another one now gets nothing. Panes with
-  // no Claude session id (other agents) are matched by the card alone.
-  if ((body.session ?? null) !== (item.session ?? null)) return Promise.resolve(changed(item))
-  return app.gate(item.key, body.requestId ?? randomUUID(), [body.session ?? null, body.text, files], async () => {
-    // Always collect a new snapshot before accepting a message, even if SSE is connected: a
-    // board that cannot reach herdr fails here rather than send on old data.
+  // The receipt and any retries are bound to the same text, terminal and conversation.
+  const codex = isCodexItem(item)
+  const payload = codex
+    ? [body.session ?? null, body.text, files, body.codexThread, body.codexTerminal, body.codexRevision]
+    : [body.session ?? null, body.text, files]
+  if (!codex && (body.session ?? null) !== (item.session ?? null)) return Promise.resolve(changed(item))
+  return app.gate(item.key, body.requestId ?? randomUUID(), payload, async () => {
+    if (item.codexUnresolved || (body.session ?? null) !== (item.session ?? null)) return changed(item)
+    // Always collect a new snapshot before accepting a message, even if SSE is connected.
     const fresh = await freshItem(deps, item)
-    // A card shown asleep is for its session wherever it woke meanwhile: a new tab (#204) too.
     const moved = item.sleeping && !!item.session
     if (!fresh || fresh.session !== item.session || (fresh.pane !== item.pane && !moved)) return changed(item)
-    return send(deps, fresh, [String(body.text ?? '').trim(), list].filter(Boolean).join('\n\n'))
+    const thread = fresh.codexThread ?? fresh.session
+    if (
+      codex &&
+      (!isCodexItem(fresh) ||
+        fresh.codexUnresolved ||
+        fresh.codexTerminal !== item.codexTerminal ||
+        fresh.codexRollout !== item.codexRollout ||
+        thread !== (item.codexThread ?? item.session) ||
+        (body.codexThread !== undefined && body.codexThread !== thread) ||
+        (body.codexTerminal !== undefined && body.codexTerminal !== (fresh.codexTerminal ?? null)) ||
+        (body.codexRevision !== undefined && body.codexRevision !== (fresh.codexRevision ?? null)))
+    )
+      return changed(item)
+    const text = [String(body.text ?? '').trim(), list].filter(Boolean).join('\n\n')
+    const after = Date.now()
+    const result = await send(deps, fresh, text, { draft: codex })
+    const revision = fresh.codexRevision
+    return codex && result.ok
+      ? { ...result, codexReceipt: { thread, text, after, ...(revision && { revision }) } }
+      : result
   })
 }
 
@@ -179,7 +216,9 @@ function message(app: SessionApp, item: Item, body: Body): Promise<Result> {
  */
 async function freshItem(deps: Deps, item: Item): Promise<Item | undefined> {
   for (const deadline = Date.now() + namedWaitMs(); ; await pause(NAMED_POLL_MS)) {
-    const fresh = (await collect(deps)).find(next => next.key === item.key)
+    const fresh = (await collect(deps, { freshCodexPane: isCodexItem(item) ? item.pane : null })).find(
+      next => next.key === item.key,
+    )
     if (fresh || !item.sleeping || Date.now() >= deadline) return fresh
   }
 }
@@ -195,11 +234,23 @@ async function answer(app: SessionApp, item: Item, action: 'answer' | 'permit', 
     // A new snapshot first, as for a message: the board must not answer on old data.
     let fresh: Item | undefined
     try {
-      fresh = (await collect(deps)).find(next => next.key === item.key)
+      fresh = (await collect(deps, { freshCodexPane: isCodexItem(item) ? item.pane : null })).find(
+        next => next.key === item.key,
+      )
     } catch (err) {
       return { ok: false, error: t('err.qa.herdr', { why: err instanceof Error ? err.message : String(err) }) }
     }
-    if (!fresh || fresh.session !== item.session || fresh.pane !== item.pane) return changed(item)
+    if (
+      !fresh ||
+      fresh.session !== item.session ||
+      fresh.pane !== item.pane ||
+      (isCodexItem(item) &&
+        (fresh.codexUnresolved ||
+          fresh.codexThread !== item.codexThread ||
+          fresh.codexTerminal !== item.codexTerminal ||
+          fresh.codexRollout !== item.codexRollout))
+    )
+      return changed(item)
     const r = action === 'answer' ? await answerQuestions(deps, fresh, body) : await answerPermission(fresh, body)
     deps.log(`${action} ${item.name}: ${r.ok ? 'ok' : r.error}`)
     return r

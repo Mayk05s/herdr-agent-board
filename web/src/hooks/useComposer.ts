@@ -119,6 +119,18 @@ export function useComposer(
     })
   })
 
+  const { registerReloadGuard, recheckReload } = board
+  const { hasFiles, list } = attachments
+  useLayoutEffect(
+    () => registerReloadGuard(() => !hasFiles() && !session.hasUnsentAttachments()),
+    [registerReloadGuard, hasFiles, session],
+  )
+  // Clearing the box or acknowledging a send can release a pending page update.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: changes in the box and outbox trigger a recheck
+  useLayoutEffect(() => {
+    recheckReload()
+  }, [list, version, recheckReload])
+
   const { open, opened, compose } = board.ui
   // biome-ignore lint/correctness/useExhaustiveDependencies: an opening is when to take the session's draft, not something it reads
   useLayoutEffect(() => session.opened(open, compose), [open, opened, session])

@@ -314,7 +314,15 @@ function OwnBubble({ entry: e, onRetry, onEdit }: { entry: OutboxEntry } & Omit<
           </span>
         </>
       ) : (
-        <span className="when">{t('queue.sending')}</span>
+        <span className="when">
+          {t(
+            e.state === 'history-unavailable'
+              ? 'queue.historyUnavailable'
+              : e.state === 'sent' && e.codexReceipt
+                ? 'queue.sent'
+                : 'queue.sending',
+          )}
+        </span>
       )}
     </div>
   )

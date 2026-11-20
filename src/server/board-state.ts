@@ -35,6 +35,9 @@ import type { SetupSummary } from '../core/setup.ts'
 import { todosConfig } from '../core/todos.ts'
 import type { Item } from '../core/types.ts'
 import type { WakeView } from '../core/wake/view.ts'
+import type { WorkdeskPayload } from '../core/workdesk.ts'
+import type { DialogStatus } from '../core/workdesk-dialog.ts'
+import type { BoardObservation } from '../core/workdesk-topology.ts'
 import { collect } from '../services/board.ts'
 import type { Deps } from '../services/deps.ts'
 import { canCodexFork, canFork } from '../services/launch/fork.ts'
@@ -46,6 +49,7 @@ export interface BoardState {
   /** The latest payload, as JSON text. */
   payload(): string
   items(): Item[]
+  observation(): BoardObservation | null
   find(key: string): Item | undefined
   /** True when the data is too old for actions that go through herdr. */
   stale(): boolean
@@ -94,6 +98,9 @@ interface Options {
   calendar?: () => CalendarPayload | null
   /** Threads' line (#379); null while they are off. */
   threads?: () => ThreadsPayload | null
+  workdesk?: () => WorkdeskPayload | null
+  workdeskDialog?: () => DialogStatus | null
+  observeSessions?: NonNullable<Parameters<typeof collect>[1]>['observed']
 }
 
 // The colors the category editor offers (aliases left out).
@@ -218,6 +225,9 @@ export function createBoardState({
   time,
   calendar,
   threads,
+  workdesk,
+  workdeskDialog,
+  observeSessions,
 }: Options): BoardState {
   const { cfg, log } = deps
   let items: Item[] = []
@@ -228,6 +238,8 @@ export function createBoardState({
   /** The board as clients see it, without the time of the last successful refresh. */
   function board(): Omit<BoardPayload, 'lastSuccessfulRefreshAt'> {
     const ids = [...new Set([...cfg.categories.map(c => c.id), ...items.map(i => i.category)])]
+    const workdeskLine = workdesk?.()
+    const dialogLine = workdeskDialog?.()
     const categories = ids
       .sort((a, b) => laneRank(cfg, a) - laneRank(cfg, b) || a.localeCompare(b))
       .map(id => {
@@ -249,8 +261,9 @@ export function createBoardState({
     // process and its pipe.
     // Tasks (#202) only while config.json turns them on: off, the page sees none.
     const todos = todosConfig(cfg.todos)
-    const list = items.map(({ transcript, claudeRoot, alive, since, pipe, todos: own, ...rest }) =>
-      launches.decorate(todos && own ? { ...rest, todos: own } : rest),
+    const list = items.map(
+      ({ transcript, claudeRoot, alive, since, pipe, codexReported, codexRollout, todos: own, ...rest }) =>
+        launches.decorate(todos && own ? { ...rest, todos: own } : rest),
     )
     // The schedule without the scheduler's bookkeeping; the log is what was sent or missed lately.
     const schedules = listEntries().map(({ claim, tried, waited, ...entry }) => entry)
@@ -308,6 +321,8 @@ export function createBoardState({
       ...calendarOf(calendar),
       // threads: only while config.json turns them on (#379)
       ...threadsOf(threads),
+      ...(workdeskLine && { workdesk: workdeskLine }),
+      ...(dialogLine && { workdeskDialog: dialogLine }),
       // accessRev: the panel's cue to fetch the Remote access view again (never the view itself).
       accessRev: accessRev?.() ?? 0,
       // teamRev: only while config.json turns the peer network on (#231).
@@ -394,7 +409,13 @@ export function createBoardState({
           log(`profile panes: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
-      items = await collect(deps, { helpers: true, links, seen })
+      items = await collect(deps, {
+        helpers: true,
+        permissionPreviews: true,
+        links,
+        seen,
+        ...(observeSessions && { observed: observeSessions }),
+      })
       logEdges()
       launches.observe(items)
       stale = false
@@ -414,14 +435,16 @@ export function createBoardState({
     }
   }
 
+  const isStale = () =>
+    stale ||
+    !lastSuccessfulRefreshAt ||
+    Date.now() - lastSuccessfulRefreshAt > Math.max(10000, (cfg.refreshSec ?? 2) * 3000)
   return {
     payload: () => payload,
     items: () => items,
+    observation: () => (lastSuccessfulRefreshAt && !isStale() ? { items, observedAt: lastSuccessfulRefreshAt } : null),
     find: key => items.find(i => i.key === key),
-    stale: () =>
-      stale ||
-      !lastSuccessfulRefreshAt ||
-      Date.now() - lastSuccessfulRefreshAt > Math.max(10000, (cfg.refreshSec ?? 2) * 3000),
+    stale: isStale,
     publish,
     refresh,
     edges: (since, limit) => edgeLog.read(since, limit),

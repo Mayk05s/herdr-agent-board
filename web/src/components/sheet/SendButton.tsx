@@ -20,6 +20,7 @@ export interface SendButtonProps {
   title: string
   label: string
   disabled: boolean
+  describedBy?: string | undefined
   /** The focus into the message box. */
   focusBox: () => void
 }
@@ -27,7 +28,7 @@ export interface SendButtonProps {
 /** A touch screen: a focus moved into the box would pop its keyboard up. */
 const coarse = (): boolean => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches
 
-export function SendButton({ item, stop, title, label, disabled, focusBox }: SendButtonProps) {
+export function SendButton({ item, stop, title, label, disabled, describedBy, focusBox }: SendButtonProps) {
   const t = useT()
   const { canMutate, ui } = useBoardContext()
   const actions = useSessionActions()
@@ -54,6 +55,7 @@ export function SendButton({ item, stop, title, label, disabled, focusBox }: Sen
       type={stop ? 'button' : 'submit'}
       title={stop ? t('turn.stop.hint') : title}
       aria-label={stop ? t('turn.stop') : label}
+      aria-describedby={describedBy}
       // Not again while a stop of this session is on its way (its card says "Stopping…").
       disabled={stop ? !canMutate || !item || ui.busy.has(item.key) : disabled}
       onClick={

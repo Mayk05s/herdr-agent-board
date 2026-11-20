@@ -222,6 +222,10 @@ export interface Config {
   compact?: unknown
   /** Threads (#379, `true` or an object), as config.json has it: read through core/work-threads.ts threadsConfig. */
   threads?: unknown
+  /** Trusted local Workdesk watcher settings, read only by the board server. */
+  workdesk?: unknown
+  workdeskDialog?: unknown
+  boardEvents?: unknown
   [extra: string]: unknown
 }
 
@@ -280,6 +284,20 @@ export interface Item {
   /** A sleeper read from the new wake's session file, not answered by a wake (integrations/wake.ts); absent for the others. */
   fromFile?: true
   agent?: string
+  /** The current Codex rollout, when independently verified to differ from Herdr's reported SID. */
+  codexThread?: string
+  /** Herdr's token if the verified current Codex thread belongs to a different card (server only). */
+  codexReported?: string
+  /** The verified, versioned rollout used for this Codex card's history (server only). */
+  codexRollout?: string | null
+  /** Codex's rollout ID when it differs from the thread SID after a revert. */
+  codexRevision?: string
+  /** The foreground TUI's selected thread could not be verified from its writable rollouts. */
+  codexUnresolved?: true
+  /** The terminal incarnation to which a Codex message is addressed. */
+  codexTerminal?: string
+  /** The interactive terminal's physical identity and the session Herdr actually sees there. */
+  terminalAgent?: { id: string; session: string | null }
   focused?: boolean
   doing?: string
   /** When `doing` was written (#321), else null. */
