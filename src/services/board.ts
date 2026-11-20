@@ -285,6 +285,7 @@ export interface CollectOptions {
   links?: LinksIndex | null
   /** Told every pane in herdr's snapshot with the terminal it holds (null: herdr did not say), once collected. */
   seen?: (panes: ReadonlyMap<string, string | null>) => void
+  observed?: (native: Awaited<ReturnType<typeof snapshot>>, items: readonly Item[]) => void
 }
 
 /**
@@ -294,7 +295,7 @@ export interface CollectOptions {
  */
 export async function collect(
   deps: Deps,
-  { helpers = false, links = null, seen: panesSeen = () => {} }: CollectOptions = {},
+  { helpers = false, links = null, seen: panesSeen = () => {}, observed }: CollectOptions = {},
 ): Promise<Item[]> {
   const { cfg } = deps
   // The model rule (#429): null while config.json has none, and then nothing below reads it.
@@ -593,5 +594,6 @@ export async function collect(
     }
   }
   panesSeen(paneTerminals(snap))
+  observed?.(snap, items)
   return items
 }

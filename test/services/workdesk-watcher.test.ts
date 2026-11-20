@@ -97,8 +97,8 @@ test('parallel polls and restart route only eligible cards, resolve both masters
       .map(row => [row.title, row.lane, JSON.parse(row.assignee).key])
       .sort(),
   ).toEqual([
-    ['Workdesk #1: Test card 1', 'board', testMasters[0]?.key],
-    ['Workdesk #2: Test card 2', 'control', testMasters[1]?.key],
+    ['Test card 1', 'board', testMasters[0]?.key],
+    ['Test card 2', 'control', testMasters[1]?.key],
   ])
   expect(listEntries()).toHaveLength(2)
   expect(listEntries().every(entry => !entry.text.includes(untrusted) && entry.noWake !== true)).toBe(true)
@@ -214,16 +214,16 @@ test('Tripio, Трипио and Hermes route to Tripio-master with verified execu
         const data = JSON.parse(text.split('\n\n').at(-1) ?? '')
         const launcher =
           data.executor_model === 'claude-opus'
-            ? 'spawn-agent --agent claude --model opus'
-            : 'spawn-agent --agent codex'
+            ? 'spawn-agent --agent claude --model opus --effort low'
+            : 'spawn-agent --agent codex --effort low'
         expect(text).toContain(launcher)
         expect(text).toContain('на приёмку')
-        return [data.id, data.executor_model]
+        return [data.title, data.executor_model]
       }),
     ).toEqual([
-      [40, 'codex'],
-      [41, 'claude-opus'],
-      [42, 'codex'],
+      ['Test card 40', 'codex'],
+      ['Test card 41', 'claude-opus'],
+      ['Test card 42', 'codex'],
     ])
   } finally {
     db.close()

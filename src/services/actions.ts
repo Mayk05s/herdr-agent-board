@@ -3,7 +3,16 @@
 
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { agentGet, type HerdrAgent, herdr, herdrText, paneTerminals, snapshot } from '../adapters/herdr.ts'
+import {
+  agentGet,
+  asAgent,
+  type HerdrAgent,
+  herdr,
+  herdrText,
+  nativeBoardSid,
+  paneTerminals,
+  snapshot,
+} from '../adapters/herdr.ts'
 import { reportToDay, runningDay } from '../adapters/mokupilot-day.ts'
 import { pause } from '../adapters/pacing.ts'
 import { possibleProfilePanes, provenProfilePanes } from '../adapters/profile-panes.ts'
@@ -507,6 +516,8 @@ function toDay(item: Item, text: string): ActionResult {
  * plus `dialog` or `draft` for those two. `woken`: the caller woke the session itself just now
  * (the scheduler), so herdr may not name it in its pane yet. `probe` (auto-compact, #378): every
  * check, nothing typed, for a sleeping session nothing at all (it is not woken).
+ * `boundTerminal` pins a Board event to the original native SID and terminal. It cannot wake
+ * a sleeper or follow a session to another pane.
  */
 export async function send(
   deps: Deps,
@@ -517,17 +528,19 @@ export async function send(
     draft: guardDraft = false,
     woken = false,
     probe = false,
-  }: { free?: boolean; draft?: boolean; woken?: boolean; probe?: boolean } = {},
+    boundTerminal,
+  }: { free?: boolean; draft?: boolean; woken?: boolean; probe?: boolean; boundTerminal?: string } = {},
 ): Promise<ActionResult> {
   const text = String(message ?? '').trim()
   if (!text) return { ok: false, error: t('err.emptyMessage') }
+  const changed = (): ActionResult => ({ ok: false, error: t('err.sessionChanged', { name: item.name }) })
+  if (boundTerminal !== undefined && (!item.session || !item.pane || item.day || item.sleeping)) return changed()
   if (item?.day) return toDay(item, text)
   // A sleeping session whose pane is gone wakes in a new tab: pi's (#178), Claude's that wake closed (#204).
   if (!item?.pane && !item?.sleeping) return { ok: false, error: t('err.noPane') }
   const expectedSession = item.session ?? null
   const refused = (agent: HerdrAgent | null): ActionResult | null => {
-    if (!agent || agent.session !== expectedSession)
-      return { ok: false, error: t('err.sessionChanged', { name: item.name }) }
+    if (!agent || agent.session !== expectedSession) return changed()
     if (agent.status === 'blocked')
       return { ok: false, busy: true, dialog: true, error: t('err.blocked', { name: item.name }) }
     if (free && agent.status === 'working')
@@ -569,6 +582,23 @@ export async function send(
       const after = refused(fresh)
       if (after) return after
       if (fresh?.kind !== agent?.kind) return { ok: false, error: t('err.sessionChanged', { name: item.name }) }
+    }
+    if (boundTerminal !== undefined) {
+      // A fresh native snapshot checks both identities together, after any screen read.
+      const current = await snapshot()
+      const matches = current.panes.filter(p => p.agent_session?.value === expectedSession)
+      const [target] = matches
+      if (
+        matches.length !== 1 ||
+        target?.pane_id !== pane ||
+        target.terminal_id !== boundTerminal ||
+        target.agent !== item.agent ||
+        nativeBoardSid(target) !== expectedSession
+      )
+        return changed()
+      const blocked = refused(asAgent({ agent: target }))
+      if (blocked) return blocked
+      if (target.agent_status !== 'idle' && target.agent_status !== 'done') return changed()
     }
     if (probe) return { ok: true }
     // This read and prompt are separate CLI calls, not an atomic identity check and send.

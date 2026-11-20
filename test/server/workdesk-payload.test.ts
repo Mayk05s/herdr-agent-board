@@ -48,12 +48,12 @@ test('server reports the queue and a scoped Workdesk assignment wakes its sleepi
   expect((await payload()).workdesk).toBeDefined()
   await until(
     () =>
-      box.calls().some(call => call[0] === 'agent' && call[1] === 'prompt' && String(call[3]).includes('Workdesk #21')),
+      box.calls().some(call => call[0] === 'agent' && call[1] === 'prompt' && String(call[3]).includes('Test card 21')),
     18_000,
   )
   expect((await payload()).workdesk).toMatchObject({ queue: 0, polledAt: expect.any(Number), problem: null })
   expect(fake.calls('claim_task').map(call => call.params.arguments)).toEqual([{ task_id: 21, executor: 'Report' }])
-  expect(rows(join(stateDir(box), 'board.db')).map(row => row.title)).toEqual(['Workdesk #21: Test card 21'])
+  expect(rows(join(stateDir(box), 'board.db')).map(row => row.title)).toEqual(['Test card 21'])
   expect(paneCalls(box).filter(call => call[1] === 'run')).toHaveLength(1)
 }, 20_000)
 
@@ -75,7 +75,7 @@ test('a running Codex master receives the Workdesk thread in its own pane', asyn
     'agent prompt codex-pane': { result: {} },
   })
   const fake = mcp(box.dir)
-  fake.write({ tasks: [task(31)] })
+  fake.write({ tasks: [{ ...task(31), key: 'BOARD-1' }] })
   const { url } = await serveBoard(box, {
     threads: true,
     scheduleTickSec: 0.2,
@@ -98,7 +98,7 @@ test('a running Codex master receives the Workdesk thread in its own pane', asyn
       'agent',
       'prompt',
       'codex-pane',
-      `[board reminder] Workdesk #31. Открой поручение: board thread show ${thread?.key} --full`,
+      `[board reminder] BOARD-1 Test card 31. Открой поручение: board thread show ${thread?.key} --full`,
     ],
   ])
   expect(paneCalls(box).filter(call => call[1] === 'run')).toHaveLength(0)

@@ -1,3 +1,4 @@
+import type { StageObservation } from '../adapters/board-event-store.ts'
 import { openDb } from '../adapters/db.ts'
 import { supportsTopology, WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
 import { type WorkdeskMaster, workdeskStore } from '../adapters/workdesk-store.ts'
@@ -6,6 +7,7 @@ import { threadsConfig } from '../core/work-threads.ts'
 import {
   object,
   projectKey,
+  validTaskId,
   type WorkdeskConfig,
   type WorkdeskPayload,
   type WorkdeskProblem,
@@ -23,6 +25,9 @@ type Options = {
   observation?(): BoardObservation | null
   onChange(): void
   log(message: string): void
+  streamDriven?(): boolean
+  stageTracking?(): boolean
+  stages?(rows: StageObservation[]): void
 }
 
 const REQUIRED = ['board_heartbeat', 'list_board_tasks', 'claim_task', 'report_task']
@@ -36,13 +41,23 @@ function masterFor(items: readonly Item[] | null, name: string): WorkdeskMaster 
   return { key: item.key, name, lane: item.category, ...(stableWorkdeskSid(sid) && { sid }) }
 }
 
-export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }: Options) {
+export function createWorkdeskWatcher({
+  cfg,
+  items,
+  observation,
+  onChange,
+  log,
+  streamDriven,
+  stageTracking,
+  stages,
+}: Options) {
   let status: WorkdeskPayload | null = null
   let config: WorkdeskConfig | null = null
   let signature = ''
   let timer: ReturnType<typeof setTimeout> | undefined
   let current: AbortController | null = null
-  let inFlight: Promise<void> | null = null
+  let inFlight: Promise<WorkdeskProblem | null> | null = null
+  let lastTasks: Map<number, WorkdeskTask> | null = null
   let loggedProblem = false
   let stopped = false
 
@@ -53,7 +68,12 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
     onChange()
   }
 
-  async function poll(active: WorkdeskConfig, signal: AbortSignal): Promise<void> {
+  async function poll(
+    active: WorkdeskConfig,
+    signal: AbortSignal,
+    presenceOnly = false,
+    targetId?: number,
+  ): Promise<WorkdeskProblem | null> {
     let problem: WorkdeskProblem | null = null
     let queue = status?.queue ?? null
     const polledAt = Date.now()
@@ -84,8 +104,18 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
           }
         }
 
+        if (presenceOnly) {
+          let topology: WorkdeskTopology | null = null
+          if (device && lastTasks) {
+            try {
+              topology = observeWorkdesk(device, observation?.() ?? null, [...lastTasks.values()])
+            } catch {}
+          }
+          await heartbeat(topology)
+          return
+        }
         // Older tools and installations keep the original heartbeat-before-queue path.
-        if (!device) await heartbeat()
+        if (!device && !streamDriven?.()) await heartbeat()
         let observedTasks: Map<number, WorkdeskTask> | null = null
         try {
           if (!REQUIRED.every(name => tools.has(name))) {
@@ -93,9 +123,20 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
             return
           }
 
+          const supportsKey = (tool: string) => object(object(tools.get(tool))?.properties)?.include_key !== undefined
+          const listKey = supportsKey('list_board_tasks')
+          const claimKey = supportsKey('claim_task')
           let listed: unknown
+          const includeStage =
+            stageTracking?.() === true &&
+            object(object(tools.get('list_board_tasks'))?.properties)?.include_stage_started_at != null
           try {
-            listed = object(await mcp.call('list_board_tasks', {}))?.tasks
+            listed = object(
+              await mcp.call('list_board_tasks', {
+                ...(listKey && { include_key: true }),
+                ...(includeStage && { include_stage_started_at: true }),
+              }),
+            )?.tasks
           } catch {
             problem ??= 'list'
             return
@@ -105,15 +146,36 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
             return
           }
           const scoped: WorkdeskTask[] = []
+          const observedStages: StageObservation[] = []
           for (const raw of listed) {
             if (active.onlyTaskId && object(raw)?.id !== active.onlyTaskId) continue
             const task = workdeskTask(raw)
-            if (task) scoped.push(task)
-            else problem ??= 'list'
+            if (task) {
+              scoped.push(task)
+              const body = object(raw)
+              if (
+                task.status !== 'queued' &&
+                task.assignment &&
+                typeof body?.stage === 'string' &&
+                validTaskId(body.stage_started_at)
+              ) {
+                observedStages.push({
+                  taskId: task.id,
+                  assignmentId: task.assignment.id,
+                  revision: task.assignment.revision,
+                  stage: body.stage,
+                  startedAt: body.stage_started_at,
+                })
+              }
+            } else problem ??= 'list'
           }
           const byId = new Map(scoped.map(task => [task.id, task]))
           const tasks = [...byId.values()]
-          if (device && problem !== 'list' && byId.size === scoped.length) observedTasks = byId
+          if (problem !== 'list' && byId.size === scoped.length) {
+            if (device) observedTasks = byId
+            signal.throwIfAborted()
+            if (includeStage) stages?.(observedStages)
+          }
           const eligible = new Set(
             tasks.filter(task => task.status === 'queued' && task.executor === null).map(task => task.id),
           )
@@ -132,6 +194,7 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
               const store = workdeskStore(db)
               store.release(active.onlyTaskId, Date.now())
               for (const task of tasks) {
+                if (targetId !== undefined && task.id !== targetId) continue
                 signal.throwIfAborted()
                 if (!threadsConfig(cfg.threads)) {
                   problem ??= 'threads'
@@ -150,7 +213,13 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
                 if (!store.reserve(task.id, master)) continue
                 let claimed: ReturnType<typeof workdeskTask>
                 try {
-                  claimed = workdeskTask(await mcp.call('claim_task', { task_id: task.id, executor: master.name }))
+                  claimed = workdeskTask(
+                    await mcp.call('claim_task', {
+                      task_id: task.id,
+                      executor: master.name,
+                      ...(claimKey && { include_key: true }),
+                    }),
+                  )
                 } catch (err) {
                   problem ??= err instanceof WorkdeskToolError && err.conflict ? 'conflict' : 'claim'
                   if (err instanceof WorkdeskToolError && err.conflict) eligible.delete(task.id)
@@ -164,6 +233,8 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
                 if (
                   !claimed ||
                   claimed.id !== task.id ||
+                  (task.assignment && claimed.assignment?.id !== task.assignment.id) ||
+                  (task.key && claimed.key && claimed.key !== task.key) ||
                   claimed.executor !== master.name ||
                   claimed.status === 'queued'
                 ) {
@@ -171,7 +242,11 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
                   continue
                 }
                 eligible.delete(task.id)
-                store.handoff(claimed, master, Date.now())
+                store.handoff(
+                  claimed.key || !task.key ? claimed : { ...claimed, key: task.key, url: task.url },
+                  master,
+                  Date.now(),
+                )
                 observedTasks?.set(claimed.id, claimed)
               }
               store.release(active.onlyTaskId, Date.now())
@@ -187,7 +262,8 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
         } finally {
           // A topology failure never gates the preceding claim or thread. Fall back to presence
           // without replacing the device snapshot when any source is partial.
-          if (device) {
+          lastTasks = observedTasks
+          if (device && !streamDriven?.()) {
             let topology: WorkdeskTopology | null = null
             if (observedTasks && !signal.aborted && threadsConfig(cfg.threads)) {
               try {
@@ -201,35 +277,62 @@ export function createWorkdeskWatcher({ cfg, items, observation, onChange, log }
     } catch {
       problem ??= 'connection'
     } finally {
-      if (!signal.aborted) publish({ queue, polledAt, problem })
+      if (!signal.aborted && !presenceOnly) publish({ queue, polledAt, problem })
     }
+    return problem
+  }
+
+  function start(active: WorkdeskConfig, presenceOnly: boolean, parent?: AbortSignal, targetId?: number) {
+    const controller = new AbortController()
+    current = controller
+    const signal = parent ? AbortSignal.any([controller.signal, parent]) : controller.signal
+    inFlight = poll(active, signal, presenceOnly, targetId).finally(() => {
+      inFlight = null
+      current = null
+    })
+    return inFlight
   }
 
   function arm(delay: number): void {
     clearTimeout(timer)
-    if (!config || stopped || inFlight) return
+    if (!config || stopped) return
     timer = setTimeout(() => {
       if (!config || stopped) return
+      if (inFlight) {
+        void inFlight.finally(() => arm(0))
+        return
+      }
       const active = config
-      const controller = new AbortController()
-      current = controller
       const started = Date.now()
-      inFlight = poll(active, controller.signal).finally(() => {
-        inFlight = null
-        current = null
-        // Measure from the beginning of the last poll and never overlap a slow poll.
-        arm(controller.signal.aborted ? 0 : Math.max(0, active.intervalSec * 1000 - (Date.now() - started)))
-      })
+      void start(active, streamDriven?.() === true).finally(() =>
+        arm(config !== active ? 0 : Math.max(0, active.intervalSec * 1000 - (Date.now() - started))),
+      )
     }, delay)
   }
 
   return {
     view: () => status,
+    async reconcile(signal: AbortSignal, targetId?: number): Promise<void> {
+      while (inFlight) await inFlight
+      signal.throwIfAborted()
+      if (!config || stopped) throw new Error('Workdesk watcher unavailable')
+      const problem = await start(config, false, signal, targetId)
+      // A queued card with no local master remains in Workdesk for the next fallback scan.
+      // A snapshot is still usable by the v2 relay and other assignments.
+      if (
+        problem &&
+        problem !== 'heartbeat' &&
+        problem !== 'conflict' &&
+        !(targetId === undefined && problem === 'master')
+      )
+        throw new Error(`Workdesk reconciliation: ${problem}`)
+    },
     configChanged(): void {
       const next = JSON.stringify(cfg.workdesk ?? null)
       if (signature === next) return
       signature = next
       current?.abort()
+      lastTasks = null
       config = workdeskConfig(cfg.workdesk)
       if (config) publish(empty())
       else if (cfg.workdesk == null || cfg.workdesk === false) {

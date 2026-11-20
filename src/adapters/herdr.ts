@@ -1,9 +1,11 @@
 // Thin async wrapper over the herdr CLI. HERDR_BIN_PATH hides the socket transport
 // (Unix socket or Windows named pipe), so plugins should call herdr through it.
+
 import { execFile } from 'node:child_process'
 import { isAgentStatus } from '../core/board.ts'
 import type { PaneProcesses } from '../core/board-pane.ts'
 import type { AgentStatus } from '../core/types.ts'
+import { stableWorkdeskSid, workdeskAgent } from '../core/workdesk-topology.ts'
 import { isRecord } from './json-store.ts'
 
 const BIN = process.env.HERDR_BIN_PATH || 'herdr'
@@ -49,6 +51,20 @@ export interface HerdrPane {
   terminal_id?: string
   tokens?: Record<string, unknown>
   [key: string]: unknown
+}
+
+/** Native identity as observed in a Herdr pane. Some older snapshots omit provenance fields. */
+export function nativeBoardSid(pane: HerdrPane): string | null {
+  const session = pane.agent_session
+  if (
+    !workdeskAgent(pane.agent) ||
+    !stableWorkdeskSid(session?.value) ||
+    (session.kind !== undefined && session.kind !== 'id') ||
+    (session.agent !== undefined && session.agent !== pane.agent) ||
+    (session.source !== undefined && session.source !== `herdr:${pane.agent}`)
+  )
+    return null
+  return session.value
 }
 
 export interface HerdrSnapshot {
