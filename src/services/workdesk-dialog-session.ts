@@ -36,6 +36,7 @@ export function createWorkdeskDialogSession(
   key: Uint8Array,
   items: () => readonly Pick<Item, 'key' | 'session' | 'agent'>[] | null,
   readPath?: string,
+  inbox?: Database,
 ) {
   if (key.byteLength !== 32) throw new Error('Invalid Workdesk dialogue sealing key')
   const sealingKey = Buffer.from(key)
@@ -75,6 +76,30 @@ export function createWorkdeskDialogSession(
     },
   }
 
+  function permitsRead(target: DialogTarget) {
+    if (!readPath || !sink.permits(target)) return false
+    try {
+      const sql = new Database(readPath, { readonly: true })
+      try {
+        return sql.transaction(() =>
+          workdeskDialogStore(
+            {
+              db: sql,
+              write: () => {
+                throw new Error('Read-only dialogue')
+              },
+            },
+            items,
+          ).permitsRead(target, true),
+        )()
+      } finally {
+        sql.close()
+      }
+    } catch {
+      return false
+    }
+  }
+
   function read(target: DialogTarget, after: number) {
     function page(sql: Database) {
       const db = {
@@ -83,14 +108,23 @@ export function createWorkdeskDialogSession(
           throw new Error('Read-only dialogue')
         },
       }
-      if (!sink.permits(target) || !workdeskDialogStore(db, items).permitsRead(target)) return null
-      const rows = sql
-        .query<{ message_id: number; sealed: Uint8Array }, [string, number, number]>(`
+      if (!sink.permits(target) || !workdeskDialogStore(db, items).permitsRead(target, !!readPath)) return null
+      const rowsFrom = (source: Database) =>
+        source
+          .query<{ message_id: number; sealed: Uint8Array }, [string, number, number]>(`
         SELECT message_id, sealed FROM workdesk_dialog_messages
         WHERE assignment_id = ? AND message_id > ? ORDER BY message_id LIMIT ?
       `)
-        .all(target.assignment_id, after, LIMIT + 1)
-      const messages = rows.slice(0, LIMIT).map(row => unseal(target, row.message_id, row.sealed))
+          .all(target.assignment_id, after, LIMIT + 1)
+      const byId = new Map<number, OwnerMessage>()
+      for (const row of [...rowsFrom(sql), ...(inbox ? rowsFrom(inbox) : [])]) {
+        const message = unseal(target, row.message_id, row.sealed)
+        const prior = byId.get(row.message_id)
+        if (prior && JSON.stringify(prior) !== JSON.stringify(message)) return null
+        byId.set(row.message_id, message)
+      }
+      const rows = [...byId.values()].sort((a, b) => a.id - b.id)
+      const messages = rows.slice(0, LIMIT)
       return { messages, cursor: messages.at(-1)?.id ?? after, more: rows.length > LIMIT }
     }
     if (readPath) {
@@ -165,5 +199,5 @@ export function createWorkdeskDialogSession(
     }
   }
 
-  return { sink, attach }
+  return { sink, attach, permitsRead }
 }

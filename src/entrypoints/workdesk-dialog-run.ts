@@ -11,6 +11,11 @@ import { object } from '../core/workdesk.ts'
 import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import { createWorkdeskDialogSession, WORKDESK_DIALOG_TOOL } from '../services/workdesk-dialog-session.ts'
 import { queueNativeWorkdeskMessage, WORKDESK_POST_TOOL, workdeskUnifiedEnabled } from '../services/workdesk-unified.ts'
+import {
+  openWorkdeskInbox,
+  startWorkdeskInbox,
+  workdeskInboxToolsAvailable,
+} from '../services/workdesk-unified-inbox.ts'
 
 type Result = Record<string, unknown> | null
 type Pending = (result: unknown) => void
@@ -98,7 +103,7 @@ async function run(): Promise<number> {
   const readPath = isolation?.dialogReadPath
   let sealingKey: string
   if (unifiedOnly) {
-    check(readOnly, 'Unified native launcher requires deliver=false until protected intake is connected')
+    check(readOnly || isolation?.inboxRoleConfirmed === true, 'Protected inbox role has not been confirmed')
     process.umask(0o007)
     check(
       workdeskUnifiedEnabled(cfg) && typeof readPath === 'string' && isAbsolute(readPath),
@@ -138,6 +143,9 @@ async function run(): Promise<number> {
     return deadline(boardReplies, id, () => child?.send({ kind: 'workdesk-dialog', id, op, ...args }))
   }
   const postEnabled = unifiedOnly
+  let inbox: ReturnType<typeof openWorkdeskInbox> | undefined
+  let beginInbox: (() => () => Promise<void>) | undefined
+  let stopInbox: (() => Promise<void>) | undefined
   let reader: ReturnType<ReturnType<typeof createWorkdeskDialogSession>['attach']> | undefined
   const mcp = Bun.serve({
     hostname: '127.0.0.1',
@@ -319,11 +327,30 @@ async function run(): Promise<number> {
     if (unifiedOnly) {
       const executor = isolation?.executor
       check(typeof executor === 'string' && typeof readPath === 'string', 'Pinned reader unavailable')
-      reader = createWorkdeskDialogSession(
+      if (!readOnly || isolation?.inboxPath !== undefined) {
+        try {
+          inbox = openWorkdeskInbox(isolation?.inboxPath, readOnly)
+        } catch {
+          throw new LaunchError('Protected inbox UID, permissions or database unavailable')
+        }
+      }
+      const target = { task_id: pin.taskId, assignment_id: pin.assignmentId, thread_id: pin.threadId, sid, executor }
+      const session = createWorkdeskDialogSession(
         Buffer.from(sealingKey, 'base64url'),
         () => (ready ? [{ key: sid, session: sid, agent: 'codex' }] : null),
         readPath,
-      ).attach({ task_id: pin.taskId, assignment_id: pin.assignmentId, thread_id: pin.threadId, sid, executor })
+        inbox,
+      )
+      reader = session.attach(target)
+      if (inbox && !readOnly) {
+        check(await workdeskInboxToolsAvailable(dialogue), 'Protected inbox adapter lacks required tools')
+        const store = inbox
+        const permits = () => ready && !closing && client.readyState === WebSocket.OPEN && session.permitsRead(target)
+        beginInbox = () => {
+          check(permits(), 'Protected inbox has no verified current local recipient')
+          return startWorkdeskInbox(store, dialogue, target, session.sink, permits)
+        }
+      }
     } else await bootBoard()
     const status = object(await call('mcpServerStatus/list', { threadId: sid, serverName: 'board_workdesk_dialogue' }))
     check(
@@ -334,6 +361,7 @@ async function run(): Promise<number> {
     if (unifiedOnly) {
       check(client.readyState === WebSocket.OPEN, 'Private App Server disconnected')
       ready = true
+      stopInbox = beginInbox?.()
     }
     console.error(`Workdesk recipient attached to ${sid}`)
     tui = Bun.spawn(
@@ -349,6 +377,8 @@ async function run(): Promise<number> {
   } finally {
     closing = true
     reader?.close()
+    await stopInbox?.()
+    inbox?.close()
     process.off('SIGUSR1', restartBoard)
     process.off('SIGTERM', stop)
     process.off('SIGHUP', stop)

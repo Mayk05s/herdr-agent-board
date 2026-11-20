@@ -31,9 +31,9 @@ type Resolved = { binding: Binding } | { problem: DialogProblem }
  */
 export interface ProtectedDialogSink {
   permits(target: DialogTarget): boolean
-  stage(tx: Tx, target: DialogTarget, message: OwnerMessage): void
+  stage(tx: Pick<Tx, 'db'>, target: DialogTarget, message: OwnerMessage): void
   /** A replay must still be readable by the current protected recipient before it can be ACKed. */
-  contains(tx: Tx, target: DialogTarget, message: OwnerMessage): boolean
+  contains(tx: Pick<Tx, 'db'>, target: DialogTarget, message: OwnerMessage): boolean
 }
 
 export function workdeskDialogStore(
@@ -175,7 +175,11 @@ export function workdeskDialogStore(
     },
     resolve,
     current,
-    permitsRead(target: DialogTarget): boolean {
+    permitsRead(target: DialogTarget, requireOpen = false): boolean {
+      if (requireOpen) {
+        const thread = getThread(db, target.thread_id)
+        if (!thread || thread.status === 'done' || thread.status === 'dropped') return false
+      }
       const resolved = resolve({ board_task_id: target.task_id, assignment_id: target.assignment_id, count: 0 })
       return 'binding' in resolved && sameDialogTarget(target, resolved.binding)
     },
