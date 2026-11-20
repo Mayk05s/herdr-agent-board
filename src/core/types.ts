@@ -236,6 +236,8 @@ export interface Config {
   workdesk?: unknown
   workdeskDialog?: unknown
   boardEvents?: unknown
+  /** The away journal (#489, `true` or an object), as config.json has it: read through core/journal.ts journalConfig. */
+  journal?: unknown
   /** The model rule (#429, an object), as config.json has it: read through core/model-check.ts modelsConfig. */
   models?: unknown
   /** Nodes, this board as a master (#496, an object), as config.json has it: read through core/nodes.ts nodesConfig. */
