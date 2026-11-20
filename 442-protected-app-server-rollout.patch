@@ -1,5 +1,5 @@
 diff --git a/src/adapters/codex-home.ts b/src/adapters/codex-home.ts
-index 62678d91..8e15d4d0 100644
+index 62678d91765277864155d8a4d89e9e05009f5f2b..8e15d4d03eea9b069db7bd3290b68b454347a899 100644
 --- a/src/adapters/codex-home.ts
 +++ b/src/adapters/codex-home.ts
 @@ -8,16 +8,17 @@ import { isCodexSession, parseCodexConversation, parseCodexTail } from '../core/
@@ -121,7 +121,7 @@ index 62678d91..8e15d4d0 100644
      // A reused pane cannot borrow another terminal's history. Keep both successes and misses for
      // this incarnation. A send starts its own verification even while a list probe is in flight.
 diff --git a/src/adapters/codex-process.ts b/src/adapters/codex-process.ts
-index 4d608ac6..d7da5ffa 100644
+index 4d608ac60c6c0cb63d64a0c52fb04161aa80120f..d7da5ffa466b44f3a3f93032a8e2ec6927089038 100644
 --- a/src/adapters/codex-process.ts
 +++ b/src/adapters/codex-process.ts
 @@ -3,6 +3,7 @@
@@ -253,10 +253,10 @@ index 4d608ac6..d7da5ffa 100644
  
  export const canProbeCodex = (pane: HerdrPane): boolean =>
 diff --git a/src/core/types.ts b/src/core/types.ts
-index 73c80c3f..9a4af4f2 100644
+index 97f8a7e9a5b52ca7db0998aaf50febdee3834d2b..6e0948abfb4eb1e00582a69af81bec18f9affb38 100644
 --- a/src/core/types.ts
 +++ b/src/core/types.ts
-@@ -288,7 +288,7 @@ export interface Item {
+@@ -289,7 +289,7 @@ export interface Item {
    /** Herdr's token if the verified current Codex thread belongs to a different card (server only). */
    codexReported?: string
    /** The verified, versioned rollout used for this Codex card's history (server only). */
@@ -266,7 +266,7 @@ index 73c80c3f..9a4af4f2 100644
    codexRevision?: string
    /** The foreground TUI's selected thread could not be verified from its writable rollouts. */
 diff --git a/src/entrypoints/workdesk-dialog-run.ts b/src/entrypoints/workdesk-dialog-run.ts
-index fb9c3765..714b3d47 100644
+index fb9c37656077b27a6d4a41c6dcd87542791a9e92..226ff05481edd4673be7a96ec38935226f15eaee 100644
 --- a/src/entrypoints/workdesk-dialog-run.ts
 +++ b/src/entrypoints/workdesk-dialog-run.ts
 @@ -4,6 +4,7 @@
@@ -277,7 +277,17 @@ index fb9c3765..714b3d47 100644
  import { loadConfig } from '../adapters/config-file.ts'
  import { snapshot } from '../adapters/herdr.ts'
  import { ROOT } from '../adapters/paths.ts'
-@@ -84,6 +85,7 @@ async function run(): Promise<number> {
+@@ -70,6 +71,9 @@ const unavailable = { content: [{ type: 'text', text: 'Workdesk dialogue unavail
+ 
+ async function run(): Promise<number> {
+   const sid = process.argv[2]
++  const effort = process.env.BOARD_WORKDESK_REASONING_EFFORT
++  check(effort === undefined || effort === 'medium', 'Invalid Workdesk reasoning effort')
++  const effortArgs = effort === 'medium' ? ['-c', 'model_reasoning_effort="medium"'] : []
+   const pane = process.env.HERDR_PANE_ID
+   const cfg = loadConfig()
+   const dialogue = workdeskDialogConfig(cfg.workdeskDialog, cfg.workdesk)
+@@ -84,6 +88,7 @@ async function run(): Promise<number> {
    )
    const readOnly = object(cfg.workdeskDialog)?.deliver !== true
    const seen = await snapshot()
@@ -285,7 +295,7 @@ index fb9c3765..714b3d47 100644
    check(
      seen.panes.some(p => p.pane_id === pane),
      'The current Herdr pane was not observed',
-@@ -119,6 +121,7 @@ async function run(): Promise<number> {
+@@ -119,6 +124,7 @@ async function run(): Promise<number> {
    let closing = false
    let tui: Bun.Subprocess | undefined
    let socket: WebSocket | undefined
@@ -293,7 +303,7 @@ index fb9c3765..714b3d47 100644
    const askBoard = (op: string, args: Record<string, unknown>) => {
      const id = ++rpcId
      const child = board
-@@ -176,6 +179,15 @@ async function run(): Promise<number> {
+@@ -176,6 +182,16 @@ async function run(): Promise<number> {
        return reply({ content: result.contentItems.map(item => ({ type: 'text', text: object(item)?.text })) })
      },
    })
@@ -305,11 +315,17 @@ index fb9c3765..714b3d47 100644
 +    appAddress,
 +    '--remote-auth-token-env',
 +    'BOARD_PRIVATE_TUI_CAPABILITY',
++    ...effortArgs,
 +  ]
    const app = Bun.spawn(
      [
        codex,
-@@ -194,6 +206,27 @@ async function run(): Promise<number> {
+@@ -190,10 +206,32 @@ async function run(): Promise<number> {
+       'approvals_reviewer="auto_review"',
+       '-c',
+       'approval_policy="on-request"',
++      ...effortArgs,
+     ],
      { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' },
    )
  
@@ -337,7 +353,7 @@ index fb9c3765..714b3d47 100644
    async function bootBoard(): Promise<void> {
      ready = false
      const child = Bun.spawn(command('server.ts'), {
-@@ -203,6 +236,17 @@ async function run(): Promise<number> {
+@@ -203,6 +241,17 @@ async function run(): Promise<number> {
        ipc(value) {
          const message = object(value)
          if (message?.kind !== 'workdesk-dialog' || typeof message.id !== 'number') return
@@ -355,7 +371,7 @@ index fb9c3765..714b3d47 100644
          boardReplies.get(message.id)?.(message.result)
          boardReplies.delete(message.id)
        },
-@@ -261,9 +305,9 @@ async function run(): Promise<number> {
+@@ -261,9 +310,9 @@ async function run(): Promise<number> {
          // Native errors are not printed.
        }
      })
@@ -367,7 +383,20 @@ index fb9c3765..714b3d47 100644
      }
      check(
        await call('initialize', { clientInfo: { name: 'agent-board-workdesk', version: '1' } }),
-@@ -292,19 +336,17 @@ async function run(): Promise<number> {
+@@ -278,6 +327,7 @@ async function run(): Promise<number> {
+         approvalsReviewer: 'auto_review',
+         sandbox: 'workspace-write',
+         config: {
++          ...(effort === 'medium' && { model_reasoning_effort: 'medium' }),
+           mcp_servers: {
+             board_workdesk_dialogue: {
+               url: new URL('/mcp', mcp.url).href,
+@@ -288,23 +338,22 @@ async function run(): Promise<number> {
+       }),
+     )
+     check(object(native?.thread)?.id === sid, 'Native resume did not return the pinned SID')
++    check(effort === undefined || native?.reasoningEffort === effort, 'Native resume did not retain medium effort')
+     // The child IPC needs the verified identity, never the content of the resumed history.
      const observed = object(await call('thread/read', { threadId: sid, includeTurns: false }))
      check(object(observed?.thread)?.id === sid, 'Private App Server did not retain the pinned SID')
      native = { thread: { id: sid } }
@@ -395,10 +424,10 @@ index fb9c3765..714b3d47 100644
    } finally {
      closing = true
 diff --git a/src/server/app.ts b/src/server/app.ts
-index ca360779..e0e8fde5 100644
+index ea0fb732b368c21cab2411b0cc2efbfbe259db29..f842f965276a2f8af1971a31ab4bae7b0fdd8b8a 100644
 --- a/src/server/app.ts
 +++ b/src/server/app.ts
-@@ -630,6 +630,7 @@ export async function startServer({
+@@ -699,6 +699,7 @@ export async function startServer({
      () => board.observation()?.items ?? null,
      () => board.publish(),
    )
@@ -407,10 +436,10 @@ index ca360779..e0e8fde5 100644
      cfg,
      items: () => board.observation()?.items ?? null,
 diff --git a/src/services/board.ts b/src/services/board.ts
-index cd73a051..e3951894 100644
+index 6f71109cfb3c7bcfd3445b68892ae06a680f9fd3..6d5b0b8845fd16b46465754cad01417bcb2f8e6f 100644
 --- a/src/services/board.ts
 +++ b/src/services/board.ts
-@@ -457,15 +457,17 @@ export async function collect(
+@@ -459,15 +459,17 @@ export async function collect(
    let dayWorkspace = ''
  
    const codexThreads = await Promise.all(
@@ -432,7 +461,7 @@ index cd73a051..e3951894 100644
      const session = current && !current.continues ? current.session : reported
      if (dayPane(p, session)) {
        dayWorkspace ||= labels.get(p.workspace_id ?? '') ?? ''
-@@ -479,7 +481,8 @@ export async function collect(
+@@ -481,7 +483,8 @@ export async function collect(
        key,
        session,
        ...(current?.continues && { codexThread: current.session }),
@@ -443,7 +472,7 @@ index cd73a051..e3951894 100644
        ...(active && !current && { codexUnresolved: true }),
        ...(isCodexItem(p) && p.terminal_id && { codexTerminal: p.terminal_id }),
 diff --git a/src/services/deps.ts b/src/services/deps.ts
-index 1e82cc09..2f55c621 100644
+index 1e82cc09171837b4d46f530546d3334685d4fa0b..2f55c6210bf27b1e93c104345fff7375673ec162 100644
 --- a/src/services/deps.ts
 +++ b/src/services/deps.ts
 @@ -3,6 +3,8 @@ import { existsSync } from 'node:fs'
@@ -464,7 +493,7 @@ index 1e82cc09..2f55c621 100644
    profiles(): ProfileSet
    /**
 diff --git a/src/services/workdesk-dialog-launcher.ts b/src/services/workdesk-dialog-launcher.ts
-index 93e4e84b..1bf00e8f 100644
+index 93e4e84b0a8afe52143ea46168f2de67b0ae208e..1bf00e8fe2f6b1be7f61f1c9eede8f65bbd398cd 100644
 --- a/src/services/workdesk-dialog-launcher.ts
 +++ b/src/services/workdesk-dialog-launcher.ts
 @@ -1,4 +1,6 @@
