@@ -1,7 +1,7 @@
 import type { StageObservation } from '../adapters/board-event-store.ts'
 import { openDb } from '../adapters/db.ts'
 import { supportsTopology, WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
-import { type WorkdeskMaster, workdeskStore } from '../adapters/workdesk-store.ts'
+import { type WorkdeskAssignmentSource, type WorkdeskMaster, workdeskStore } from '../adapters/workdesk-store.ts'
 import type { Config, Item } from '../core/types.ts'
 import { threadsConfig } from '../core/work-threads.ts'
 import {
@@ -73,6 +73,7 @@ export function createWorkdeskWatcher({
     signal: AbortSignal,
     presenceOnly = false,
     targetId?: number,
+    assignmentSource?: WorkdeskAssignmentSource,
   ): Promise<WorkdeskProblem | null> {
     let problem: WorkdeskProblem | null = null
     let queue = status?.queue ?? null
@@ -195,6 +196,7 @@ export function createWorkdeskWatcher({
               store.release(active.onlyTaskId, Date.now())
               for (const task of tasks) {
                 if (targetId !== undefined && task.id !== targetId) continue
+                if (assignmentSource && task.assignment?.id !== assignmentSource.assignmentId) continue
                 signal.throwIfAborted()
                 if (!threadsConfig(cfg.threads)) {
                   problem ??= 'threads'
@@ -212,14 +214,15 @@ export function createWorkdeskWatcher({
                 }
                 if (!store.reserve(task.id, master)) continue
                 let claimed: ReturnType<typeof workdeskTask>
+                let replayed = false
                 try {
-                  claimed = workdeskTask(
-                    await mcp.call('claim_task', {
-                      task_id: task.id,
-                      executor: master.name,
-                      ...(claimKey && { include_key: true }),
-                    }),
-                  )
+                  const raw = await mcp.call('claim_task', {
+                    task_id: task.id,
+                    executor: master.name,
+                    ...(claimKey && { include_key: true }),
+                  })
+                  claimed = workdeskTask(raw)
+                  if (assignmentSource) replayed = object(raw)?.replayed === true
                 } catch (err) {
                   problem ??= err instanceof WorkdeskToolError && err.conflict ? 'conflict' : 'claim'
                   if (err instanceof WorkdeskToolError && err.conflict) eligible.delete(task.id)
@@ -246,6 +249,7 @@ export function createWorkdeskWatcher({
                   claimed.key || !task.key ? claimed : { ...claimed, key: task.key, url: task.url },
                   master,
                   Date.now(),
+                  assignmentSource && { ...assignmentSource, replayed },
                 )
                 observedTasks?.set(claimed.id, claimed)
               }
@@ -282,11 +286,17 @@ export function createWorkdeskWatcher({
     return problem
   }
 
-  function start(active: WorkdeskConfig, presenceOnly: boolean, parent?: AbortSignal, targetId?: number) {
+  function start(
+    active: WorkdeskConfig,
+    presenceOnly: boolean,
+    parent?: AbortSignal,
+    targetId?: number,
+    assignmentSource?: WorkdeskAssignmentSource,
+  ) {
     const controller = new AbortController()
     current = controller
     const signal = parent ? AbortSignal.any([controller.signal, parent]) : controller.signal
-    inFlight = poll(active, signal, presenceOnly, targetId).finally(() => {
+    inFlight = poll(active, signal, presenceOnly, targetId, assignmentSource).finally(() => {
       inFlight = null
       current = null
     })
@@ -312,11 +322,15 @@ export function createWorkdeskWatcher({
 
   return {
     view: () => status,
-    async reconcile(signal: AbortSignal, targetId?: number): Promise<void> {
+    async reconcile(
+      signal: AbortSignal,
+      targetId?: number,
+      assignmentSource?: WorkdeskAssignmentSource,
+    ): Promise<void> {
       while (inFlight) await inFlight
       signal.throwIfAborted()
       if (!config || stopped) throw new Error('Workdesk watcher unavailable')
-      const problem = await start(config, false, signal, targetId)
+      const problem = await start(config, false, signal, targetId, assignmentSource)
       // A queued card with no local master remains in Workdesk for the next fallback scan.
       // A snapshot is still usable by the v2 relay and other assignments.
       if (

@@ -134,10 +134,11 @@ export function createBoardEvents(deps: Deps) {
           armStages()
         })
     },
-    source(source: string, onlyTaskId?: number) {
+    source(source: string, onlyTaskId?: number, dispatchAfter?: number) {
       return {
-        read: () => store().cursor(source).read(),
-        reset: () => store().cursor(source).reset(),
+        read: () => store().cursor(source, dispatchAfter).read(),
+        dispatchReady: () => store().cursor(source, dispatchAfter).dispatchReady(),
+        reset: () => store().cursor(source, dispatchAfter).reset(),
         commit: (event: WorkdeskEvent) => {
           store()
             .cursor(source)

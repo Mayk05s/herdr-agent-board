@@ -115,10 +115,12 @@ export function boardEventStore(db: BoardDb) {
     readerCursor: () => number('reader_ack'),
     highWater: () =>
       db.db.query<{ id: number }, []>('SELECT COALESCE(MAX(id),0) AS id FROM board_events').get()?.id ?? 0,
-    cursor(source: string) {
+    cursor(source: string, dispatchAfter?: number) {
       const key = `source:${source}`
+      const pauseKey = `dispatch-paused:${source}:${dispatchAfter}`
       return {
         read: () => number(key),
+        dispatchReady: () => dispatchAfter !== undefined && number(key) >= dispatchAfter && get(pauseKey) !== '1',
         commit(value: WorkdeskEvent, publish = true) {
           db.write('board-events', tx => {
             if (value.id <= number(key)) return
@@ -139,7 +141,10 @@ export function boardEventStore(db: BoardDb) {
           })
         },
         reset() {
-          db.write('board-events', tx => set(tx, key, 0))
+          db.write('board-events', tx => {
+            if (dispatchAfter !== undefined) set(tx, pauseKey, 1)
+            set(tx, key, 0)
+          })
         },
       }
     },

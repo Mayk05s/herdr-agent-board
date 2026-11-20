@@ -648,12 +648,24 @@ export async function startServer({
     trialStatus = null
     const config = workdeskEventsConfig(cfg.workdesk)
     const watch = workdeskConfig(cfg.workdesk)
-    const taskId = object(object(cfg.workdesk)?.events)?.onlyTaskId
+    const eventSettings = object(object(cfg.workdesk)?.events)
+    const taskId = eventSettings?.onlyTaskId
+    const dispatchAfter = validTaskId(eventSettings?.dispatchAssignmentsAfter)
+      ? eventSettings.dispatchAssignmentsAfter
+      : undefined
     if (!config || !watch || cfg.boardEvents !== true || !validTaskId(taskId)) return
     const controller = new AbortController()
-    const current: TrialStatus = { state: 'connecting', boardTaskId: taskId, cursor: null, latestEvent: null }
+    const current: TrialStatus = {
+      state: 'connecting',
+      boardTaskId: taskId,
+      cursor: null,
+      latestEvent: null,
+    }
     trialStatus = current
-    const source = boardEvents.source(JSON.stringify([config.url, taskId, config.cursorEpoch]), taskId)
+    // Reuse the global transport cursor from the scoped trial. Only assignment
+    // dispatch widens. Owner dialogue and the journal publisher retain the trial scope.
+    const source = boardEvents.source(JSON.stringify([config.url, taskId, config.cursorEpoch]), taskId, dispatchAfter)
+    const handlers = workdeskEventHandlers(workdesk, workdeskDialog, taskId)
     const task = runWorkdeskEvents({
       signal: controller.signal,
       cursor: {
@@ -678,7 +690,22 @@ export async function startServer({
         current.state = ok ? 'connected' : 'fallback'
         boardEvents.health('workdesk.events', ok)
       },
-      ...workdeskEventHandlers(workdesk, workdeskDialog, taskId),
+      reconcile: handlers.reconcile,
+      async apply(event, signal) {
+        if (
+          event.type === 'task.assigned_board' &&
+          dispatchAfter !== undefined &&
+          event.id > dispatchAfter &&
+          source.dispatchReady()
+        ) {
+          await workdesk.reconcile(signal, event.board_task_id, {
+            eventId: event.id,
+            assignmentId: event.assignment_id,
+          })
+          return
+        }
+        await handlers.apply(event, signal)
+      },
     }).catch(() => {
       if (!controller.signal.aborted) {
         current.state = 'fallback'
