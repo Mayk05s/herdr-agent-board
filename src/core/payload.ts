@@ -11,6 +11,7 @@ import type { TodosConfig } from './todos.ts'
 import type { ColumnId, Item, Lang, LaunchView } from './types.ts'
 import type { WakeView } from './wake/view.ts'
 import type { WorkdeskPayload } from './workdesk.ts'
+import type { DialogStatus } from './workdesk-dialog.ts'
 
 /** A lane as the page shows it: the configured category or one a session picked. */
 export interface BoardCategory {
@@ -144,6 +145,7 @@ export interface BoardPayload {
   threads?: ThreadsPayload
   /** Workdesk queue and last poll, only while the watcher is configured. */
   workdesk?: WorkdeskPayload
+  workdeskDialog?: DialogStatus
   /**
    * The Remote access view's revision (GET /api/access, local only): it changes when the view does,
    * and the panel fetches the view again then; the view itself never goes out with the board. The

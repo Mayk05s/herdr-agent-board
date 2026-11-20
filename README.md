@@ -2285,6 +2285,29 @@ The explicit spawn flag sets coverage to incomplete until confirmed again. Only 
 and Codex sessions in Herdr's working or blocked state count. Missing or incomplete coverage
 is shown as unknown in Workdesk. A complete roster with no active workers shows zero.
 
+### Workdesk owner dialogue (local staging)
+
+The optional `workdeskDialog` entry uses the same `executable`, `args`, `caFile` and
+`intervalSec` settings as the Workdesk adapter. Use a trusted local adapter for the same
+Workdesk instance with a separate board-role connection file. Keep the credential in
+that file's existing private storage. Leave the setting absent or false on running
+installations while authenticated agent delivery is pending.
+
+The dialog poller waits for `list_owner_events`, `read_owner_messages` and
+`ack_owner_messages` in the adapter's tool catalogue. It keeps only event metadata in the
+durable inbox and continues its discovery separately from the assignment poll. A v2 claim
+records the assignment UUID, Board thread UUID and native session ID in one transaction.
+An earlier claim without this identity waits with `assignment_unverified`. A matching
+thread receives a generic update notice. `GET /api/board` shows `workdeskDialog.pending`,
+`more` (the source has further pages), `polledAt`, `problem` and per-reason `blocked` counts.
+
+Owner text and acknowledgments require a durable delivery sink with authenticated
+agent access for the current assignment. The server currently leaves those events
+pending with `protected_delivery_unavailable`. An observed Herdr session ID identifies
+the intended recipient, and agent access still requires a credential bound to the
+calling session. The normal thread view contains the generic notice. This change adds
+a database migration for the inbox, cursors, receipts and bindings.
+
 ## Secrets
 
 An agent that needs a token, a password or OAuth keys it must never see used to write a script

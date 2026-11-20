@@ -36,6 +36,7 @@ import { todosConfig } from '../core/todos.ts'
 import type { Item } from '../core/types.ts'
 import type { WakeView } from '../core/wake/view.ts'
 import type { WorkdeskPayload } from '../core/workdesk.ts'
+import type { DialogStatus } from '../core/workdesk-dialog.ts'
 import type { BoardObservation } from '../core/workdesk-topology.ts'
 import { collect } from '../services/board.ts'
 import type { Deps } from '../services/deps.ts'
@@ -98,6 +99,7 @@ interface Options {
   /** Threads' line (#379); null while they are off. */
   threads?: () => ThreadsPayload | null
   workdesk?: () => WorkdeskPayload | null
+  workdeskDialog?: () => DialogStatus | null
 }
 
 // The colors the category editor offers (aliases left out).
@@ -223,6 +225,7 @@ export function createBoardState({
   calendar,
   threads,
   workdesk,
+  workdeskDialog,
 }: Options): BoardState {
   const { cfg, log } = deps
   let items: Item[] = []
@@ -234,6 +237,7 @@ export function createBoardState({
   function board(): Omit<BoardPayload, 'lastSuccessfulRefreshAt'> {
     const ids = [...new Set([...cfg.categories.map(c => c.id), ...items.map(i => i.category)])]
     const workdeskLine = workdesk?.()
+    const dialogLine = workdeskDialog?.()
     const categories = ids
       .sort((a, b) => laneRank(cfg, a) - laneRank(cfg, b) || a.localeCompare(b))
       .map(id => {
@@ -313,6 +317,7 @@ export function createBoardState({
       // threads: only while config.json turns them on (#379)
       ...threadsOf(threads),
       ...(workdeskLine && { workdesk: workdeskLine }),
+      ...(dialogLine && { workdeskDialog: dialogLine }),
       // accessRev: the panel's cue to fetch the Remote access view again (never the view itself).
       accessRev: accessRev?.() ?? 0,
       // teamRev: only while config.json turns the peer network on (#231).

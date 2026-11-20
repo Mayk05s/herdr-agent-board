@@ -81,6 +81,7 @@ import {
 import { createWakeControl, startWakeStart } from '../services/wake/control.ts'
 import { createWorkHub, type WorkHub } from '../services/work-hub.ts'
 import { keepThreadsDb, threadsPayload, withThreadsDb } from '../services/work-threads.ts'
+import { createWorkdeskDialog } from '../services/workdesk-dialog.ts'
 import { createWorkdeskWatcher } from '../services/workdesk-watcher.ts'
 import { createBoardState } from './board-state.ts'
 import { dispatch, json, peerOf, type Route } from './http.ts'
@@ -625,6 +626,11 @@ export async function startServer({
     onChange: () => board.publish(),
     log,
   })
+  const workdeskDialog = createWorkdeskDialog({
+    cfg,
+    items: () => board.observation()?.items ?? null,
+    onChange: () => board.publish(),
+  })
   const board = createBoardState({
     deps,
     launches,
@@ -645,6 +651,7 @@ export async function startServer({
     time: timeLine,
     calendar: calendarLine,
     workdesk: workdesk.view,
+    workdeskDialog: workdeskDialog.view,
     // Threads (#379): while config.json turns them on, the revision and the count that waits on
     // the owner (two queries a refresh); off, nothing is read.
     threads: () => {
@@ -890,6 +897,7 @@ export async function startServer({
   // The port makes it one board per machine, so one scheduler; claims cover an overlap.
   const scheduler = startScheduler({ deps, onChange: refresh })
   workdesk.configChanged()
+  workdeskDialog.configChanged()
   // Auto-compact (#378) beside it, for the same reason: one board types /compact.
   const compactor = startCompactor({ deps, onChange: refresh })
   // Shells a board before this one opened and that are gone by now are forgotten.
@@ -942,6 +950,7 @@ export async function startServer({
       calendar.configChanged()
       reminders.configChanged()
       workdesk.configChanged()
+      workdeskDialog.configChanged()
       team.refresh()
       holdLoopback6()
       await board.refresh()
@@ -952,7 +961,7 @@ export async function startServer({
       for (const watcher of watchers) watcher.close()
       omarchy?.close()
       scheduler.stop()
-      await workdesk.stop()
+      await Promise.all([workdesk.stop(), workdeskDialog.stop()])
       compactor.stop()
       backups.stop()
       wake.stop()

@@ -4,7 +4,7 @@ import type { BoardDb } from './db.ts'
 import { addEntry, listEntries, updateEntry } from './schedule-store.ts'
 import { appendEntry, createThread, getThread, putWatch } from './work-thread-store.ts'
 
-export type WorkdeskMaster = { key: string; name: string; lane: string }
+export type WorkdeskMaster = { key: string; name: string; lane: string; sid?: string }
 type Handoff = { executor: string; session_key: string; thread_id: string | null; schedule_id: string | null }
 type Pending = Handoff & { task_id: number; thread_id: string }
 const PARKED = 8_640_000_000_000_000 // beyond any normal due time, still a valid Date
@@ -102,6 +102,12 @@ export function workdeskStore(db: BoardDb) {
           true,
         )
         tx.db.query('UPDATE workdesk_handoffs SET thread_id = ? WHERE task_id = ?').run(head.id, task.id)
+        if (task.assignment && master.sid) {
+          tx.db
+            .query(`INSERT INTO workdesk_dialog_bindings (task_id, assignment_id, executor, thread_id, sid, revision)
+                    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`)
+            .run(task.id, task.assignment.id, saved.executor, head.id, master.sid, task.assignment.revision)
+        }
       })
     },
 
