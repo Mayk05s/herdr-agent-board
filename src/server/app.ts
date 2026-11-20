@@ -5,6 +5,7 @@
 // Only loopback, only the Host it was asked for, and every POST needs an X-Board header: a page
 // on another site cannot send that without a CORS preflight, which this server never grants, so
 // it cannot type into a session.
+
 import { randomBytes } from 'node:crypto'
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs'
 import { join } from 'node:path'
@@ -33,6 +34,7 @@ import {
   sshVersion,
   writePidRecord,
 } from '../adapters/ssh.ts'
+import { connectWorkdeskEvents } from '../adapters/workdesk-events.ts'
 import { messageGate } from '../core/message-gate.ts'
 import { pageWithLook } from '../core/omarchy-theme.ts'
 import type { BackupPayload, CalendarPayload, TimePayload } from '../core/payload.ts'
@@ -46,10 +48,13 @@ import { MAX_NAME } from '../core/team-wire.ts'
 import { boardPorts, forwardSpec, publicHosts, sshArgs, tunnelConfig, tunnelProblems } from '../core/tunnel.ts'
 import type { Config } from '../core/types.ts'
 import { threadsConfig } from '../core/work-threads.ts'
+import { workdeskConfig } from '../core/workdesk.ts'
+import { workdeskEventsConfig } from '../core/workdesk-events.ts'
 import { teamDesktop } from '../integrations/team-toast.ts'
 import { createAccess } from '../services/access.ts'
 import { backupView, startBackups } from '../services/backup.ts'
 import { createBackupServer } from '../services/backup-server.ts'
+import { createBoardEvents } from '../services/board-events.ts'
 import { createCalendarSync } from '../services/calendar.ts'
 import { createCalendarReminders } from '../services/calendar-reminders.ts'
 import { startCompactor } from '../services/compactor.ts'
@@ -82,6 +87,7 @@ import { createWakeControl, startWakeStart } from '../services/wake/control.ts'
 import { createWorkHub, type WorkHub } from '../services/work-hub.ts'
 import { keepThreadsDb, threadsPayload, withThreadsDb } from '../services/work-threads.ts'
 import { createWorkdeskDialog } from '../services/workdesk-dialog.ts'
+import { runWorkdeskEvents, workdeskEventHandlers } from '../services/workdesk-events.ts'
 import { createWorkdeskWatcher } from '../services/workdesk-watcher.ts'
 import { createBoardState } from './board-state.ts'
 import { dispatch, json, peerOf, type Route } from './http.ts'
@@ -90,6 +96,7 @@ import { accessRoutes } from './routes/access.ts'
 import { archiveRoutes } from './routes/archive.ts'
 import { backupRoutes } from './routes/backup.ts'
 import { boardRoutes } from './routes/board.ts'
+import { boardEventRoutes } from './routes/board-events.ts'
 import { calendarRoutes, eventReveal } from './routes/calendar.ts'
 import { fsRoutes } from './routes/fs.ts'
 import { launchRoutes } from './routes/launch.ts'
@@ -619,16 +626,59 @@ export async function startServer({
     const shown = line && reminders.line()
     return shown ? { ...line, reminders: shown } : line
   }
+  const boardEvents = createBoardEvents(deps)
+  const localEventRoutes = boardEventRoutes(boardEvents)
+  const streamDriven = () => workdeskEventsConfig(cfg.workdesk) !== null
+  let workdeskStream: { controller: AbortController; task: Promise<void> } | undefined
+  let workdeskStreamConfig = ''
+  async function configureWorkdeskStream() {
+    const signature = JSON.stringify([cfg.workdesk, cfg.workdeskDialog])
+    if (signature === workdeskStreamConfig) return
+    workdeskStreamConfig = signature
+    const prior = workdeskStream
+    prior?.controller.abort()
+    await prior?.task
+    if (signature !== workdeskStreamConfig || workdeskStream !== prior) return
+    workdeskStream = undefined
+    const config = workdeskEventsConfig(cfg.workdesk)
+    if (!config) return
+    const watch = workdeskConfig(cfg.workdesk)
+    if (!watch) return
+    const controller = new AbortController()
+    const source = boardEvents.source(
+      JSON.stringify([config.url, watch.onlyTaskId, config.cursorEpoch]),
+      watch.onlyTaskId,
+    )
+    let offline = false
+    const task = runWorkdeskEvents({
+      signal: controller.signal,
+      cursor: source,
+      connect: (since, signal) => connectWorkdeskEvents(config, since, signal),
+      connectionHealthy(ok) {
+        boardEvents.health('workdesk.events', ok)
+        if (!ok && !offline) log('Workdesk SSE unavailable; using fallback')
+        offline = !ok
+      },
+      ...workdeskEventHandlers(workdesk, workdeskDialog, watch.onlyTaskId),
+    }).catch(() => {
+      if (!controller.signal.aborted) log('Workdesk SSE consumer stopped')
+    })
+    workdeskStream = { controller, task }
+  }
   const workdesk = createWorkdeskWatcher({
     cfg,
     items: () => (board.stale() ? null : board.items()),
     observation: () => board.observation(),
+    streamDriven,
+    stageTracking: boardEvents.enabled,
+    stages: rows => boardEvents.stages(rows),
     onChange: () => board.publish(),
     log,
   })
   const workdeskDialog = createWorkdeskDialog({
     cfg,
     items: () => board.observation()?.items ?? null,
+    streamDriven,
     onChange: () => board.publish(),
   })
   const board = createBoardState({
@@ -652,6 +702,8 @@ export async function startServer({
     calendar: calendarLine,
     workdesk: workdesk.view,
     workdeskDialog: workdeskDialog.view,
+    observeSessions: (snapshot, items) => boardEvents.observe(snapshot, items, Date.now()),
+    observeFailure: () => boardEvents.health('herdr', false),
     // Threads (#379): while config.json turns them on, the revision and the count that waits on
     // the owner (two queries a refresh); off, nothing is read.
     threads: () => {
@@ -844,7 +896,8 @@ export async function startServer({
       // the CLI and agents send no Origin, and the presence switch itself says what it says.
       if (req.method !== 'GET' && path.startsWith('/api/') && path !== '/api/presence' && ownOrigin(req))
         presence.touch()
-      return await dispatch(routes, req, url, path, guards, () => peerOf(srv, req))
+      const selected = path === '/api/board-events' || path === '/api/board-events/ack' ? localEventRoutes : routes
+      return await dispatch(selected, req, url, path, guards, () => peerOf(srv, req))
     } catch (err) {
       // The path only: a query can carry the page's token.
       log(`${req.method} ${url ? url.pathname : req.url.split('?')[0]}: ${messageOf(err)}`)
@@ -898,6 +951,7 @@ export async function startServer({
   const scheduler = startScheduler({ deps, onChange: refresh })
   workdesk.configChanged()
   workdeskDialog.configChanged()
+  void configureWorkdeskStream()
   // Auto-compact (#378) beside it, for the same reason: one board types /compact.
   const compactor = startCompactor({ deps, onChange: refresh })
   // Shells a board before this one opened and that are gone by now are forgotten.
@@ -951,6 +1005,7 @@ export async function startServer({
       reminders.configChanged()
       workdesk.configChanged()
       workdeskDialog.configChanged()
+      await configureWorkdeskStream()
       team.refresh()
       holdLoopback6()
       await board.refresh()
@@ -961,7 +1016,10 @@ export async function startServer({
       for (const watcher of watchers) watcher.close()
       omarchy?.close()
       scheduler.stop()
-      await Promise.all([workdesk.stop(), workdeskDialog.stop()])
+      workdeskStreamConfig = ''
+      workdeskStream?.controller.abort()
+      await Promise.all([workdesk.stop(), workdeskDialog.stop(), workdeskStream?.task])
+      await boardEvents.stop()
       compactor.stop()
       backups.stop()
       wake.stop()
