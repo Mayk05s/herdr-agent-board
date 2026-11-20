@@ -196,7 +196,7 @@ export function threadByKey(db: BoardDb, key: string): ThreadHead | null {
 }
 
 /**
- * The thread a word names: its key, the first 8 characters of its id, or a bare number in `lane`
+ * The thread a word names: its key, the first 8 characters of its id (or the whole id), or a bare number in `lane`
  * (the session's own). Refused with the reason when none or several match.
  */
 export function findThread(db: BoardDb, word: string, lane: string | null, exact = false): ThreadHead {
