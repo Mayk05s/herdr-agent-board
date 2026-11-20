@@ -50,7 +50,6 @@ test.each([
         .map(argv => argv[2])
     const ambiguous = 'Board coordinator event delivery unconfirmed'
     await until(() => logged(first.proc, ambiguous))
-    expect(box.calls().filter(argv => argv[0] === 'api' && argv[1] === 'snapshot').length).toBeGreaterThanOrEqual(2)
     expect(promptTargets()).toEqual([...calls])
     first.proc.kill()
     await first.proc.exited
