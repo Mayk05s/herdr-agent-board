@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
 import type { BoardPayload } from '../../src/core/payload.ts'
-import { serveBoard } from '../support/board-server.ts'
+import { logged, serveBoard } from '../support/board-server.ts'
 import { sandbox, until } from '../support/sandbox.ts'
 import { mcp } from '../support/workdesk-fixture.ts'
 
@@ -11,7 +11,7 @@ test('server startup makes an immediate fallback when a configured stream cannot
   fake.write({ tasks: [] })
   const tokenFile = join(box.dir, 'test-token')
   await Bun.write(tokenFile, 'test-only-token')
-  const { url } = await serveBoard(box, {
+  const { url, proc } = await serveBoard(box, {
     threads: true,
     workdesk: {
       ...fake.config,
@@ -19,6 +19,7 @@ test('server startup makes an immediate fallback when a configured stream cannot
     },
   })
   await until(() => fake.calls('list_board_tasks').length === 1)
+  expect(logged(proc, 'Workdesk SSE unavailable; using fallback')).toBe(true)
   const cutoff = Date.now() + 2000
   let payload: BoardPayload
   do {
