@@ -23,6 +23,7 @@ type Options = {
   sink?: ProtectedDialogSink
   recipientReady?(): boolean
   recipientDelivering?(): boolean
+  streamDriven?(): boolean
 }
 
 const idle = (): DialogStatus => ({
@@ -43,13 +44,13 @@ function toolProblem(error: unknown, fallback: DialogProblem): DialogProblem {
   return fallback
 }
 
-export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientReady, recipientDelivering }: Options) {
+export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientReady, recipientDelivering, streamDriven }: Options) {
   let status: DialogStatus | null = null
   let config: WorkdeskDialogConfig | null = null
   let signature = ''
   let timer: ReturnType<typeof setTimeout> | undefined
   let current: AbortController | null = null
-  let inFlight: Promise<void> | null = null
+  let inFlight: Promise<DialogStatus> | null = null
   let stopped = false
 
   function publish(next: DialogStatus | null): void {
@@ -57,7 +58,7 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientRead
     onChange()
   }
 
-  async function poll(active: WorkdeskDialogConfig, signal: AbortSignal): Promise<void> {
+  async function poll(active: WorkdeskDialogConfig, signal: AbortSignal): Promise<DialogStatus> {
     const next: DialogStatus = { ...idle(), pending: status?.pending ?? null, polledAt: Date.now() }
     try {
       await withWorkdeskMcp(active, signal, async mcp => {
@@ -213,22 +214,30 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientRead
     } finally {
       if (!signal.aborted) publish(next)
     }
+    return next
+  }
+
+  function start(active: WorkdeskDialogConfig, parent?: AbortSignal) {
+    const controller = new AbortController()
+    current = controller
+    const signal = parent ? AbortSignal.any([controller.signal, parent]) : controller.signal
+    inFlight = poll(active, signal).finally(() => {
+      inFlight = null
+      current = null
+    })
+    return inFlight
   }
 
   function arm(delay: number): void {
     clearTimeout(timer)
-    if (!config || stopped || inFlight) return
+    if (!config || stopped || inFlight || streamDriven?.()) return
     timer = setTimeout(() => {
       if (!config || stopped) return
       const active = config
-      const controller = new AbortController()
-      current = controller
       const started = Date.now()
-      inFlight = poll(active, controller.signal).finally(() => {
-        inFlight = null
-        current = null
-        arm(controller.signal.aborted ? 0 : Math.max(0, active.intervalSec * 1000 - (Date.now() - started)))
-      })
+      void start(active).finally(() =>
+        arm(config !== active ? 0 : Math.max(0, active.intervalSec * 1000 - (Date.now() - started))),
+      )
     }, delay)
   }
 
@@ -241,6 +250,17 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientRead
         delivery: attached ? 'recipient_attached' : 'awaiting_recipient',
         ...(attached && { deliverEnabled: recipientDelivering?.() === true }),
       }
+    },
+    async reconcile(signal: AbortSignal, required = false): Promise<void> {
+      while (inFlight) await inFlight
+      signal.throwIfAborted()
+      if (!config || stopped) {
+        if (required) throw new Error('Workdesk dialog unavailable')
+        return
+      }
+      const status = await start(config, signal)
+      signal.throwIfAborted()
+      if (status.problem || status.more) throw new Error('Workdesk dialog reconciliation incomplete')
     },
     configChanged(): void {
       const next = JSON.stringify(cfg.workdeskDialog ? [cfg.workdeskDialog, cfg.workdesk] : null)

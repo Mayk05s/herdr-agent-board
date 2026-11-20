@@ -100,6 +100,8 @@ interface Options {
   threads?: () => ThreadsPayload | null
   workdesk?: () => WorkdeskPayload | null
   workdeskDialog?: () => DialogStatus | null
+  observeSessions?: NonNullable<Parameters<typeof collect>[1]>['observed']
+  observeFailure?: () => void
 }
 
 // The colors the category editor offers (aliases left out).
@@ -226,6 +228,8 @@ export function createBoardState({
   threads,
   workdesk,
   workdeskDialog,
+  observeSessions,
+  observeFailure,
 }: Options): BoardState {
   const { cfg, log } = deps
   let items: Item[] = []
@@ -429,7 +433,7 @@ export function createBoardState({
           log(`profile panes: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
-      items = await collect(deps, { helpers: true, links, seen })
+      items = await collect(deps, { helpers: true, links, seen, ...(observeSessions && { observed: observeSessions }) })
       logEdges()
       launches.observe(items)
       stale = false
@@ -439,6 +443,7 @@ export function createBoardState({
       await warnWrongModels()
     } catch (err) {
       stale = true
+      observeFailure?.()
       publish()
       log(`refresh: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
