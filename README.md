@@ -2193,26 +2193,32 @@ What the list says, one line per session that changed, in this order:
 4. waits on someone else (what it waits for);
 5. the rest only counted: "and 7 more moved: 5 working, 2 idle".
 
-Twenty session lines at most, then "and N more".
+Twenty session lines at most, then "and N more". A card no longer on the board waits on no one,
+so it is not listed as waiting. Asked for a time before the journal began recording (just turned
+on, or the board was not running), the list says so instead of reporting that nothing changed.
 
 When the list is shown:
 
 - on the page, after a return: a "While you were away, 23:56 to 08:10" strip under the toolbar,
   each row opening its card. Dismiss it and it stays dismissed (on every page and the phone) until
-  the next return; the toolbar's "Since 23:56" opens the list of that absence again, up to now.
+  the next return; the toolbar's "Since 23:56" closes it on that page or opens the list of that
+  absence again, up to now. A return when nothing changed shows no strip.
 - `board journal [--since <when> | --away] [--json]` prints it. `--away` (the default) lists since
   you last went away; `--since` takes a time of day (`23:56`, the last one), a time back (`3h`,
   `90m`) or a date and time (`2026-11-20 23:00`). `--json` gives
   `{ since, rows: [{ key, name, lane, kind, line, at }], more, rest: { work, idle }, before }`.
 - `GET /api/journal?since=<ms>` or `?away=1` gives `{ journal }` in the same shape, and the board's
   payload carries the strip as `journal: { strip, last }` for the page and the phone.
-  `POST /api/journal` with `x-board: 1` and `{ "op": "dismiss" }` dismisses the strip.
+  `POST /api/journal` with `x-board: 1` and `{ "op": "dismiss" }` dismisses the strip. Like
+  presence, both answer the remote page and a paired phone: the lines are the cards' own texts,
+  which the board's payload carries to them anyway.
 
 What counts as away and back:
 
 - With [presence](#presence) on, presence decides: away is its switch to away, back its switch
-  from away to anything else. Whether the page is on show says nothing then (a full-screen terminal
-  hides the browser all day long).
+  from away to here. A call taken while away is still away, and one taken while here is no
+  absence. Whether the page is on show says nothing then (a full-screen terminal hides the browser
+  all day long).
 - Without presence, the board's live streams decide: the page drops its stream while it is hidden,
   so no stream at all for `returnMinutes` and then one opening is a return. A client that keeps a
   stream open all day (a page left on show, say, on another screen or a phone) means no return is

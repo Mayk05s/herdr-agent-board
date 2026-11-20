@@ -1,11 +1,11 @@
 // `board journal [--since <when> | --away] [--json]` (#489): what changed on the board since the
 // owner left, a line per session (core/journal.ts journalLines), or all of it as JSON. Reads
-// journal.db itself (adapters/journal-store.ts), read only, so it works while the web board is
-// down; it never makes the file. Without a flag it is --away: since presence last went to away,
+// journal.db itself (adapters/journal-store.ts) and only reads it, so it works while the web board
+// is down; it never makes the file. Without a flag it is --away: since presence last went to away,
 // or, without presence, since the page last went off show.
 import { journalStore, openJournalDb } from '../adapters/journal-store.ts'
 import { currentPresence } from '../adapters/presence-store.ts'
-import { awaySince, type JournalList, journalConfig, journalLines, journalList } from '../core/journal.ts'
+import { awaySince, type JournalList, journalConfig, journalLines, journalList, withRecord } from '../core/journal.ts'
 import { t } from '../core/lang.ts'
 import { presenceConfig } from '../core/presence.ts'
 import type { Config } from '../core/types.ts'
@@ -13,6 +13,13 @@ import { parseDuration, parseWhen } from '../core/when.ts'
 
 /** `--since`: a time back (3h, 90m), a time of day (the last one, today or yesterday), or a date and time. */
 export function sinceOf(text: string, now: number): number | null {
+  // "in 2h" is ahead, not back
+  if (/^\s*(in\b|\+)/i.test(text)) return null
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text.trim())
+  if (day) {
+    const d = new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]))
+    return d.getMonth() === Number(day[2]) - 1 && d.getTime() <= now ? d.getTime() : null
+  }
   const back = parseDuration(text)
   if (back !== null) return now - back
   let at = parseWhen(text, now)
@@ -26,7 +33,7 @@ export function sinceOf(text: string, now: number): number | null {
 }
 
 interface Ctx {
-  cfg: Pick<Config, 'journal' | 'presence'>
+  cfg: Pick<Config, 'journal' | 'presence'> & { categories?: readonly { id: string; title?: string }[] }
   now?: number
   out?: (line: string) => void
   err?: (line: string) => void
@@ -42,10 +49,6 @@ export function journalCmd(args: readonly string[], ctx: Ctx): number {
     if (json) out(JSON.stringify({ ok: false, error: code, message }))
     else err(message)
     return 1
-  }
-  if (args.includes('--help')) {
-    out(t('journal.usage'))
-    return 0
   }
   const known = new Set(['--since', '--away', '--json'])
   const at = args.indexOf('--since')
@@ -67,11 +70,16 @@ export function journalCmd(args: readonly string[], ctx: Ctx): number {
       since = awaySince(presence, store?.away() ?? {})
       if (since === null) return fail('no_absence', 'journal.noAway')
     }
-    const list: JournalList = store
-      ? journalList(store.movesSince(since), store.states(), since)
-      : { since, rows: [], more: 0, rest: { work: 0, idle: 0 }, before: 0 }
+    const list: JournalList = withRecord(
+      store
+        ? journalList(store.movesSince(since), store.states(), since)
+        : { since, rows: [], more: 0, rest: { work: 0, idle: 0 }, before: 0 },
+      store ? (store.start() ?? undefined) : null,
+      now,
+    )
+    const lane = (id: string): string => ctx.cfg.categories?.find(c => c.id === id)?.title || id
     if (json) out(JSON.stringify({ ok: true, ...list }, null, 2))
-    else for (const line of journalLines(list, t, now)) out(line)
+    else for (const line of journalLines(list, t, now, lane)) out(line)
     return 0
   } finally {
     db?.close()

@@ -35,7 +35,16 @@
 .away-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .away-close:hover { background: var(--fill-2); color: var(--label-2); }
 
-.away-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+/* Twenty rows and their notes at most; past half the screen the list scrolls, the board stays in sight. */
+.away-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 50vh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
 .away-open {
   display: grid;
   grid-template-columns: max-content minmax(0, max-content) max-content minmax(0, 1fr) max-content;

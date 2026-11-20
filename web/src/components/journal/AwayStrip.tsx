@@ -30,6 +30,9 @@ export function AwayStrip({ journal }: { journal: JournalView }) {
           </svg>
         </button>
       </div>
+      {shown.list.recordedFrom !== undefined && (
+        <p className="away-note">{t('journal.recordedFrom', { when: clockText(shown.list.recordedFrom, now) })}</p>
+      )}
       {entries.length === 0 ? (
         <p className="away-note">{t('journal.nothing')}</p>
       ) : (

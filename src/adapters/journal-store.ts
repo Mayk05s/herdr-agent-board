@@ -9,7 +9,7 @@
 //   last_state  each card's state on record (`gone`: when it left the board), what a refresh is
 //               compared with, so a restart records only what really changed
 //   marks       left / back: when the owner last went away and came back; strip: the return the
-//               page shows ({ from, to, dismissed })
+//               page shows ({ from, to, dismissed }); start: when recording began
 import { join } from 'node:path'
 import type { AwayMarks, JournalKind, Move, StateRow } from '../core/journal.ts'
 import { type BoardDb, openDb } from './db.ts'
@@ -105,8 +105,8 @@ export function journalStore(db: BoardDb) {
         return moves + gone
       })
     },
-    /** Whether anything is on record: an empty journal seeds the first refresh. */
-    empty: (): boolean => !db.db.query('SELECT 1 FROM last_state LIMIT 1').get(),
+    /** When recording began (the first refresh that noted the cards), null before. */
+    start: (): number | null => num('start') ?? null,
     away: (): AwayMarks => {
       const left = num('left')
       const back = num('back')
@@ -121,7 +121,7 @@ export function journalStore(db: BoardDb) {
       }
     },
     /** Marks set together; a value already on record writes nothing. */
-    setMarks(values: { left?: number; back?: number; strip?: StripMark }): void {
+    setMarks(values: { left?: number; back?: number; start?: number; strip?: StripMark }): void {
       const want = Object.entries(values)
         .filter(([, v]) => v !== undefined)
         .map(([k, v]) => [k, typeof v === 'number' ? String(v) : JSON.stringify(v)] as const)

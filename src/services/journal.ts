@@ -19,9 +19,11 @@ import {
   type JournalConfig,
   type JournalList,
   journalConfig,
+  journalEntries,
   journalList,
   KEEP_MS,
   type StateRow,
+  withRecord,
 } from '../core/journal.ts'
 import type { JournalPayload } from '../core/payload.ts'
 import type { Presence } from '../core/presence.ts'
@@ -97,7 +99,11 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
     }
   }
 
-  /** Away or back, as presence or the live streams say; a return long enough sets the strip. */
+  /**
+   * Away or back, as presence or the live streams say; a return long enough sets the strip, unless
+   * nothing at all happened meanwhile. A call is the state it was taken from (away stays away), and
+   * `back` is never before `left`, so a clock set back cannot leave the owner away for good.
+   */
   function notice(c: JournalConfig, s: JournalStore, at: number): void {
     const marks = s.away()
     const away = marks.left !== undefined && (marks.back === undefined || marks.left > marks.back)
@@ -105,10 +111,12 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
     let left: number | undefined
     let back: number | undefined
     if (p) {
-      if (p.state === 'away') {
-        const since = p.since || at
-        if (!away || (marks.left ?? 0) < since) left = since
-      } else if (away) back = p.since > (marks.left ?? 0) ? p.since : at
+      const state = p.state === 'call' ? (p.before ?? 'here') : p.state
+      const since = p.since || at
+      if (state === 'away') {
+        // Already away: a call taken and ended meanwhile does not start the absence again.
+        if (!away) left = since
+      } else if (away) back = since > (marks.left ?? 0) ? since : at
     } else {
       const n = viewers()
       if (n === 0 && !away) left = at
@@ -117,14 +125,17 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
     if (left !== undefined) s.setMarks({ left })
     if (back === undefined || marks.left === undefined) return
     const from = marks.left
-    const long = back - from >= c.returnMinutes * 60_000
-    const next = long ? { from, to: back, dismissed: false } : undefined
+    back = Math.max(back, from + 1)
+    const list = back - from >= c.returnMinutes * 60_000 ? listOf(s, from, back) : null
+    const next = list && journalEntries(list).length ? { from, to: back, dismissed: false } : undefined
     s.setMarks({ back, ...(next && { strip: next }) })
     if (next) {
       strip = next
-      stripList = null
+      stripList = list
     }
   }
+  const listOf = (s: JournalStore, since: number, until?: number): JournalList =>
+    withRecord(journalList(s.movesSince(since), states, since, until), s.start() ?? undefined)
 
   return {
     observe(items) {
@@ -136,7 +147,9 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
       safe(undefined, () => {
         const s = open()
         const at = now()
-        const { moves, states: changed } = diffStates(states, items, at, states.size === 0)
+        const seed = states.size === 0
+        if (seed && s.start() === null) s.setMarks({ start: at })
+        const { moves, states: changed } = diffStates(states, items, at, seed)
         if (moves.length || changed.size) {
           s.record(moves, changed)
           for (const [key, state] of changed) states.set(key, state)
@@ -154,15 +167,14 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
       const { from, to, dismissed } = strip
       if (!dismissed && !stripList) {
         const s = store
-        stripList = safe(null, () => journalList(s.movesSince(from), states, from, to))
+        stripList = safe(null, () => listOf(s, from, to))
       }
       return { strip: !dismissed && stripList ? { ...stripList, from, to } : null, last: { from, to } }
     },
     list(since, until) {
       if (!journalConfig(cfg.journal)) return null
       return safe(null, () => {
-        const s = open()
-        return journalList(s.movesSince(since), states, since, until)
+        return listOf(open(), since, until)
       })
     },
     awaySince() {

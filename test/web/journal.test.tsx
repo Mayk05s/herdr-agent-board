@@ -173,5 +173,15 @@ test('dismiss hides the strip once per return and posts it; a row opens its card
   // the next return shows again
   await show({ strip: { ...list, from: at(9, 0), to: at(10, 0) }, last: { from: at(9, 0), to: at(10, 0) } })
   expect(strip()?.querySelector('.away-title')?.textContent).toBe('While you were away, 09:00 to 10:00')
+  // the pill, pressed while the return's strip is on show, closes it here without dismissing it
+  gets = []
+  await act(async () => click('#since'))
+  expect(strip()).toBeNull()
+  expect(posts).toHaveLength(1)
+  expect(gets).toEqual([])
+  // pressed again: the list since that return began
+  await act(async () => click('#since'))
+  expect(gets).toEqual([`/api/journal?since=${at(9, 0)}`])
+  expect(strip()?.querySelector('.away-title')?.textContent).toBe('Since 09:00')
   await act(async () => root.unmount())
 })

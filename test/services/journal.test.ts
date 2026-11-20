@@ -116,16 +116,22 @@ test('a restart loses nothing and invents nothing', () => {
   second.clock.at += 2000
   second.j.observe([item('anna', { column: 'done', result: 'shipped' }), item('cleo', { column: 'ext', wait: 'CI' })])
   expect(movesIn()).toEqual([{ key: 'anna', kind: 'done' }])
-  // what changed while the board was down is recorded once, at the first refresh
-  second.clock.at += 2000
-  second.j.observe([item('anna', { column: 'me', question: 'next?' }), item('cleo', { column: 'ext', wait: 'CI' })])
-  second.j.observe([item('anna', { column: 'me', question: 'next?' }), item('cleo', { column: 'ext', wait: 'CI' })])
+  second.j.stop()
+
+  // what changed while the board was down is recorded once, at the first refresh after it
+  const third = journalOf({ at: second.clock.at + 60_000 })
+  third.j.observe([item('anna', { column: 'me', question: 'next?' }), item('cleo', { column: 'ext', wait: 'CI' })])
+  third.clock.at += 2000
+  third.j.observe([item('anna', { column: 'me', question: 'next?' }), item('cleo', { column: 'ext', wait: 'CI' })])
   expect(movesIn()).toEqual([
     { key: 'anna', kind: 'done' },
     { key: 'anna', kind: 'owner' },
   ])
-  const list = second.j.list(first.clock.at - 10_000)
+  const list = third.j.list(first.clock.at - 5000)
   expect(list?.rows.map(r => [r.key, r.kind, r.line])).toEqual([['anna', 'owner', 'next?']])
+  // asked from before recording began: the list says when it did
+  expect(third.j.list(first.clock.at - 3600_000)?.recordedFrom).toBe(first.clock.at - 5000)
+  expect(list?.recordedFrom).toBeUndefined()
 })
 
 test('moves and the states of cards gone for 30 days are pruned', () => {
@@ -267,4 +273,119 @@ test('turned off at runtime: the file is closed, the strip leaves the payload', 
   j.observe([item('anna', { column: 'work' })])
   // the change seen while off is no invented move: it is one real move, at the first refresh back
   expect(movesIn()).toEqual([{ key: 'anna', kind: 'work' }])
+})
+
+test('presence: a call while away is still away; the absence ends at the switch to here', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock, env } = journalOf({ at: t0, presence: { state: 'here', since: 1, by: 'auto' } })
+  j.observe([item('anna', { column: 'work' })])
+  env.presence = { state: 'away', since: t0 + MIN, by: 'auto' }
+  clock.at = t0 + 2 * MIN
+  j.observe([item('anna', { column: 'work' })])
+  env.presence = { state: 'call', since: t0 + 30 * MIN, by: 'auto', before: 'away' }
+  clock.at = t0 + 31 * MIN
+  j.observe([item('anna', { column: 'done', result: 'shipped' })])
+  expect(j.view()?.strip).toBeNull()
+  env.presence = { state: 'away', since: t0 + 60 * MIN, by: 'auto' }
+  clock.at = t0 + 61 * MIN
+  j.observe([item('anna', { column: 'done', result: 'shipped' })])
+  expect(j.awaySince()).toBe(t0 + MIN)
+  env.presence = { state: 'here', since: t0 + 90 * MIN, by: 'user' }
+  clock.at = t0 + 90 * MIN + 500
+  j.observe([item('anna', { column: 'done', result: 'shipped' })])
+  expect(j.view()?.last).toEqual({ from: t0 + MIN, to: t0 + 90 * MIN })
+  expect(j.view()?.strip?.rows.map(r => [r.key, r.kind])).toEqual([['anna', 'done']])
+})
+
+test('presence: a call from here is no absence', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock, env } = journalOf({ at: t0, presence: { state: 'here', since: 1, by: 'auto' } })
+  j.observe([item('anna', { column: 'work' })])
+  env.presence = { state: 'call', since: t0 + MIN, by: 'auto', before: 'here' }
+  clock.at = t0 + 60 * MIN
+  j.observe([item('anna', { column: 'done', result: 'ok' })])
+  env.presence = { state: 'here', since: t0 + 61 * MIN, by: 'auto' }
+  clock.at = t0 + 62 * MIN
+  j.observe([item('anna', { column: 'done', result: 'ok' })])
+  expect(j.view()).toEqual({ strip: null, last: null })
+  expect(j.awaySince()).toBeNull()
+})
+
+test('a board started while the owner is away: the absence counts from presence, the return shows it', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock, env } = journalOf({ at: t0, presence: { state: 'away', since: t0 - 3600_000, by: 'auto' } })
+  j.observe([item('anna', { column: 'work' })])
+  expect(j.awaySince()).toBe(t0 - 3600_000)
+  clock.at = t0 + 10 * MIN
+  j.observe([item('anna', { column: 'me', question: 'push?' })])
+  env.presence = { state: 'here', since: t0 + 20 * MIN, by: 'auto' }
+  clock.at = t0 + 20 * MIN
+  j.observe([item('anna', { column: 'me', question: 'push?' })])
+  const strip = j.view()?.strip
+  expect(strip?.rows.map(r => [r.key, r.kind])).toEqual([['anna', 'owner']])
+  // the board was not recording for the first hour of it: the strip says so
+  expect(strip?.recordedFrom).toBe(t0)
+})
+
+test('away again after a short return: the new absence counts from its own start', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock, env } = journalOf({ at: t0, presence: { state: 'here', since: 1, by: 'auto' } })
+  j.observe([item('anna')])
+  env.presence = { state: 'away', since: t0 + MIN, by: 'auto' }
+  clock.at = t0 + MIN
+  j.observe([item('anna')])
+  env.presence = { state: 'here', since: t0 + 3 * MIN, by: 'auto' }
+  clock.at = t0 + 3 * MIN
+  j.observe([item('anna')])
+  env.presence = { state: 'away', since: t0 + 5 * MIN, by: 'auto' }
+  clock.at = t0 + 5 * MIN
+  j.observe([item('anna')])
+  expect(j.awaySince()).toBe(t0 + 5 * MIN)
+})
+
+test('a return with nothing changed shows no strip', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock, env } = journalOf({ at: t0, viewers: 1 })
+  j.observe([item('anna', { column: 'work' })])
+  env.viewers = 0
+  clock.at = t0 + MIN
+  j.observe([item('anna', { column: 'work' })])
+  env.viewers = 1
+  clock.at = t0 + 60 * MIN
+  j.observe([item('anna', { column: 'work' })])
+  expect(j.view()).toEqual({ strip: null, last: null })
+  expect(j.awaySince()).toBe(t0 + MIN)
+})
+
+test('a clock set back does not keep the owner away or write on every refresh', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock, env } = journalOf({ at: t0, viewers: 1 })
+  j.observe([item('anna')])
+  env.viewers = 0
+  clock.at = t0 + 10 * MIN
+  j.observe([item('anna')])
+  // the clock goes back an hour, and the page comes back
+  env.viewers = 1
+  clock.at = t0 - 50 * MIN
+  j.observe([item('anna')])
+  const marks = () => {
+    const db = openJournalDb(false)
+    if (!db) throw new Error('no journal.db')
+    try {
+      return journalStore(db).away()
+    } finally {
+      db.close()
+    }
+  }
+  const first = marks()
+  expect((first.back ?? 0) > (first.left ?? 0)).toBe(true)
+  clock.at += 2000
+  j.observe([item('anna')])
+  expect(marks()).toEqual(first)
 })

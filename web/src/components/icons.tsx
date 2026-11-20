@@ -57,7 +57,6 @@ export const TeamIcon = () => (
   </Icon>
 )
 
-/** Threads (#392): a list whose lines carry a status dot. */
 /** A clock with its hand turned back: what changed since the owner left (#489). */
 export const JournalIcon = () => (
   <Icon>
@@ -67,6 +66,7 @@ export const JournalIcon = () => (
   </Icon>
 )
 
+/** Threads (#392): a list whose lines carry a status dot. */
 export const ThreadsIcon = () => (
   <Icon>
     <circle cx="5" cy="6" r="1.4" />

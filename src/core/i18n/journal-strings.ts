@@ -6,6 +6,7 @@ export const JOURNAL_STRINGS: Record<Lang, Record<string, string | string[]>> = 
   en: {
     'journal.since': 'Since {when}:',
     'journal.nothing': 'Nothing on the board changed.',
+    'journal.recordedFrom': 'The journal has no record before {when}: it was not recording then.',
     'journal.kind.owner': 'waits on you',
     'journal.kind.error': 'stopped on an error',
     'journal.kind.done': 'finished',
@@ -33,6 +34,7 @@ export const JOURNAL_STRINGS: Record<Lang, Record<string, string | string[]>> = 
   ru: {
     'journal.since': 'С {when}:',
     'journal.nothing': 'На доске ничего не менялось.',
+    'journal.recordedFrom': 'До {when} журнал ничего не записывал: о более раннем он не знает.',
     'journal.kind.owner': 'ждёт вас',
     'journal.kind.error': 'встала на ошибке',
     'journal.kind.done': 'закончила',

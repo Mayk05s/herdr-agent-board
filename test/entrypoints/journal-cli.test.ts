@@ -51,6 +51,11 @@ test('sinceOf: a time back, the last such time of day, a date and time', () => {
   expect(sinceOf('2026-11-20 18:00', NOW)).toBe(new Date(2026, 10, 20, 18, 0).getTime())
   expect(sinceOf('2026-12-01 18:00', NOW)).toBeNull()
   expect(sinceOf('soon', NOW)).toBeNull()
+  // ahead is no time back; a date alone is its midnight
+  expect(sinceOf('in 2h', NOW)).toBeNull()
+  expect(sinceOf('+2h', NOW)).toBeNull()
+  expect(sinceOf('2026-11-20', NOW)).toBe(new Date(2026, 10, 20).getTime())
+  expect(sinceOf('2026-11-22', NOW)).toBeNull()
 })
 
 test('off without the key, and no file is made', () => {
@@ -64,7 +69,11 @@ test('off without the key, and no file is made', () => {
 
 test('on with no file yet: --since lists nothing, --away has no absence, still no file', () => {
   isolatedHome()
-  expect(run(['--since', '3h']).out).toEqual(['Since 05:10:', 'Nothing on the board changed.'])
+  expect(run(['--since', '3h']).out).toEqual([
+    'Since 05:10:',
+    'The journal has no record before 08:10: it was not recording then.',
+    'Nothing on the board changed.',
+  ])
   const away = run([])
   expect(away.code).toBe(1)
   expect(away.err[0]).toStartWith('No absence on record yet')
@@ -87,14 +96,14 @@ test('--since: the list in order, the old waits counted, the rest folded', () =>
     st(moves[4] as Move),
     ['dora', { ...move('dora', 'owner', NOW - 30 * H, 'which client?'), gone: null }],
   ])
-  const r = run(['--since', '23:56'])
+  const r = run(['--since', '23:56'], { journal: true, categories: [{ id: 'personal', title: 'Personal' }] })
   expect(r.code).toBe(0)
   expect(r.out).toEqual([
     'Since 20.11 23:56:',
-    'waits on you · anna (personal) 06:10: May I push to main?',
+    'waits on you · anna (Personal) 06:10: May I push to main?',
     'and 1 more was waiting on you before',
-    'stopped on an error · ben (personal) 07:10: API Error: 529 overloaded',
-    'finished · cleo (personal) 03:10: PR opened',
+    'stopped on an error · ben (Personal) 07:10: API Error: 529 overloaded',
+    'finished · cleo (Personal) 03:10: PR opened',
     'and 1 more moved: 1 working, 0 idle',
   ])
   const json = JSON.parse(run(['--since', '23:56', '--json']).out.join('\n'))

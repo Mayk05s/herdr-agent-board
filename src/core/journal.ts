@@ -54,8 +54,10 @@ export interface Move extends CardState {
   key: string
 }
 
+// Control characters (an agent's text may carry escapes) become spaces, then runs of space one.
 const clean = (s: unknown): string =>
   String(s ?? '')
+    .replace(/\p{Cc}/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
 const clipLine = (s: unknown): string => {
@@ -64,7 +66,7 @@ const clipLine = (s: unknown): string => {
 }
 
 /** Claude Code's own words for a turn that ended on an API error. */
-const API_ERROR = /^API Error\b/i
+const API_ERROR = /^API Error(?::|\s\()/
 
 /** The journal's kind of a card. */
 export function kindOf(item: Pick<Item, 'column' | 'lastText'>): JournalKind {
@@ -152,7 +154,16 @@ export interface JournalList {
   rest: { work: number; idle: number }
   /** Cards that waited on the owner before `since` and still do: no move, no row, counted. */
   before: number
+  /** When the journal began recording, when that is after `since`: nothing before it is known. */
+  recordedFrom?: number
 }
+
+/**
+ * The list with when recording began, when the list asks for earlier. `start` null: nothing
+ * recorded yet (no file), so nothing before `now` is known; undefined: not on record, nothing said.
+ */
+export const withRecord = (list: JournalList, start: number | null | undefined, now = Date.now()): JournalList =>
+  start === undefined ? list : start === null || start > list.since ? { ...list, recordedFrom: start ?? now } : list
 
 /**
  * The list since `since`: one row per session that moved, under its state now when that waits on
@@ -183,7 +194,9 @@ export function journalList(
     const state = states.get(key)
     // The state now, unless the window ends before it was reached.
     const now = state && state.at <= until && state.kind === last.kind ? state : last
-    if (now.kind === 'owner' || now.kind === 'ext') {
+    // A card that left the board by the window's end waits on no one any more.
+    const gone = state?.gone != null && state.gone <= until
+    if ((now.kind === 'owner' || now.kind === 'ext') && !gone) {
       rows.push({ key, name: now.name, lane: now.lane, kind: now.kind, line: now.line, at: now.at })
       continue
     }
@@ -198,7 +211,7 @@ export function journalList(
         line: current.line,
         at: end.at,
       })
-    } else rest[now.kind === 'work' ? 'work' : 'idle']++
+    } else if (!gone) rest[now.kind === 'work' ? 'work' : 'idle']++
   }
   rows.sort((a, b) => ROW_ORDER.indexOf(a.kind) - ROW_ORDER.indexOf(b.kind) || a.at - b.at)
   let before = 0
@@ -214,10 +227,15 @@ export interface AwayMarks {
 
 /**
  * Since when `board journal --away` lists: with presence on, the moment it went to away (now, or
- * the last time); without, the last time the page went off show. Null: no absence on record.
+ * the last time; a call inside the absence is part of it); without, the last time the page went
+ * off show. Null: no absence on record.
  */
 export function awaySince(presence: Presence | null, marks: AwayMarks): number | null {
-  if (presence?.state === 'away' && presence.since) return presence.since
+  const state = presence?.state === 'call' ? presence.before : presence?.state
+  const markedAway = marks.left !== undefined && (marks.back === undefined || marks.left > marks.back)
+  // Away now: since the absence began, which a call taken and ended in it does not move.
+  if (presence && state === 'away' && presence.since)
+    return markedAway && marks.left !== undefined && marks.left <= presence.since ? marks.left : presence.since
   return marks.left ?? null
 }
 
@@ -265,16 +283,26 @@ export const noteText = (e: Exclude<JournalEntry, { row: JournalRow }>, t: Trans
   e.note === 'rest' ? t('journal.rest', { n: e.n, work: e.work, idle: e.idle }) : t(`journal.${e.note}`, { n: e.n })
 
 /** The list as `board journal` prints it, a line each. */
-export function journalLines(list: JournalList, t: Translator, now = Date.now()): string[] {
-  const head = t('journal.since', { when: clockText(list.since, now) })
+export function journalLines(
+  list: JournalList,
+  t: Translator,
+  now = Date.now(),
+  laneTitle: (id: string) => string = id => id,
+): string[] {
+  const head = [
+    t('journal.since', { when: clockText(list.since, now) }),
+    ...(list.recordedFrom !== undefined
+      ? [t('journal.recordedFrom', { when: clockText(list.recordedFrom, now) })]
+      : []),
+  ]
   const entries = journalEntries(list)
-  if (!entries.length) return [head, t('journal.nothing')]
+  if (!entries.length) return [...head, t('journal.nothing')]
   return [
-    head,
+    ...head,
     ...entries.map(e => {
       if (!('row' in e)) return noteText(e, t)
       const { row } = e
-      const lane = row.lane ? ` (${row.lane})` : ''
+      const lane = row.lane ? ` (${laneTitle(row.lane)})` : ''
       const line = row.line ? `: ${row.line}` : ''
       return `${t(`journal.kind.${row.kind}`)} · ${row.name}${lane} ${clockText(row.at, now)}${line}`
     }),

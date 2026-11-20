@@ -9,6 +9,7 @@ import {
   kindOf,
   type Move,
   type StateRow,
+  withRecord,
 } from '../../src/core/journal.ts'
 import type { Item } from '../../src/core/types.ts'
 
@@ -66,6 +67,19 @@ describe('kindOf', () => {
     // still working after an error: working
     expect(kindOf(item('a', { column: 'work', lastText: 'API Error: 500' }))).toBe('work')
     expect(kindOf(item('a', { column: 'done', lastText: 'Fixed the API Error handling' }))).toBe('done')
+    expect(kindOf(item('a', { column: 'done', lastText: 'API error handling is now retried' }))).toBe('done')
+    expect(kindOf(item('a', { column: 'done', lastText: 'API Error (request timed out)' }))).toBe('error')
+  })
+})
+
+describe('lines', () => {
+  test("an agent's control characters never reach the line", () => {
+    const r = diffStates(
+      new Map([['x', state('idle', 1)]]),
+      [item('anna', { column: 'me', question: 'ok?\u001b[2J\u0007 go' })],
+      5,
+    )
+    expect(r.moves[0]?.line).toBe('ok? [2J go')
   })
 })
 
@@ -202,6 +216,34 @@ describe('journalList', () => {
     expect(list.before).toBe(2)
   })
 
+  test('a card that left the board waits on no one: no row, no count', () => {
+    const list = journalList(
+      [
+        move('a', 'owner', 1100, 'push?'),
+        move('b', 'ext', 1200, 'CI'),
+        move('c', 'work', 1300),
+        move('d', 'done', 1400, 'ok'),
+      ],
+      states({
+        a: state('owner', 1100, 'push?', 1500),
+        b: state('ext', 1200, 'CI', 1600),
+        c: state('work', 1300, '', 1700),
+        d: state('done', 1400, 'ok', 1800),
+      }),
+      since,
+    )
+    expect(list.rows.map(r => [r.key, r.kind])).toEqual([['d', 'done']])
+    expect(list.rest).toEqual({ work: 0, idle: 0 })
+    // gone only after the window's end: still listed for that window
+    const window = journalList(
+      [move('a', 'owner', 1100, 'push?')],
+      states({ a: state('owner', 1100, 'push?', 3000) }),
+      since,
+      2000,
+    )
+    expect(window.rows.map(r => r.key)).toEqual(['a'])
+  })
+
   test('twenty rows at most, then how many more', () => {
     const moves = Array.from({ length: 25 }, (_, i) => move(`s${i}`, 'done', 1100 + i, 'ok'))
     const list = journalList(moves, new Map(), since)
@@ -214,6 +256,17 @@ describe('journalList', () => {
     const moves = [move('a', 'done', 900, 'old'), move('b', 'done', 1100, 'in'), move('c', 'done', 2100, 'after')]
     const list = journalList(moves, new Map(), since, 2000)
     expect(list.rows.map(r => r.key)).toEqual(['b'])
+  })
+})
+
+describe('withRecord', () => {
+  const list = { since: 100, rows: [], more: 0, rest: { work: 0, idle: 0 }, before: 0 }
+  test('the start of recording only when the list asks for earlier', () => {
+    expect(withRecord(list, 50)).toBe(list)
+    expect(withRecord(list, 100)).toBe(list)
+    expect(withRecord(list, 200).recordedFrom).toBe(200)
+    expect(withRecord(list, null, 300).recordedFrom).toBe(300)
+    expect(withRecord(list, undefined)).toBe(list)
   })
 })
 
@@ -253,6 +306,17 @@ describe('journalLines', () => {
     expect(lines.slice(1)).toEqual(['and 1 more was waiting on you before', 'finished · ben (personal) 00:00: PR'])
   })
 
+  test('lane titles, and a window before recording began says so', () => {
+    const lines = journalLines({ ...base, rows: [row('ben', 'done', 'PR')], recordedFrom: 0 }, t, 0, id =>
+      id === 'personal' ? 'Personal' : id,
+    )
+    expect(lines).toEqual([
+      'Since 00:00:',
+      'The journal has no record before 00:00: it was not recording then.',
+      'finished · ben (Personal) 00:00: PR',
+    ])
+  })
+
   test('nothing moved', () => {
     expect(journalLines({ ...base, rows: [] }, t, 0)).toEqual(['Since 00:00:', 'Nothing on the board changed.'])
   })
@@ -260,9 +324,14 @@ describe('journalLines', () => {
 
 describe('awaySince', () => {
   test('presence away now, else the last time the owner left', () => {
-    expect(awaySince({ state: 'away', since: 500, by: 'user' }, { left: 100 })).toBe(500)
+    expect(awaySince({ state: 'away', since: 500, by: 'user' }, {})).toBe(500)
     expect(awaySince({ state: 'here', since: 900, by: 'auto' }, { left: 100, back: 900 })).toBe(100)
     expect(awaySince(null, { left: 300 })).toBe(300)
     expect(awaySince(null, {})).toBeNull()
+    // a call taken and ended inside the absence does not move its start
+    expect(awaySince({ state: 'away', since: 900, by: 'auto' }, { left: 100 })).toBe(100)
+    expect(awaySince({ state: 'call', since: 700, by: 'auto', before: 'away' }, { left: 100 })).toBe(100)
+    // the marks of an earlier absence that ended: since presence went away again
+    expect(awaySince({ state: 'away', since: 900, by: 'auto' }, { left: 100, back: 200 })).toBe(900)
   })
 })

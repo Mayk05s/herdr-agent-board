@@ -13,7 +13,7 @@ export interface JournalView {
   shown: { title: string; list: JournalList } | null
   /** The toolbar button's words, null while there is no return to open again. */
   button: string | null
-  /** The toolbar's button: the last return's list since it began, or closed again. */
+  /** The toolbar's button: closes the strip on show, else opens the last return's list since it began. */
   toggle(): void
   close(): void
   /** A row: its card's sheet, while the card is on the board. */
@@ -43,13 +43,15 @@ export function useJournal(): JournalView {
 
   const toggle = useCallback(() => {
     if (again) return setAgain(null)
+    // The return's own strip on show: the pill closes it on this page (the X dismisses it everywhere).
+    if (strip && dismissed !== strip.to) return setDismissed(strip.to)
     if (!last) return
     const from = last.from
     api
       .get(`/api/journal?since=${from}`, isAnswer, { cache: 'no-store' })
       .then(r => setAgain({ from, list: r.journal }))
       .catch(() => toast(t('journal.failed'), true))
-  }, [again, last, toast, t])
+  }, [again, strip, dismissed, last, toast, t])
 
   const onBoard = useCallback((key: string) => !!items?.some(i => i.key === key), [items])
   const open = useCallback(
