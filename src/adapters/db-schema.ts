@@ -254,6 +254,28 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX workdesk_dialog_wake_pending ON workdesk_dialog_wakes (task_id) WHERE released = 0;
     `,
   },
+  {
+    version: 9,
+    store: 'workdesk-dialog',
+    sql: `
+      CREATE TABLE workdesk_unified_outbox (
+        entry_id TEXT PRIMARY KEY,
+        task_id INTEGER NOT NULL,
+        assignment_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending',
+        payload TEXT,
+        message_id INTEGER
+      ) STRICT;
+      CREATE TABLE workdesk_unified_status (
+        assignment_id TEXT PRIMARY KEY,
+        event_id INTEGER NOT NULL,
+        revision INTEGER NOT NULL,
+        state TEXT NOT NULL
+      ) STRICT;
+    `,
+  },
 ]
 
 /** The version the code makes a file: the last step's. */

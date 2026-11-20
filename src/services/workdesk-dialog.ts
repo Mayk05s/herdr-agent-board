@@ -44,7 +44,15 @@ function toolProblem(error: unknown, fallback: DialogProblem): DialogProblem {
   return fallback
 }
 
-export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientReady, recipientDelivering, streamDriven }: Options) {
+export function createWorkdeskDialog({
+  cfg,
+  items,
+  onChange,
+  sink,
+  recipientReady,
+  recipientDelivering,
+  streamDriven,
+}: Options) {
   let status: DialogStatus | null = null
   let config: WorkdeskDialogConfig | null = null
   let signature = ''

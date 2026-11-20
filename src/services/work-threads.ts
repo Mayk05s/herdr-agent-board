@@ -21,6 +21,7 @@
 import { randomUUID } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { readConfigFile } from '../adapters/config-file.ts'
 import { type BoardDb, dbFile, openDb, type Tx } from '../adapters/db.ts'
 import { stateDir } from '../adapters/paths.ts'
 import { addEntry, listEntries, type NewEntry, updateEntry } from '../adapters/schedule-store.ts'
@@ -85,6 +86,7 @@ import {
   type Watch,
   type WatchWhat,
 } from '../core/work-threads.ts'
+import { enqueueWorkdeskEntry } from './workdesk-unified.ts'
 
 // ------------------------------------------------------------------ the schedule an event goes into
 
@@ -230,6 +232,7 @@ export function newThread(
 }
 
 export interface PostInput {
+  workdesk?: boolean
   /** `answer` is the owner's, to a question (answerAsk); `system` the board's own (sharing, #394). */
   type?: 'note' | 'ask' | 'answer' | 'system'
   text?: string
@@ -348,6 +351,7 @@ export function postEntry(ctx: ThreadsCtx, head: ThreadHead, input: PostInput): 
         ...(out && { out }),
       }
       const r = appendEntry(tx, head.id, entryInput, me)
+      if (input.workdesk) enqueueWorkdeskEntry(tx, readConfigFile(), head, r.entry)
       const heads = [r.head]
       // A new assignee hears the owner's answers to its questions.
       const theirs = set.assignee && sessionWatch(set.assignee, head.id, 'answers')
@@ -379,10 +383,10 @@ export function postEntry(ctx: ThreadsCtx, head: ThreadHead, input: PostInput): 
 }
 
 /** `board thread ask`: a question for the owner; the thread waits on the owner with it. */
-export function askOwner(ctx: ThreadsCtx, head: ThreadHead, question: string): Written {
+export function askOwner(ctx: ThreadsCtx, head: ThreadHead, question: string, workdesk = false): Written {
   const q = cleanText(question, TEXT_MAX + 1)
   if (!q) throw new ThreadError('empty', 'usage: board thread ask <key> "<question for the owner>"')
-  return postEntry(ctx, head, { type: 'ask', text: q, status: 'owner', waitingOn: oneLine(q, WAITING_MAX) })
+  return postEntry(ctx, head, { type: 'ask', text: q, status: 'owner', waitingOn: oneLine(q, WAITING_MAX), workdesk })
 }
 
 /** `board thread set`: the head's own fields, as an entry with no text. */

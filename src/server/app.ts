@@ -1,3 +1,4 @@
+import { applyWorkdeskThreadEvent, startWorkdeskUnified } from '../services/workdesk-unified.ts'
 // The web board: a small HTTP server (Bun.serve) on 127.0.0.1 that serves web/, the board's data
 // and live updates (Server-Sent Events), and takes the same actions as the terminal board.
 // Runs inside the terminal board's process (entrypoints/tui.ts); `bun src/entrypoints/server.ts` runs it alone.
@@ -661,6 +662,10 @@ export async function startServer({
         offline = !ok
       },
       ...workdeskEventHandlers(workdesk, workdeskDialog, watch.onlyTaskId),
+      async apply(event, signal) {
+        await workdeskEventHandlers(workdesk, workdeskDialog, watch.onlyTaskId).apply(event, signal)
+        applyWorkdeskThreadEvent(cfg, event)
+      },
     }).catch(() => {
       if (!controller.signal.aborted) log('Workdesk SSE consumer stopped')
     })
@@ -960,6 +965,7 @@ export async function startServer({
   const scheduler = startScheduler({ deps, onChange: refresh, dialogRecipient: dialogLauncher.sink.permits })
   workdesk.configChanged()
   workdeskDialog.configChanged()
+  const stopWorkdeskUnified = startWorkdeskUnified(cfg)
   void configureWorkdeskStream()
   // Auto-compact (#378) beside it, for the same reason: one board types /compact.
   const compactor = startCompactor({ deps, onChange: refresh })
@@ -1029,7 +1035,7 @@ export async function startServer({
       dialogLauncher.close()
       workdeskStreamConfig = ''
       workdeskStream?.controller.abort()
-      await Promise.all([workdesk.stop(), workdeskDialog.stop(), workdeskStream?.task])
+      await Promise.all([workdesk.stop(), workdeskDialog.stop(), workdeskStream?.task, stopWorkdeskUnified()])
       await boardEvents.stop()
       compactor.stop()
       backups.stop()
