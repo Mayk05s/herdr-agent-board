@@ -22,6 +22,7 @@ type Options = {
   onChange(): void
   sink?: ProtectedDialogSink
   recipientReady?(): boolean
+  recipientDelivering?(): boolean
 }
 
 const idle = (): DialogStatus => ({
@@ -42,7 +43,7 @@ function toolProblem(error: unknown, fallback: DialogProblem): DialogProblem {
   return fallback
 }
 
-export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientReady }: Options) {
+export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientReady, recipientDelivering }: Options) {
   let status: DialogStatus | null = null
   let config: WorkdeskDialogConfig | null = null
   let signature = ''
@@ -232,8 +233,15 @@ export function createWorkdeskDialog({ cfg, items, onChange, sink, recipientRead
   }
 
   return {
-    view: (): DialogStatus | null =>
-      status && { ...status, delivery: recipientReady?.() ? 'recipient_attached' : 'awaiting_recipient' },
+    view: (): DialogStatus | null => {
+      if (!status) return null
+      const attached = recipientReady?.() === true
+      return {
+        ...status,
+        delivery: attached ? 'recipient_attached' : 'awaiting_recipient',
+        ...(attached && { deliverEnabled: recipientDelivering?.() === true }),
+      }
+    },
     configChanged(): void {
       const next = JSON.stringify(cfg.workdeskDialog ? [cfg.workdeskDialog, cfg.workdesk] : null)
       if (signature === next) return

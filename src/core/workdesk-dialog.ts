@@ -51,14 +51,15 @@ export function workdeskDialogConfig(raw: unknown, source: unknown): WorkdeskDia
   const dialog = object(raw)
   const watch = workdeskConfig(source)
   if (!dialog || !watch) return null
-  const { intervalSec = 60, legacyBindings: entries = [], onlyTaskId = watch.onlyTaskId, receiver } = dialog
+  const { intervalSec = 60, legacyBindings: entries = [], onlyTaskId = watch.onlyTaskId, receiver, deliver } = dialog
   const mcp = workdeskMcpConfig({ ...watch, intervalSec })
   if (
     !mcp ||
     !Array.isArray(entries) ||
     (onlyTaskId !== undefined && !validTaskId(onlyTaskId)) ||
     (watch.onlyTaskId !== undefined && onlyTaskId !== watch.onlyTaskId) ||
-    (receiver !== undefined && (receiver !== 'launcher' || !validTaskId(onlyTaskId)))
+    (receiver !== undefined && (receiver !== 'launcher' || !validTaskId(onlyTaskId))) ||
+    (deliver !== undefined && (receiver !== 'launcher' || typeof deliver !== 'boolean'))
   )
     return null
   const legacyBindings = new Map<number, LegacyDialogBinding>()
@@ -122,6 +123,7 @@ export type DialogProblem =
 
 export type DialogStatus = {
   delivery: 'awaiting_recipient' | 'recipient_attached'
+  deliverEnabled?: boolean
   pending: number | null
   more: boolean | null
   polledAt: number | null

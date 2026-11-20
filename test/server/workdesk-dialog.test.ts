@@ -213,6 +213,7 @@ test('the normal server accepts a pinned recipient only on its launcher IPC and 
       intervalSec: 1,
       onlyTaskId: 7,
       receiver: 'launcher',
+      deliver: true,
       legacyBindings: [{ taskId: 7, assignmentId: assignment, threadId, sessionId: sid }],
     },
   })
@@ -228,9 +229,23 @@ test('the normal server accepts a pinned recipient only on its launcher IPC and 
     throw new Error('private reply unavailable')
   }
   const sealingKey = randomBytes(32).toString('base64url')
-  expect(await ipc(701, { op: 'attach', sealingKey, session: { thread: { id: other } } })).toBe(false)
+  const attach = (id: string, readOnly: boolean) => ({
+    op: 'attach',
+    sealingKey,
+    readOnly,
+    session: { thread: { id } },
+  })
+  const board = async () => (await (await fetch(`${url}/api/board`)).json()) as BoardPayload
+  expect(await ipc(701, attach(other, false))).toBe(false)
+  expect(await ipc(707, attach(sid, true))).toBe(true)
+  expect((await board()).workdeskDialog).toMatchObject({ delivery: 'recipient_attached', deliverEnabled: false })
+  expect(await ipc(708, { op: 'tool', request: {} })).toBeNull()
+  for (let i = 0; i < 200 && (await board()).workdeskDialog?.blocked.protected_delivery_unavailable !== 1; i++)
+    await Bun.sleep(10)
+  expect((await board()).workdeskDialog?.blocked).toEqual({ protected_delivery_unavailable: 1 })
+  expect(fake.calls('read_owner_messages')).toEqual([])
   expect(fake.calls('ack_owner_messages')).toEqual([])
-  expect(await ipc(702, { op: 'attach', sealingKey, session: { thread: { id: sid } } })).toBe(true)
+  expect(await ipc(702, attach(sid, false))).toBe(true)
   for (let i = 0; i < 275 && fake.calls('ack_owner_messages').length === 0; i++) await Bun.sleep(10)
   expect(fake.calls('ack_owner_messages')).toHaveLength(1)
   const call = (threadId: string) => ({
@@ -240,8 +255,11 @@ test('the normal server accepts a pinned recipient only on its launcher IPC and 
   })
   expect(await ipc(703, { op: 'tool', request: call(other) })).toMatchObject({ result: { success: false } })
   expect(JSON.stringify(await ipc(704, { op: 'tool', request: call(sid) }))).toContain(secret)
-  const state = (await (await fetch(`${url}/api/board`)).json()) as BoardPayload
-  expect(state.workdeskDialog).toMatchObject({ pending: 0, delivery: 'recipient_attached' })
+  expect((await board()).workdeskDialog).toMatchObject({
+    pending: 0,
+    delivery: 'recipient_attached',
+    deliverEnabled: true,
+  })
   const thread = rows(dbPath)[0]
   expect(await (await fetch(`${url}/api/threads/${thread?.key}?full=1`)).text()).not.toContain(secret)
   const reminders = () =>

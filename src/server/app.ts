@@ -637,6 +637,7 @@ export async function startServer({
     items: () => board.observation()?.items ?? null,
     sink: dialogLauncher.sink,
     recipientReady: dialogLauncher.ready,
+    recipientDelivering: dialogLauncher.delivering,
     onChange: () => board.publish(),
   })
   const board = createBoardState({

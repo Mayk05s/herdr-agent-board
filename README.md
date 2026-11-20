@@ -2311,8 +2311,10 @@ A protected launcher may add `workdeskDialog.receiver: "launcher"` for one pinne
 `onlyTaskId`. Start the normal Board child with inherited IPC and pass the native
 `thread/start` or `thread/resume` result from the dedicated Codex App Server's private
 stdio together with the watcher sealing key. The attachment and read are available
-only through that parent's IPC. The parent must retain the sealing key through a
-Board child restart. Keep the Codex control pipe and recipient history private.
+only through that parent's IPC. The parent retains the sealing key through a
+Board child restart. A read-only launch stays read-only for its lifetime. Starting
+content delivery also requires `workdeskDialog.deliver: true` and a retained key.
+Keep the Codex control connection and recipient history private.
 
 The launcher forwards `item/tool/call` requests from its own child. Board checks the
 pinned assignment, original handoff, local thread and native assignee at every read.
@@ -2320,6 +2322,8 @@ It commits sealed text together with the unique receipt and the neutral wake req
 A retry after an applied ACK verifies the saved entry and the Workdesk cursor before
 clearing the local inbox. The ordinary thread only shows its neutral notice. Without
 inherited IPC, the server stays in `awaiting_recipient` and sends no delivery ACK.
+
+See the [cutover and rollback procedure](docs/workdesk-dialog-cutover.md).
 
 ## Secrets
 

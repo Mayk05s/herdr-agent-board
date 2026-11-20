@@ -10,7 +10,7 @@ import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import { createWorkdeskDialogSession } from './workdesk-dialog-session.ts'
 
 type Attachment = ReturnType<ReturnType<typeof createWorkdeskDialogSession>['attach']>
-type Recipient = { attachment: Attachment; sink: ProtectedDialogSink; signature: string }
+type Recipient = { attachment: Attachment; sink: ProtectedDialogSink; signature: string; readOnly: boolean }
 
 /**
  * Opt-in child-process IPC. The trusted parent owns the Codex App Server pipes and
@@ -26,14 +26,18 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
       return config.legacyBindings.get(config.onlyTaskId)
   }
   const active = () => (recipient?.signature === JSON.stringify(pin()) ? recipient : null)
+  const delivery = () => {
+    const bound = active()
+    return bound?.readOnly === false && object(cfg.workdeskDialog)?.deliver === true ? bound : null
+  }
   const sink: ProtectedDialogSink = {
-    permits: target => active()?.sink.permits(target) ?? false,
+    permits: target => delivery()?.sink.permits(target) ?? false,
     stage(tx, target, message) {
-      const bound = active()
+      const bound = delivery()
       if (!bound) throw new Error('Workdesk dialogue recipient detached')
       bound.sink.stage(tx, target, message)
     },
-    contains: (tx, target, message) => active()?.sink.contains(tx, target, message) ?? false,
+    contains: (tx, target, message) => delivery()?.sink.contains(tx, target, message) ?? false,
   }
   function detach(): void {
     if (!recipient) return
@@ -72,7 +76,12 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
         executor: handoff.executor,
       })
       detach()
-      recipient = { attachment, sink: session.sink, signature: JSON.stringify(expected) }
+      recipient = {
+        attachment,
+        sink: session.sink,
+        signature: JSON.stringify(expected),
+        readOnly: msg.readOnly !== false || object(cfg.workdeskDialog)?.deliver !== true,
+      }
       onChange()
       return true
     } finally {
@@ -86,7 +95,7 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
     let result: unknown = null
     try {
       if (msg.op === 'attach') result = attach(msg)
-      else if (msg.op === 'tool') result = active()?.attachment.handleCodexRequest(msg.request) ?? null
+      else if (msg.op === 'tool') result = delivery()?.attachment.handleCodexRequest(msg.request) ?? null
       else if (msg.op === 'detach') detach()
     } catch {
       // A refusal contains no credential or owner data.
@@ -113,6 +122,7 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
   return {
     sink,
     ready: () => Boolean(active()),
+    delivering: () => Boolean(delivery()),
     configChanged,
     close() {
       if (listening) {
