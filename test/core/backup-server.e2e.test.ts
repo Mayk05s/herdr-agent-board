@@ -1,4 +1,4 @@
-import { test } from 'bun:test'
+import { onTestFinished, test } from 'bun:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -472,7 +472,7 @@ test.skipIf(!sh)(
 
 test.skipIf(!sh)(
   'each of Apply’s record writes failing in turn: the first run leaves etc as it was, a second keeps what the first made',
-  () => {
+  async () => {
     const count = fakeRoot('include')
     okRun(count.run(applyScript(KEY)))
     const writes = count.records()
@@ -481,29 +481,48 @@ test.skipIf(!sh)(
     // a second run makes no user: one write fewer
     const writes2 = count.records() - writes
     assert.ok(writes2 >= 3, `a second run writes it too (${writes2})`)
-    for (let n = 1; n <= Math.max(writes, writes2); n++) {
+    // Each case in a root of its own, all side by side: one Apply takes seconds in Git Bash's sh,
+    // and a dozen of them one after another went past the timeout on Windows (#131).
+    const firstRun = async (n: number): Promise<void> => {
       const first = fakeRoot('include')
       const before = first.etc()
-      if (n <= writes) {
-        const r = first.run(applyScript(KEY), { FAIL_RECORD_AT: String(n) })
-        assert.equal(r.code, 1, `first run, write ${n}`)
-        assert.deepEqual(first.etc(), before, `first run, write ${n}: etc as it was`)
-        assert.doesNotMatch(first.passwd(), /agent-board-backup/, `first run, write ${n}`)
-      }
-      if (n > writes2) continue
+      const r = await first.runAsync(applyScript(KEY), { FAIL_RECORD_AT: String(n) })
+      assert.equal(r.code, 1, `first run, write ${n}`)
+      assert.deepEqual(first.etc(), before, `first run, write ${n}: etc as it was`)
+      assert.doesNotMatch(first.passwd(), /agent-board-backup/, `first run, write ${n}`)
+    }
+    const secondRun = async (n: number): Promise<void> => {
       const again = fakeRoot('include')
-      okRun(again.run(applyScript(KEY)))
+      okRun(await again.runAsync(applyScript(KEY)))
       writeFileSync(again.path(SNAP), 'ABK1x')
       const after1 = again.etc()
       const second = again.records() + n
-      const r2 = again.run(applyScript(KEY), { FAIL_RECORD_AT: String(second) })
+      const r2 = await again.runAsync(applyScript(KEY), { FAIL_RECORD_AT: String(second) })
       assert.equal(r2.code, 1, `second run, write ${n}`)
       assert.deepEqual(again.etc(), after1, `second run, write ${n}: etc as the first left it`)
       assert.match(again.passwd(), /^agent-board-backup:/m, `second run, write ${n}: the user stays`)
       assert.ok(existsSync(again.path(SNAP)), `second run, write ${n}: the snapshot stays`)
     }
+    const upTo = (k: number) => Array.from({ length: k }, (_, i) => i + 1)
+    const cases = [...upTo(writes).map(n => () => firstRun(n)), ...upTo(writes2).map(n => () => secondRun(n))]
+    // Four at a time: the gain without a storm of sh processes on a shared machine. A test that
+    // timed out starts no more of them, and what still runs then fails into nothing.
+    let over = false
+    onTestFinished(() => {
+      over = true
+    })
+    await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        for (let next = cases.shift(); next && !over; next = cases.shift())
+          await next().catch(err => {
+            if (!over) throw err
+          })
+      }),
+    )
   },
-  120_000,
+  // An Apply run takes 15 s to 36 s in Git Bash's sh on a laptop (milliseconds on Linux), and
+  // the test makes about 13 (#521).
+  process.platform === 'win32' ? 300_000 : 120_000,
 )
 
 test.skipIf(!sh)(
