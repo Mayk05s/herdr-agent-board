@@ -1,12 +1,12 @@
+import { Database } from 'bun:sqlite'
 import { lstatSync } from 'node:fs'
-import { type BoardDb, dbFile, openDb } from '../adapters/db.ts'
-import { stateDir } from '../adapters/paths.ts'
-import { appendEntry, findEntry, getThread } from '../adapters/work-thread-store.ts'
+import { dirname, isAbsolute } from 'node:path'
+import { type BoardDb, openDb } from '../adapters/db.ts'
+import { appendEntry, getThread } from '../adapters/work-thread-store.ts'
 import { WorkdeskToolError, withWorkdeskMcp } from '../adapters/workdesk-mcp.ts'
 import { workdeskHandoffReader } from '../adapters/workdesk-store.ts'
 import { isMirrored } from '../core/thread-import.ts'
-import type { Item } from '../core/types.ts'
-import { cleanText, type ThreadEntry, type ThreadHead, type ThreadStatus } from '../core/work-threads.ts'
+import { cleanText, type ThreadStatus } from '../core/work-threads.ts'
 import { object, validAssignmentId, workdeskMcpConfig, workdeskTask } from '../core/workdesk.ts'
 import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import type { WorkdeskEvent } from '../core/workdesk-events.ts'
@@ -22,18 +22,23 @@ function settings(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
 }
 
 function isolated(config: NonNullable<ReturnType<typeof settings>>, role: 'writerUid' | 'senderUid') {
-  const { writerUid, senderUid, interactiveUid, sharedGid } = config.isolation
+  const { writerUid, senderUid, interactiveUid, sharedGid, queuePath, executor } = config.isolation
   const uids = [writerUid, senderUid, interactiveUid]
   if (
     process.platform !== 'darwin' ||
+    typeof queuePath !== 'string' ||
+    !isAbsolute(queuePath) ||
+    typeof executor !== 'string' ||
+    !executor.trim() ||
+    executor.length > 100 ||
     ![...uids, sharedGid].every(id => typeof id === 'number' && Number.isSafeInteger(id) && id > 0) ||
     new Set(uids).size !== uids.length ||
     process.getuid?.() !== config.isolation[role]
   )
     return false
   try {
-    const directory = lstatSync(stateDir())
-    const database = lstatSync(dbFile())
+    const directory = lstatSync(dirname(queuePath))
+    const database = lstatSync(queuePath)
     return (
       directory.isDirectory() &&
       database.isFile() &&
@@ -67,23 +72,6 @@ function binding(db: Pick<BoardDb, 'db'>, config: NonNullable<ReturnType<typeof 
   return { head, sid: pin.sessionId, executor: handoff.executor }
 }
 
-function eligible(entry: ThreadEntry, head: ThreadHead, target: NonNullable<ReturnType<typeof binding>>) {
-  return (
-    head.id === target.head.id &&
-    entry.author.kind === 'session' &&
-    entry.author.key === target.sid &&
-    entry.author.name === target.executor &&
-    !entry.private &&
-    !entry.out &&
-    !entry.files?.length &&
-    !entry.links?.length &&
-    !!entry.text &&
-    entry.author.name.length <= 100 &&
-    entry.text.length <= (entry.type === 'ask' ? 4000 : 12000) &&
-    (entry.type === 'note' || entry.type === 'ask')
-  )
-}
-
 export const WORKDESK_POST_TOOL = {
   name: 'post_workdesk_message',
   description:
@@ -108,14 +96,12 @@ export function workdeskUnifiedEnabled(cfg: { workdesk?: unknown; workdeskDialog
 export function queueNativeWorkdeskMessage(
   cfg: { workdesk?: unknown; workdeskDialog?: unknown },
   sid: string,
-  items: readonly Item[] | null,
   args: unknown,
 ) {
   const config = settings(cfg)
   const input = object(args)
   const requestId = input?.request_id
   const kind = input?.kind ?? 'message'
-  const type = kind === 'question' ? 'ask' : 'note'
   const text = typeof input?.text === 'string' ? cleanText(input.text, 12001) : ''
   if (
     !config ||
@@ -126,48 +112,36 @@ export function queueNativeWorkdeskMessage(
     (kind !== 'message' && kind !== 'question') ||
     Object.keys(input).some(key => key !== 'request_id' && key !== 'text' && key !== 'kind') ||
     !text ||
-    text.length > (type === 'ask' ? 4000 : 12000)
+    text.length > (kind === 'question' ? 4000 : 12000)
   )
     return null
-  const matches = items?.filter(item => item.key === sid || item.session === sid)
-  if (
-    matches?.length !== 1 ||
-    matches[0]?.key !== sid ||
-    matches[0].session !== sid ||
-    matches[0].agent !== 'codex' ||
-    matches[0].sleeping
-  )
-    return null
-  const db = openDb({ create: false })
-  if (!db) return null
+  const { taskId, assignmentId, threadId } = config.pin
+  const executor = config.isolation.executor as string
+  const db = openQueue(config)
   try {
-    return db.write('workdesk-unified', tx => {
-      const target = binding(tx, config)
-      if (!target || target.head.status === 'done' || target.head.status === 'dropped') return null
-      const prior = tx.db
-        .query<{ entry_id: string; state: string }, [string, string]>(
-          'SELECT entry_id,state FROM workdesk_unified_outbox WHERE assignment_id=? AND request_id=?',
+    return db
+      .transaction(() => {
+        const prior = db
+          .query<Pending, [string, string]>('SELECT * FROM outbox WHERE assignment_id=? AND request_id=?')
+          .get(assignmentId, requestId)
+        if (prior) {
+          return prior.task_id === taskId &&
+            prior.thread_id === threadId &&
+            prior.sid === sid &&
+            prior.executor === executor &&
+            prior.kind === kind &&
+            prior.text === text
+            ? { entry_uuid: prior.entry_id, state: prior.state, replayed: true }
+            : null
+        }
+        const entryId = crypto.randomUUID()
+        db.run(
+          'INSERT INTO outbox (entry_id,request_id,task_id,assignment_id,thread_id,sid,executor,kind,text) VALUES (?,?,?,?,?,?,?,?,?)',
+          [entryId, requestId, taskId, assignmentId, threadId, sid, executor, kind, text],
         )
-        .get(config.pin.assignmentId, requestId)
-      if (prior) {
-        const saved = findEntry(db, target.head.id, prior.entry_id)
-        return eligible(saved, target.head, target) && saved.type === type && saved.text === text
-          ? { entry_uuid: prior.entry_id, state: prior.state, replayed: true }
-          : null
-      }
-      const { entry } = appendEntry(tx, target.head.id, {
-        at: Date.now(),
-        author: { kind: 'session', key: sid, name: target.executor },
-        type,
-        text,
+        return { entry_uuid: entryId, state: 'pending', replayed: false }
       })
-      tx.db
-        .query(
-          'INSERT INTO workdesk_unified_outbox (entry_id,request_id,task_id,assignment_id,thread_id,kind) VALUES (?,?,?,?,?,?)',
-        )
-        .run(entry.id, requestId, config.pin.taskId, config.pin.assignmentId, target.head.id, entry.type)
-      return { entry_uuid: entry.id, state: 'pending', replayed: false }
-    })
+      .immediate()
   } finally {
     db.close()
   }
@@ -223,7 +197,37 @@ export function applyWorkdeskThreadEvent(cfg: { workdesk?: unknown; workdeskDial
   }
 }
 
-type Pending = { entry_id: string; kind: string; payload: string | null }
+type Pending = {
+  entry_id: string
+  task_id: number
+  thread_id: string
+  sid: string
+  executor: string
+  text: string
+  kind: string
+  state: string
+  payload: string | null
+}
+
+function openQueue(config: NonNullable<ReturnType<typeof settings>>) {
+  const db = new Database(config.isolation.queuePath as string, { readwrite: true })
+  try {
+    db.exec('PRAGMA busy_timeout=2000; PRAGMA synchronous=FULL')
+    if (db.query("SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT IN ('outbox') LIMIT 1").get())
+      throw new Error('The Workdesk sender requires a dedicated queue database')
+    db.exec(`CREATE TABLE IF NOT EXISTS outbox (
+      entry_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, task_id INTEGER NOT NULL,
+      assignment_id TEXT NOT NULL, thread_id TEXT NOT NULL, sid TEXT NOT NULL, executor TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('message','question')), text TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending', payload TEXT, message_id INTEGER,
+      UNIQUE (assignment_id, request_id)
+    )`)
+    return db
+  } catch (error) {
+    db.close()
+    throw error
+  }
+}
 
 export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?: unknown }) {
   const startup = settings(cfg)
@@ -233,31 +237,32 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
   async function flush() {
     const config = settings(cfg)
     if (!config || !isolated(config, 'senderUid') || controller.signal.aborted) return
-    const db = openDb({ create: false })
-    if (!db) return
+    const db = openQueue(config)
     try {
-      const row = db.db
-        .query<Pending, [number, string, string]>(
-          "SELECT entry_id,kind,payload FROM workdesk_unified_outbox WHERE task_id=? AND assignment_id=? AND thread_id=? AND state='pending' ORDER BY rowid LIMIT 1",
+      const row = db
+        .query<Pending, [number, string, string, string, string]>(
+          "SELECT * FROM outbox WHERE task_id=? AND assignment_id=? AND thread_id=? AND sid=? AND executor=? AND state='pending' ORDER BY rowid LIMIT 1",
         )
-        .get(config.pin.taskId, config.pin.assignmentId, config.pin.threadId)
+        .get(
+          config.pin.taskId,
+          config.pin.assignmentId,
+          config.pin.threadId,
+          config.pin.sessionId,
+          config.isolation.executor as string,
+        )
       if (!row) return
       const mark = (state: string, messageId: number | null = null) =>
-        db.write('workdesk-unified', tx => {
-          tx.db
-            .query('UPDATE workdesk_unified_outbox SET state=?,message_id=? WHERE entry_id=?')
-            .run(state, messageId, row.entry_id)
-        })
-      const target = binding(db, config)
-      if (!target) return mark('conflict')
-      const entry = findEntry(db, target.head.id, row.entry_id)
-      if (!eligible(entry, target.head, target)) return mark('conflict')
+        db.run('UPDATE outbox SET state=?,message_id=? WHERE entry_id=?', [state, messageId, row.entry_id])
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15000)])
       const claim = await withWorkdeskMcp(config.board, signal, async mcp => {
         const reply = object(await mcp.call('list_board_tasks', {}))
         return Array.isArray(reply?.tasks) ? reply.tasks.map(workdeskTask).find(t => t?.id === config.pin.taskId) : null
       })
-      if (claim?.assignment?.id !== config.pin.assignmentId || claim.executor !== target.executor)
+      if (
+        claim?.assignment?.id !== config.pin.assignmentId ||
+        claim.executor !== row.executor ||
+        claim.status === 'queued'
+      )
         return mark('conflict')
       const scope = {
         task_id: config.pin.taskId,
@@ -265,33 +270,31 @@ export function startWorkdeskUnified(cfg: { workdesk?: unknown; workdeskDialog?:
         revision: claim.assignment.revision,
       }
       const payload =
-        row.kind === 'ask'
-          ? { ...scope, status: 'waiting', summary: entry.text }
+        row.kind === 'question'
+          ? { ...scope, status: 'waiting', summary: row.text }
           : {
               ...scope,
-              executor: target.executor,
-              thread_uuid: target.head.id,
-              entry_uuid: entry.id,
-              author: target.executor,
-              text: entry.text,
+              executor: row.executor,
+              thread_uuid: row.thread_id,
+              entry_uuid: row.entry_id,
+              author: row.executor,
+              text: row.text,
             }
       const frozen = JSON.stringify(payload)
       if (row.payload !== null && row.payload !== frozen) return mark('conflict')
-      const currentTarget = binding(db, config)
-      if (!currentTarget || currentTarget.executor !== target.executor || currentTarget.sid !== target.sid)
-        return mark('conflict')
-      if (controller.signal.aborted || JSON.stringify(settings(cfg)) !== JSON.stringify(config)) return
-      db.write('workdesk-unified', tx => {
-        tx.db
-          .query('UPDATE workdesk_unified_outbox SET payload=?,state=? WHERE entry_id=?')
-          .run(frozen, row.kind === 'ask' ? 'unknown' : 'pending', row.entry_id)
-      })
+      if (controller.signal.aborted || !isolated(config, 'senderUid')) return
+      const reserved = db.run("UPDATE outbox SET payload=?,state=? WHERE entry_id=? AND state='pending'", [
+        frozen,
+        row.kind === 'question' ? 'unknown' : 'pending',
+        row.entry_id,
+      ])
+      if (!reserved.changes) return
       try {
         const result =
-          row.kind === 'ask'
+          row.kind === 'question'
             ? await withWorkdeskMcp(config.board, signal, mcp => mcp.call('report_task', payload))
             : await withWorkdeskMcp(config.board, signal, mcp => mcp.call('post_board_thread_message', payload))
-        if (row.kind === 'ask') {
+        if (row.kind === 'question') {
           if (object(result)?.status === 'waiting') mark('sent')
         } else {
           const receipt = object(result)

@@ -10,7 +10,7 @@ import { ROOT } from '../adapters/paths.ts'
 import { object } from '../core/workdesk.ts'
 import { workdeskDialogConfig } from '../core/workdesk-dialog.ts'
 import { WORKDESK_DIALOG_TOOL } from '../services/workdesk-dialog-session.ts'
-import { WORKDESK_POST_TOOL, workdeskUnifiedEnabled } from '../services/workdesk-unified.ts'
+import { queueNativeWorkdeskMessage, WORKDESK_POST_TOOL, workdeskUnifiedEnabled } from '../services/workdesk-unified.ts'
 
 type Result = Record<string, unknown> | null
 type Pending = (result: unknown) => void
@@ -71,12 +71,13 @@ const unavailable = { content: [{ type: 'text', text: 'Workdesk dialogue unavail
 
 async function run(): Promise<number> {
   const sid = process.argv[2]
+  const unifiedOnly = process.argv[3] === '--unified-only'
   const pane = process.env.HERDR_PANE_ID
   const cfg = loadConfig()
   const dialogue = workdeskDialogConfig(cfg.workdeskDialog, cfg.workdesk)
   const pin = dialogue?.onlyTaskId && dialogue.legacyBindings.get(dialogue.onlyTaskId)
   check(
-    process.argv.length === 3 && process.stdin.isTTY && process.stdout.isTTY && pane,
+    process.argv.length === (unifiedOnly ? 4 : 3) && process.stdin.isTTY && process.stdout.isTTY && pane,
     'Use the existing Herdr pane and supply its pinned SID',
   )
   check(
@@ -93,18 +94,23 @@ async function run(): Promise<number> {
     !seen.panes.some(p => p.agent === 'codex' && p.agent_session?.value === sid),
     'The pinned Codex session is still present in Herdr',
   )
-  await freePort(Number(cfg.port ?? 12422))
-  let sealingKey: string
-  try {
-    sealingKey = readFileSync(3, 'ascii').trim()
-  } catch {
-    throw new LaunchError('The retained 32-byte sealing key is required on FD 3')
-  } finally {
+  let sealingKey: string | undefined
+  if (unifiedOnly) {
+    process.umask(0o007)
+    check(workdeskUnifiedEnabled(cfg), 'Isolated Workdesk writer unavailable')
+  } else {
+    await freePort(Number(cfg.port ?? 12422))
     try {
-      closeSync(3)
-    } catch {}
+      sealingKey = readFileSync(3, 'ascii').trim()
+    } catch {
+      throw new LaunchError('The retained 32-byte sealing key is required on FD 3')
+    } finally {
+      try {
+        closeSync(3)
+      } catch {}
+    }
+    check(/^[A-Za-z0-9_-]{43}$/.test(sealingKey), 'The retained 32-byte sealing key is required on FD 3')
   }
-  check(/^[A-Za-z0-9_-]{43}$/.test(sealingKey), 'The retained 32-byte sealing key is required on FD 3')
   const codex = Bun.which('codex')
   check(codex, 'Codex CLI unavailable')
 
@@ -125,7 +131,7 @@ async function run(): Promise<number> {
     const child = board
     return deadline(boardReplies, id, () => child?.send({ kind: 'workdesk-dialog', id, op, ...args }))
   }
-  const postEnabled = workdeskUnifiedEnabled(cfg)
+  const postEnabled = unifiedOnly
   const mcp = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -155,20 +161,28 @@ async function run(): Promise<number> {
       if (msg.method === 'tools/list')
         return reply({
           tools: [
-            {
-              name: WORKDESK_DIALOG_TOOL.name,
-              description: WORKDESK_DIALOG_TOOL.description,
-              inputSchema: WORKDESK_DIALOG_TOOL.inputSchema,
-            },
+            ...(!unifiedOnly
+              ? [
+                  {
+                    name: WORKDESK_DIALOG_TOOL.name,
+                    description: WORKDESK_DIALOG_TOOL.description,
+                    inputSchema: WORKDESK_DIALOG_TOOL.inputSchema,
+                  },
+                ]
+              : []),
             ...(postEnabled ? [WORKDESK_POST_TOOL] : []),
           ],
         })
       if (msg.method !== 'tools/call' || !ready || closing) return reply(unavailable)
       if (postEnabled && args?.name === WORKDESK_POST_TOOL.name) {
-        const posted = object(await askBoard('post', { sid, arguments: args.arguments }))
-        return reply(posted ? { content: [{ type: 'text', text: JSON.stringify(posted) }] } : unavailable)
+        try {
+          const posted = queueNativeWorkdeskMessage(cfg, sid, args.arguments)
+          return reply(posted ? { content: [{ type: 'text', text: JSON.stringify(posted) }] } : unavailable)
+        } catch {
+          return reply(unavailable)
+        }
       }
-      if (args?.name !== WORKDESK_DIALOG_TOOL.name) return reply(unavailable)
+      if (unifiedOnly || args?.name !== WORKDESK_DIALOG_TOOL.name) return reply(unavailable)
       const response = object(
         await askBoard('tool', {
           request: {
@@ -227,7 +241,7 @@ async function run(): Promise<number> {
 
   let restarting = false
   const restartBoard = () => {
-    if (!ready || restarting || closing) return
+    if (unifiedOnly || !ready || restarting || closing) return
     restarting = true
     ready = false
     const old = board
@@ -257,6 +271,9 @@ async function run(): Promise<number> {
   try {
     socket = await connect(appAddress, appToken)
     const client = socket
+    client.addEventListener('close', () => {
+      ready = false
+    })
     const replies = new Map<number, Pending>()
     client.addEventListener('message', event => {
       try {
@@ -299,9 +316,16 @@ async function run(): Promise<number> {
     const observed = object(await call('thread/read', { threadId: sid, includeTurns: false }))
     check(object(observed?.thread)?.id === sid, 'Private App Server did not retain the pinned SID')
     native = { thread: { id: sid } }
-    await bootBoard()
+    if (!unifiedOnly) await bootBoard()
     const status = object(await call('mcpServerStatus/list', { threadId: sid, serverName: 'board_workdesk_dialogue' }))
-    check(JSON.stringify(status).includes(WORKDESK_DIALOG_TOOL.name), 'Pinned dialogue tool is unavailable')
+    check(
+      JSON.stringify(status).includes(unifiedOnly ? WORKDESK_POST_TOOL.name : WORKDESK_DIALOG_TOOL.name),
+      'Pinned dialogue tool is unavailable',
+    )
+    if (unifiedOnly) {
+      check(client.readyState === WebSocket.OPEN, 'Private App Server disconnected')
+      ready = true
+    }
     console.error(`Workdesk recipient attached to ${sid}`)
     tui = Bun.spawn(
       [codex, 'resume', sid, '--remote', appAddress, '--remote-auth-token-env', 'BOARD_PRIVATE_TUI_CAPABILITY'],
