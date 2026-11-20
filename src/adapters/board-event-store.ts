@@ -11,6 +11,9 @@ export type SessionObservation = {
   phase: 'running' | 'free' | 'dialog' | 'owner' | 'unknown' | 'exited'
 }
 
+type WakeTarget = Pick<SessionObservation, 'sid' | 'pane' | 'terminal'>
+type WakeRetry = WakeTarget & { through: number }
+
 export type StageObservation = {
   taskId: number
   assignmentId: string
@@ -87,6 +90,10 @@ export function boardEventStore(db: BoardDb) {
       .run(key, String(value))
   }
   const number = (key: string) => Number(get(key) ?? 0)
+  function retryWake(): WakeRetry | null {
+    const saved = get('wake_retry')
+    return saved ? (JSON.parse(saved) as WakeRetry) : null
+  }
   function event({ db: sql, journal }: Tx, type: BoardEventType, at: number, metadata: Metadata, decision = false) {
     const row = sql
       .query('INSERT INTO board_events(type, created_at, metadata, decision) VALUES (?, ?, ?, ?)')
@@ -228,27 +235,47 @@ export function boardEventStore(db: BoardDb) {
       })
     },
     pendingWake(at: number): BoardEvent[] {
-      return at >= number('wake_at') + WAKE_INTERVAL ? read(number('wake_cursor'), true) : []
+      if (at < number('wake_at') + WAKE_INTERVAL) return []
+      const retry = retryWake()
+      const rows = read(number('wake_cursor'), true)
+      return retry ? rows.filter(row => row.id <= retry.through) : rows
     },
-    reserveWake(rows: readonly BoardEvent[], at: number): boolean {
+    reserveWake(rows: readonly BoardEvent[], at: number, target: WakeTarget): number | null {
       const first = rows[0]
       const last = rows.at(-1)
-      if (!first || !last) return false
-      // Record the attempt before the terminal side effect. A crash during dispatch has an
-      // uncertain outcome, so a second prompt is suppressed. The SSE record remains readable.
+      if (!first || !last) return null
+      // A crash during dispatch has an uncertain outcome. Consume the attempt before
+      // calling herdr and leave the event available in the feed.
       return db.write('board-events', tx => {
-        if (first.id <= number('wake_cursor') || at < number('wake_at') + WAKE_INTERVAL) return false
+        const previous = number('wake_cursor')
+        if (first.id <= previous || at < number('wake_at') + WAKE_INTERVAL) return null
+        const retry = retryWake()
+        if (retry && retry.through !== last.id) return null
         set(tx, 'wake_cursor', last.id)
         set(tx, 'wake_at', at)
-        return true
+        if (retry) {
+          set(tx, 'wake_retry', '')
+          if (retry.sid !== target.sid || retry.pane !== target.pane || retry.terminal !== target.terminal) return null
+        }
+        return previous
       })
     },
-    deferWake(id: number, previous: number): void {
+    deferWake(id: number, previous: number, at: number, target: WakeTarget): void {
       db.write('board-events', tx => {
-        if (number('wake_cursor') === id) set(tx, 'wake_cursor', previous)
+        if (number('wake_cursor') !== id || number('wake_at') !== at) return
+        set(tx, 'wake_cursor', previous)
+        set(
+          tx,
+          'wake_retry',
+          JSON.stringify({
+            through: id,
+            sid: target.sid,
+            pane: target.pane,
+            terminal: target.terminal,
+          }),
+        )
       })
     },
-    wakeCursor: () => number('wake_cursor'),
     ack(id: number, wakeEnabled = false): boolean {
       return db.write('board-events', tx => {
         const high =
@@ -256,13 +283,14 @@ export function boardEventStore(db: BoardDb) {
         if (id > high) return false
         set(tx, 'reader_ack', Math.max(number('reader_ack'), id))
         const acknowledged = Math.max(0, number('reader_ack') - KEEP_ACKNOWLEDGED)
-        const wake = wakeEnabled
-          ? tx.db
-              .query<{ id: number | null }, [number]>(
-                'SELECT MIN(id) AS id FROM board_events WHERE decision = 1 AND id > ?',
-              )
-              .get(number('wake_cursor'))?.id
-          : null
+        const wake =
+          wakeEnabled || retryWake()
+            ? tx.db
+                .query<{ id: number | null }, [number]>(
+                  'SELECT MIN(id) AS id FROM board_events WHERE decision = 1 AND id > ?',
+                )
+                .get(number('wake_cursor'))?.id
+            : null
         const keepFrom = wake == null ? acknowledged : Math.min(acknowledged, wake - 1)
         if (keepFrom > number('replay_floor')) {
           tx.db.query('DELETE FROM board_events WHERE id <= ?').run(keepFrom)

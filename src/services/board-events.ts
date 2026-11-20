@@ -5,26 +5,18 @@ import {
   type StageObservation,
 } from '../adapters/board-event-store.ts'
 import type { BoardDb } from '../adapters/db.ts'
-import type { HerdrSnapshot } from '../adapters/herdr.ts'
+import { type HerdrSnapshot, nativeBoardSid } from '../adapters/herdr.ts'
 import type { Item } from '../core/types.ts'
 import { object } from '../core/workdesk.ts'
 import type { WorkdeskEvent } from '../core/workdesk-events.ts'
-import { stableWorkdeskSid, workdeskAgent } from '../core/workdesk-topology.ts'
+import { stableWorkdeskSid } from '../core/workdesk-topology.ts'
 import { send } from './actions.ts'
 import type { Deps } from './deps.ts'
 
 export function sessionObservations(snapshot: HerdrSnapshot, items: readonly Item[]): SessionObservation[] {
   const native = snapshot.panes.flatMap(pane => {
-    const session = pane.agent_session
-    if (
-      !workdeskAgent(pane.agent) ||
-      !stableWorkdeskSid(session?.value) ||
-      (session.kind !== undefined && session.kind !== 'id') ||
-      (session.agent !== undefined && session.agent !== pane.agent) ||
-      (session.source !== undefined && session.source !== `herdr:${pane.agent}`)
-    )
-      return []
-    return [{ pane, sid: session.value }]
+    const sid = nativeBoardSid(pane)
+    return sid ? [{ pane, sid }] : []
   })
   const ids = new Map<string, number>()
   for (const { sid } of native) ids.set(sid, (ids.get(sid) ?? 0) + 1)
@@ -99,19 +91,24 @@ export function createBoardEvents(deps: Deps, deliver: typeof send = send) {
     const target = coordinatorSid()
     if (!target) return
     const native = current.find(i => i.sid === target && i.phase === 'free')
-    const exact = native && items.find(i => i.key === target && i.session === target && i.pane === native.pane)
+    if (!native) return
+    const exact = items.find(i => i.key === target && i.session === target && i.pane === native.pane)
     if (!exact || exact.sleeping || exact.call || exact.day || exact.fork) return
     const journal = store()
     const pending = journal.pendingWake(at)
-    const previous = journal.wakeCursor()
-    if (!journal.reserveWake(pending, at)) return
+    const previous = journal.reserveWake(pending, at, native)
+    if (previous === null) return
     const summary = pending.map(
       e =>
         `#${e.id} ${e.type}${e.board_task_id ? ` Workdesk #${e.board_task_id}` : e.session_id ? ` ${e.session_id}` : ''}`,
     )
-    const result = await deliver(deps, exact, `[События Борды] ${summary.join(', ')}`, { free: true, draft: true })
+    const result = await deliver(deps, exact, `[События Борды] ${summary.join(', ')}`, {
+      free: true,
+      draft: true,
+      boundTerminal: native.terminal,
+    })
     if (!result.ok && !stopping) {
-      if (result.busy) store().deferWake(pending.at(-1)?.id ?? 0, previous)
+      if (result.busy) store().deferWake(pending.at(-1)?.id ?? 0, previous, at, native)
       else deps.log('Board coordinator event delivery unconfirmed; events remain in the feed')
     }
   }

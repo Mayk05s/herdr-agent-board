@@ -252,3 +252,34 @@ test('local coordinator API uses event IDs for live delivery, restart replay, an
     await next.stop()
   }
 })
+
+test('a busy refusal can be retried after restart only on the original terminal', async () => {
+  isolatedHome()
+  const cfg = normalizeConfig({ boardEvents: { coordinatorSid: coordinator } })
+  const deps = { cfg, log() {} } as unknown as Deps
+  const at = Date.now()
+  const original = { sid: coordinator, pane: 'p2', terminal: 'term-p2' }
+  const moved = { ...original, pane: 'p3', terminal: 'term-p3' }
+  const first = createBoardEvents(deps)
+  first.source('workdesk').commit(report(17))
+  const store = first.store()
+  const pending = store.pendingWake(at)
+  const previous = store.reserveWake(pending, at, original)
+  if (previous === null || pending.length !== 1) throw new Error('first attempt unavailable')
+  store.deferWake(pending[0]?.id ?? 0, previous, at, original)
+  await first.stop()
+
+  const next = createBoardEvents(deps)
+  try {
+    next.source('workdesk').commit(report(18, 2))
+    const reopened = next.store()
+    const retry = reopened.pendingWake(at + 60_000)
+    expect(retry.map(event => event.source_event_id)).toEqual([17])
+    expect(reopened.reserveWake(retry, at + 60_000, moved)).toBeNull()
+    const nextEvent = reopened.pendingWake(at + 120_000)
+    expect(nextEvent.map(event => event.source_event_id)).toEqual([18])
+    expect(reopened.reserveWake(nextEvent, at + 120_000, moved)).toBe(retry[0]?.id ?? null)
+  } finally {
+    await next.stop()
+  }
+})
