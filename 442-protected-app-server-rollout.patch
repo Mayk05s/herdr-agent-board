@@ -1,0 +1,554 @@
+diff --git a/src/adapters/codex-home.ts b/src/adapters/codex-home.ts
+index 62678d91..8e15d4d0 100644
+--- a/src/adapters/codex-home.ts
++++ b/src/adapters/codex-home.ts
+@@ -8,16 +8,17 @@ import { isCodexSession, parseCodexConversation, parseCodexTail } from '../core/
+ import { modelProblem } from '../core/launch/model.ts'
+ import type { TranscriptInfo } from '../core/types.ts'
+ import { cwdOf as readCwd, readTail, type SessionThread } from './claude-home.ts'
+-import { canProbeCodex, codexProcessRollouts, codexRolloutName } from './codex-process.ts'
++import { canProbeCodex, codexProcessRollouts, codexRolloutName, type LauncherCodexRollout } from './codex-process.ts'
+ import { readConfigFile } from './config-file.ts'
+ import type { HerdrPane } from './herdr.ts'
+ import { isRecord } from './json-store.ts'
+ 
+-type VerifiedRollout = { path: string; revision: string }
++type VerifiedRollout = { path: string; revision: string | null }
+ type ActiveThread =
+   | { session: string; cwd: string; continues: boolean; rollout?: VerifiedRollout }
+   | { reportedRollout: VerifiedRollout }
+   | 'ambiguous'
++  | 'launcher-unconfirmed'
+   | null
+ type PaneProbe = { identity: string; pending: Promise<ActiveThread>; result?: ActiveThread; finishedAt?: number }
+ 
+@@ -25,9 +26,13 @@ export interface CodexHome {
+   /** The folder in the rollout header, rather than the enclosing shell's folder. */
+   cwdOf(session: string): Promise<string | null>
+   /** The foreground TUI's verified rollout if it differs from Herdr's, or ambiguity on this PTY. */
+-  currentThread(pane: HerdrPane, fresh?: boolean): Promise<ActiveThread>
+-  transcriptInfo(session: string | null, rollout?: string): TranscriptInfo | null
+-  sessionThread(session: string, limit?: number, rollout?: string): SessionThread
++  currentThread(
++    pane: HerdrPane,
++    fresh?: boolean,
++    launcher?: Promise<LauncherCodexRollout | null>,
++  ): Promise<ActiveThread>
++  transcriptInfo(session: string | null, rollout?: string | null): TranscriptInfo | null
++  sessionThread(session: string, limit?: number, rollout?: string | null): SessionThread
+ }
+ 
+ const DISCOVERY_MS = 1000
+@@ -115,8 +120,8 @@ export function createCodexHome(
+     }
+   }
+ 
+-  function locate(session: string | null, rollout?: string) {
+-    if (!session || !isCodexSession(session)) return null
++  function locate(session: string | null, rollout?: string | null) {
++    if (rollout === null || !session || !isCodexSession(session)) return null
+     const id = session.toLowerCase()
+     try {
+       // A roll forward or revert keeps the SID. Only the foreground probe supplies a revision.
+@@ -142,7 +147,7 @@ export function createCodexHome(
+     }
+   }
+ 
+-  function transcriptInfo(session: string | null, rollout?: string): TranscriptInfo | null {
++  function transcriptInfo(session: string | null, rollout?: string | null): TranscriptInfo | null {
+     const found = locate(session, rollout)
+     if (!found) return null
+     const { file, st } = found
+@@ -164,7 +169,7 @@ export function createCodexHome(
+     }
+   }
+ 
+-  function sessionThread(session: string, limit = 40, rollout?: string): SessionThread {
++  function sessionThread(session: string, limit = 40, rollout?: string | null): SessionThread {
+     const found = locate(session, rollout)
+     if (!found) return { conversation: [], queued: [] }
+     const { file, st } = found
+@@ -214,9 +219,7 @@ export function createCodexHome(
+     )
+   }
+ 
+-  async function probeThread(pane: HerdrPane): Promise<ActiveThread> {
+-    const paths = await probe(pane)
+-    if (!paths.length) return null
++  async function interactiveRollouts(paths: readonly string[]) {
+     const candidates = await Promise.all(
+       paths.map(async path => {
+         const name = codexRolloutName(basename(path))
+@@ -230,7 +233,13 @@ export function createCodexHome(
+         return source === 'cli' ? { path, name, meta } : null
+       }),
+     ).catch(() => null)
+-    const interactive = candidates?.filter(candidate => candidate !== 'guardian')
++    return candidates?.filter(candidate => candidate !== 'guardian')
++  }
++
++  async function probeThread(pane: HerdrPane): Promise<ActiveThread> {
++    const paths = await probe(pane)
++    if (!paths.length) return null
++    const interactive = await interactiveRollouts(paths)
+     const previous = pane.agent_session?.value
+     if (interactive?.length !== 1 || !interactive[0]) {
+       // While selection is ambiguous, Herdr's reported SID still has a read-only history.
+@@ -264,7 +273,24 @@ export function createCodexHome(
+     return { ...target, continues: false }
+   }
+ 
+-  async function currentThread(pane: HerdrPane, fresh = false): Promise<ActiveThread> {
++  async function currentThread(
++    pane: HerdrPane,
++    fresh = false,
++    launcher?: Promise<LauncherCodexRollout | null>,
++  ): Promise<ActiveThread> {
++    if (launcher) {
++      const proof = await launcher.catch(() => null)
++      const candidates = proof && (await interactiveRollouts(proof.openPaths))
++      const candidate = candidates?.length === 1 ? candidates[0] : null
++      if (!candidate || candidate.path !== proof?.path || candidate.name.session !== pane.agent_session?.value)
++        return 'launcher-unconfirmed'
++      return {
++        session: candidate.name.session,
++        cwd: typeof candidate.meta.cwd === 'string' ? candidate.meta.cwd : '',
++        continues: false,
++        rollout: { path: candidate.path, revision: candidate.name.revision },
++      }
++    }
+     if (!canProbeCodex(pane)) return null
+     // A reused pane cannot borrow another terminal's history. Keep both successes and misses for
+     // this incarnation. A send starts its own verification even while a list probe is in flight.
+diff --git a/src/adapters/codex-process.ts b/src/adapters/codex-process.ts
+index 4d608ac6..d7da5ffa 100644
+--- a/src/adapters/codex-process.ts
++++ b/src/adapters/codex-process.ts
+@@ -3,6 +3,7 @@
+ import { execFile } from 'node:child_process'
+ import { basename } from 'node:path'
+ import { promisify } from 'node:util'
++import type { PaneProcesses } from '../core/board-pane.ts'
+ import { CODEX_AGENT, isCodexSession } from '../core/codex.ts'
+ import { asPaneProcesses, type HerdrPane, herdr } from './herdr.ts'
+ import { isRecord } from './json-store.ts'
+@@ -31,7 +32,15 @@ export async function codexOpenFiles(pid: number, shell = pid): Promise<string>
+   return stdout
+ }
+ 
+-async function foreground(pane: string): Promise<{ pid: number; shell: number; tty: string | null } | null> {
++function singleCodexPid(processes: PaneProcesses): number | undefined {
++  const codex = processes.foreground.filter(p => basename(p.args[0] ?? '') === CODEX_AGENT)
++  return codex.length === 1 ? codex[0]?.pid : undefined
++}
++
++async function foreground(
++  pane: string,
++  selectPid = singleCodexPid,
++): Promise<{ pid: number; shell: number; tty: string | null } | null> {
+   const result = await herdr(['pane', 'process-info', '--pane', pane], TIMEOUT)
+   const raw = isRecord(result) ? result.process_info : null
+   if (!isRecord(raw) || raw.pane_id !== pane) return null
+@@ -39,8 +48,7 @@ async function foreground(pane: string): Promise<{ pid: number; shell: number; t
+   if (tty != null && (typeof tty !== 'string' || !tty.startsWith('/dev/'))) return null
+   const processes = asPaneProcesses(result)
+   if (!processes) return null
+-  const codex = processes.foreground.filter(p => basename(p.args[0] ?? '') === CODEX_AGENT)
+-  const pid = codex.length === 1 ? codex[0]?.pid : null
++  const pid = selectPid(processes)
+   return pid ? { pid, shell: processes.shell, tty: tty ?? null } : null
+ }
+ 
+@@ -67,6 +75,16 @@ function stdioTtys(descriptors: string[][]): string[] {
+   )
+ }
+ 
++function writableRollouts(descriptors: string[][]): string[] {
++  const rollouts: string[] = []
++  for (const fields of descriptors) {
++    if (!fields.includes('tREG') || (!fields.includes('aw') && !fields.includes('au'))) continue
++    const path = fields.find(field => field.startsWith('n'))?.slice(1) ?? ''
++    if (path.startsWith('/') && codexRolloutName(basename(path))) rollouts.push(path)
++  }
++  return rollouts
++}
++
+ function rolloutsOnTty(stdout: string, pid: number, shell: number, tty: string | null): string[] {
+   const processes = processDescriptors(stdout)
+   const descriptors = processes.get(pid)
+@@ -81,13 +99,69 @@ function rolloutsOnTty(stdout: string, pid: number, shell: number, tty: string |
+     )
+     if (shared.size !== 1) return []
+   }
+-  const rollouts = new Set<string>()
+-  for (const fields of descriptors) {
+-    if (!fields.includes('tREG') || (!fields.includes('aw') && !fields.includes('au'))) continue
+-    const path = fields.find(field => field.startsWith('n'))?.slice(1) ?? ''
+-    if (path.startsWith('/') && codexRolloutName(basename(path))) rollouts.add(path)
++  return [...new Set(writableRollouts(descriptors))]
++}
++
++export type LauncherCodexRollout = { path: string; openPaths: readonly string[] }
++
++/** Called by the launcher for the TUI and the authenticated App Server it started itself. */
++export async function launcherCodexRollout(
++  pane: string,
++  terminal: string,
++  sid: string,
++  tuiPid: number,
++  appPid: number,
++  readNative: () => Promise<unknown>,
++  tuiCommand: readonly string[],
++): Promise<LauncherCodexRollout | null> {
++  if (process.platform !== 'darwin') return null
++  const selectTui = ({ foreground }: PaneProcesses): number | undefined => {
++    const candidates = foreground.filter(
++      ({ pid, args }) => pid === tuiPid || pid === appPid || basename(args[0] ?? '') === CODEX_AGENT,
++    )
++    const tui = candidates.filter(({ pid }) => pid === tuiPid)
++    const app = candidates.filter(({ pid }) => pid === appPid)
++    if (tui.length !== 1 || app.length > 1 || candidates.length !== tui.length + app.length) return undefined
++    const args = tui[0]?.args ?? []
++    if (
++      basename(args[0] ?? '') !== CODEX_AGENT ||
++      args.length !== tuiCommand.length ||
++      !args.slice(1).every((arg, index) => arg === tuiCommand[index + 1])
++    )
++      return undefined
++    if (app.length && (basename(app[0]?.args[0] ?? '') !== CODEX_AGENT || app[0]?.args[1] !== 'app-server'))
++      return undefined
++    return tuiPid
++  }
++  try {
++    const before = await foreground(pane, selectTui)
++    if (before?.pid !== tuiPid) return null
++    const native = await readNative()
++    if (!isRecord(native) || native.id !== sid || typeof native.path !== 'string') return null
++    const status = isRecord(native.status) ? native.status.type : null
++    if (status !== 'idle' && status !== 'active') return null
++    const openPaths = writableRollouts(processDescriptors(await codexOpenFiles(appPid)).get(appPid) ?? [])
++    if (
++      codexRolloutName(basename(native.path))?.session !== sid ||
++      openPaths.filter(path => path === native.path).length !== 1
++    )
++      return null
++    const after = await foreground(pane, selectTui)
++    if (after?.pid !== tuiPid || after.shell !== before.shell || after.tty !== before.tty) return null
++    const result = await herdr(['agent', 'get', pane], TIMEOUT)
++    const live = isRecord(result) ? result.agent : null
++    if (
++      !isRecord(live) ||
++      live.agent !== CODEX_AGENT ||
++      live.terminal_id !== terminal ||
++      !isRecord(live.agent_session) ||
++      live.agent_session.value !== sid
++    )
++      return null
++    return { path: native.path, openPaths }
++  } catch {
++    return null
+   }
+-  return [...rollouts]
+ }
+ 
+ export const canProbeCodex = (pane: HerdrPane): boolean =>
+diff --git a/src/core/types.ts b/src/core/types.ts
+index 73c80c3f..9a4af4f2 100644
+--- a/src/core/types.ts
++++ b/src/core/types.ts
+@@ -288,7 +288,7 @@ export interface Item {
+   /** Herdr's token if the verified current Codex thread belongs to a different card (server only). */
+   codexReported?: string
+   /** The verified, versioned rollout used for this Codex card's history (server only). */
+-  codexRollout?: string
++  codexRollout?: string | null
+   /** Codex's rollout ID when it differs from the thread SID after a revert. */
+   codexRevision?: string
+   /** The foreground TUI's selected thread could not be verified from its writable rollouts. */
+diff --git a/src/entrypoints/workdesk-dialog-run.ts b/src/entrypoints/workdesk-dialog-run.ts
+index fb9c3765..714b3d47 100644
+--- a/src/entrypoints/workdesk-dialog-run.ts
++++ b/src/entrypoints/workdesk-dialog-run.ts
+@@ -4,6 +4,7 @@
+ import { createHash, randomBytes } from 'node:crypto'
+ import { closeSync, readFileSync } from 'node:fs'
+ import { join } from 'node:path'
++import { launcherCodexRollout } from '../adapters/codex-process.ts'
+ import { loadConfig } from '../adapters/config-file.ts'
+ import { snapshot } from '../adapters/herdr.ts'
+ import { ROOT } from '../adapters/paths.ts'
+@@ -84,6 +85,7 @@ async function run(): Promise<number> {
+   )
+   const readOnly = object(cfg.workdeskDialog)?.deliver !== true
+   const seen = await snapshot()
++  const terminal = seen.panes.find(p => p.pane_id === pane)?.terminal_id
+   check(
+     seen.panes.some(p => p.pane_id === pane),
+     'The current Herdr pane was not observed',
+@@ -119,6 +121,7 @@ async function run(): Promise<number> {
+   let closing = false
+   let tui: Bun.Subprocess | undefined
+   let socket: WebSocket | undefined
++  let readNative: (() => Promise<unknown>) | undefined
+   const askBoard = (op: string, args: Record<string, unknown>) => {
+     const id = ++rpcId
+     const child = board
+@@ -176,6 +179,15 @@ async function run(): Promise<number> {
+       return reply({ content: result.contentItems.map(item => ({ type: 'text', text: object(item)?.text })) })
+     },
+   })
++  const tuiCommand = [
++    codex,
++    'resume',
++    sid,
++    '--remote',
++    appAddress,
++    '--remote-auth-token-env',
++    'BOARD_PRIVATE_TUI_CAPABILITY',
++  ]
+   const app = Bun.spawn(
+     [
+       codex,
+@@ -194,6 +206,27 @@ async function run(): Promise<number> {
+     { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' },
+   )
+ 
++  async function readRollout(request: Record<string, unknown>) {
++    const current = tui
++    const read = readNative
++    const connected = () =>
++      ready && !closing && current?.exitCode === null && app.exitCode === null && socket?.readyState === WebSocket.OPEN
++    if (
++      !current ||
++      !read ||
++      !pane ||
++      !sid ||
++      !terminal ||
++      request.pane !== pane ||
++      request.terminal !== terminal ||
++      request.sid !== sid ||
++      !connected()
++    )
++      return null
++    const proof = await launcherCodexRollout(pane, terminal, sid, current.pid, app.pid, read, tuiCommand)
++    return connected() ? proof : null
++  }
++
+   async function bootBoard(): Promise<void> {
+     ready = false
+     const child = Bun.spawn(command('server.ts'), {
+@@ -203,6 +236,17 @@ async function run(): Promise<number> {
+       ipc(value) {
+         const message = object(value)
+         if (message?.kind !== 'workdesk-dialog' || typeof message.id !== 'number') return
++        if (message.op === 'read-codex-rollout') {
++          if (child !== board) return
++          void readRollout(message)
++            .then(result => {
++              if (child === board && child.exitCode === null) {
++                child.send({ kind: 'workdesk-dialog', op: 'read-codex-result', id: message.id, result })
++              }
++            })
++            .catch(() => {})
++          return
++        }
+         boardReplies.get(message.id)?.(message.result)
+         boardReplies.delete(message.id)
+       },
+@@ -261,9 +305,9 @@ async function run(): Promise<number> {
+         // Native errors are not printed.
+       }
+     })
+-    const call = (method: string, params: unknown) => {
++    const call = (method: string, params: unknown, timeout?: number) => {
+       const id = ++rpcId
+-      return deadline(replies, id, () => client.send(JSON.stringify({ id, method, params })))
++      return deadline(replies, id, () => client.send(JSON.stringify({ id, method, params })), timeout)
+     }
+     check(
+       await call('initialize', { clientInfo: { name: 'agent-board-workdesk', version: '1' } }),
+@@ -292,19 +336,17 @@ async function run(): Promise<number> {
+     const observed = object(await call('thread/read', { threadId: sid, includeTurns: false }))
+     check(object(observed?.thread)?.id === sid, 'Private App Server did not retain the pinned SID')
+     native = { thread: { id: sid } }
++    readNative = async () => object(await call('thread/read', { threadId: sid, includeTurns: false }, 750))?.thread
+     await bootBoard()
+     const status = object(await call('mcpServerStatus/list', { threadId: sid, serverName: 'board_workdesk_dialogue' }))
+     check(JSON.stringify(status).includes(WORKDESK_DIALOG_TOOL.name), 'Pinned dialogue tool is unavailable')
+     console.error(`Workdesk recipient attached to ${sid}`)
+-    tui = Bun.spawn(
+-      [codex, 'resume', sid, '--remote', appAddress, '--remote-auth-token-env', 'BOARD_PRIVATE_TUI_CAPABILITY'],
+-      {
+-        stdin: 'inherit',
+-        stdout: 'inherit',
+-        stderr: 'inherit',
+-        env: { ...process.env, BOARD_PRIVATE_TUI_CAPABILITY: appToken },
+-      },
+-    )
++    tui = Bun.spawn(tuiCommand, {
++      stdin: 'inherit',
++      stdout: 'inherit',
++      stderr: 'inherit',
++      env: { ...process.env, BOARD_PRIVATE_TUI_CAPABILITY: appToken },
++    })
+     return await Promise.race([tui.exited, app.exited.then(() => 1)])
+   } finally {
+     closing = true
+diff --git a/src/server/app.ts b/src/server/app.ts
+index ca360779..e0e8fde5 100644
+--- a/src/server/app.ts
++++ b/src/server/app.ts
+@@ -630,6 +630,7 @@ export async function startServer({
+     () => board.observation()?.items ?? null,
+     () => board.publish(),
+   )
++  deps.launcherCodexRollout ??= dialogLauncher.codexRollout
+   const workdeskDialog = createWorkdeskDialog({
+     cfg,
+     items: () => board.observation()?.items ?? null,
+diff --git a/src/services/board.ts b/src/services/board.ts
+index cd73a051..e3951894 100644
+--- a/src/services/board.ts
++++ b/src/services/board.ts
+@@ -457,15 +457,17 @@ export async function collect(
+   let dayWorkspace = ''
+ 
+   const codexThreads = await Promise.all(
+-    snap.panes.map(p => (isCodexItem(p) ? deps.codex.currentThread(p, p.pane_id === freshCodexPane) : null)),
++    snap.panes.map(p =>
++      isCodexItem(p) ? deps.codex.currentThread(p, p.pane_id === freshCodexPane, deps.launcherCodexRollout?.(p)) : null,
++    ),
+   )
+   for (const [index, p] of snap.panes.entries()) {
+     if (!p.agent) continue
+     const reported = p.agent_session?.value ?? null
+     const active = codexThreads[index]
+-    const current = active && active !== 'ambiguous' && 'session' in active ? active : null
+-    const rollout =
+-      active && active !== 'ambiguous' && 'reportedRollout' in active ? active.reportedRollout : current?.rollout
++    const verified = typeof active === 'object' ? active : null
++    const current = verified && 'session' in verified ? verified : null
++    const rollout = verified && 'reportedRollout' in verified ? verified.reportedRollout : current?.rollout
+     const session = current && !current.continues ? current.session : reported
+     if (dayPane(p, session)) {
+       dayWorkspace ||= labels.get(p.workspace_id ?? '') ?? ''
+@@ -479,7 +481,8 @@ export async function collect(
+       key,
+       session,
+       ...(current?.continues && { codexThread: current.session }),
+-      ...(rollout && { codexRollout: rollout.path, codexRevision: rollout.revision }),
++      ...(rollout && { codexRollout: rollout.path, ...(rollout.revision && { codexRevision: rollout.revision }) }),
++      ...(active === 'launcher-unconfirmed' && { codexRollout: null }),
+       ...(current && !current.continues && reported && { codexReported: reported }),
+       ...(active && !current && { codexUnresolved: true }),
+       ...(isCodexItem(p) && p.terminal_id && { codexTerminal: p.terminal_id }),
+diff --git a/src/services/deps.ts b/src/services/deps.ts
+index 1e82cc09..2f55c621 100644
+--- a/src/services/deps.ts
++++ b/src/services/deps.ts
+@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs'
+ import { homedir } from 'node:os'
+ import type { ClaudeHome } from '../adapters/claude-home.ts'
+ import { type CodexHome, createCodexHome } from '../adapters/codex-home.ts'
++import type { LauncherCodexRollout } from '../adapters/codex-process.ts'
++import type { HerdrPane } from '../adapters/herdr.ts'
+ import { createPiHome, type PiHome } from '../adapters/pi-home.ts'
+ import { createProfileHomes, type ProfileHomes } from '../adapters/profile-homes.ts'
+ import { findProfileDirs, inheritedProfileDir } from '../adapters/profiles.ts'
+@@ -24,6 +26,7 @@ export interface Deps {
+   pi: PiHome
+   /** Codex rollouts, looked up only for panes herdr reports as codex. */
+   codex: CodexHome
++  launcherCodexRollout?(pane: HerdrPane): Promise<LauncherCodexRollout | null> | undefined
+   /** The profiles: config.json's merged with the folders found; read again when they change, or after a minute. */
+   profiles(): ProfileSet
+   /**
+diff --git a/src/services/workdesk-dialog-launcher.ts b/src/services/workdesk-dialog-launcher.ts
+index 93e4e84b..1bf00e8f 100644
+--- a/src/services/workdesk-dialog-launcher.ts
++++ b/src/services/workdesk-dialog-launcher.ts
+@@ -1,4 +1,6 @@
++import type { LauncherCodexRollout } from '../adapters/codex-process.ts'
+ import { openDb } from '../adapters/db.ts'
++import type { HerdrPane } from '../adapters/herdr.ts'
+ import { getThread } from '../adapters/work-thread-store.ts'
+ import type { ProtectedDialogSink } from '../adapters/workdesk-dialog-store.ts'
+ import { workdeskHandoffReader } from '../adapters/workdesk-store.ts'
+@@ -19,6 +21,8 @@ type Recipient = { attachment: Attachment; sink: ProtectedDialogSink; signature:
+  */
+ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly Item[] | null, onChange: () => void) {
+   let recipient: Recipient | null = null
++  let queryId = 0
++  const pending = new Map<number, (proof: LauncherCodexRollout | null) => void>()
+   const pin = () => {
+     if (!threadsConfig(cfg.threads)) return
+     const config = workdeskDialogConfig(cfg.workdeskDialog, cfg.workdesk)
+@@ -40,6 +44,7 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
+     contains: (tx, target, message) => delivery()?.sink.contains(tx, target, message) ?? false,
+   }
+   function detach(): void {
++    for (const finish of pending.values()) finish(null)
+     if (!recipient) return
+     recipient.attachment.close()
+     recipient = null
+@@ -89,9 +94,52 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
+     }
+   }
+ 
++  function codexRollout(pane: HerdrPane): Promise<LauncherCodexRollout | null> | undefined {
++    const sid = pane.agent_session?.value
++    if (!sid || pin()?.sessionId !== sid) return undefined
++    const recipient = active()
++    if (!recipient || !pane.terminal_id || pane.agent_session?.source === 'board:codex-resume' || !process.connected)
++      return Promise.resolve(null)
++    return new Promise(resolve => {
++      const id = ++queryId
++      const finish = (proof: LauncherCodexRollout | null) => {
++        clearTimeout(timer)
++        pending.delete(id)
++        resolve(active() === recipient ? proof : null)
++      }
++      const timer = setTimeout(() => finish(null), 2_500)
++      pending.set(id, finish)
++      process.send?.(
++        {
++          kind: 'workdesk-dialog',
++          op: 'read-codex-rollout',
++          id,
++          pane: pane.pane_id,
++          terminal: pane.terminal_id,
++          sid,
++        },
++        undefined,
++        undefined,
++        error => {
++          if (error) finish(null)
++        },
++      )
++    })
++  }
++
+   function receive(value: unknown): void {
+     const msg = object(value)
+     if (msg?.kind !== 'workdesk-dialog' || typeof msg.id !== 'number' || !Number.isSafeInteger(msg.id)) return
++    if (msg.op === 'read-codex-result') {
++      const proof = object(msg.result)
++      const paths = proof?.openPaths
++      pending.get(msg.id)?.(
++        typeof proof?.path === 'string' && Array.isArray(paths) && paths.every(path => typeof path === 'string')
++          ? { path: proof.path, openPaths: paths }
++          : null,
++      )
++      return
++    }
+     let result: unknown = null
+     try {
+       if (msg.op === 'attach') result = attach(msg)
+@@ -123,6 +171,7 @@ export function connectWorkdeskDialogLauncher(cfg: Config, items: () => readonly
+     sink,
+     ready: () => Boolean(active()),
+     delivering: () => Boolean(delivery()),
++    codexRollout,
+     configChanged,
+     close() {
+       if (listening) {
