@@ -123,13 +123,19 @@ export function createWorkdeskWatcher({
             return
           }
 
+          const supportsKey = (tool: string) => object(object(tools.get(tool))?.properties)?.include_key !== undefined
+          const listKey = supportsKey('list_board_tasks')
+          const claimKey = supportsKey('claim_task')
           let listed: unknown
           const includeStage =
             stageTracking?.() === true &&
             object(object(tools.get('list_board_tasks'))?.properties)?.include_stage_started_at != null
           try {
             listed = object(
-              await mcp.call('list_board_tasks', includeStage ? { include_stage_started_at: true } : {}),
+              await mcp.call('list_board_tasks', {
+                ...(listKey && { include_key: true }),
+                ...(includeStage && { include_stage_started_at: true }),
+              }),
             )?.tasks
           } catch {
             problem ??= 'list'
@@ -207,7 +213,13 @@ export function createWorkdeskWatcher({
                 if (!store.reserve(task.id, master)) continue
                 let claimed: ReturnType<typeof workdeskTask>
                 try {
-                  claimed = workdeskTask(await mcp.call('claim_task', { task_id: task.id, executor: master.name }))
+                  claimed = workdeskTask(
+                    await mcp.call('claim_task', {
+                      task_id: task.id,
+                      executor: master.name,
+                      ...(claimKey && { include_key: true }),
+                    }),
+                  )
                 } catch (err) {
                   problem ??= err instanceof WorkdeskToolError && err.conflict ? 'conflict' : 'claim'
                   if (err instanceof WorkdeskToolError && err.conflict) eligible.delete(task.id)
@@ -221,6 +233,8 @@ export function createWorkdeskWatcher({
                 if (
                   !claimed ||
                   claimed.id !== task.id ||
+                  (task.assignment && claimed.assignment?.id !== task.assignment.id) ||
+                  (task.key && claimed.key && claimed.key !== task.key) ||
                   claimed.executor !== master.name ||
                   claimed.status === 'queued'
                 ) {
@@ -228,7 +242,11 @@ export function createWorkdeskWatcher({
                   continue
                 }
                 eligible.delete(task.id)
-                store.handoff(claimed, master, Date.now())
+                store.handoff(
+                  claimed.key || !task.key ? claimed : { ...claimed, key: task.key, url: task.url },
+                  master,
+                  Date.now(),
+                )
                 observedTasks?.set(claimed.id, claimed)
               }
               store.release(active.onlyTaskId, Date.now())

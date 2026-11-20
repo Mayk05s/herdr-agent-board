@@ -194,6 +194,6 @@ test('legacy tools, unknown device and incomplete observations send only presenc
     { task_id: 19, executor: 'Board-codex-master' },
   ])
   expect(watcher.view()?.queue).toBe(0)
-  expect(rows().map(row => row.title)).toEqual(['Workdesk #19: Test card 19'])
+  expect(rows().map(row => row.title)).toEqual(['Test card 19'])
   await check({ topology: { deviceId: 'mac' }, onlyTaskId: 19 }, { tasks: [task(19)], topology: true }, {})
 })

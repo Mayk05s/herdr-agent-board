@@ -176,7 +176,7 @@ test('subscribe before W1 snapshot, persist v2 notices, replay gaps and duplicat
       running = start(restarted.signal)
       await until(() => savedCursor().read() === reassigned.id)
       expect(calls).toEqual([0, 3, 13])
-      expect(rows().map(row => row.title)).toEqual(['Workdesk #1: Test card 1', 'Workdesk #2: Test card 2'])
+      expect(rows().map(row => row.title)).toEqual(['Test card 1', 'Test card 2'])
       const [original, replacement] = rows()
       if (!replacement) throw new Error('missing replacement thread')
       expect(original?.id).toBe(first.id)

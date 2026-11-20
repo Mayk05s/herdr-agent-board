@@ -104,6 +104,7 @@ export type WorkdeskExecutorModel = 'codex' | 'claude-opus'
 
 export type WorkdeskTask = {
   id: number
+  key?: string
   title: string
   project: string
   description: string
@@ -132,7 +133,7 @@ export function workdeskTask(raw: unknown): WorkdeskTask | null {
     (executor_model !== 'codex' && executor_model !== 'claude-opus')
   )
     return null
-  const { assignment_id, revision } = task
+  const { key, assignment_id, revision } = task
   const assignment = validAssignmentId(assignment_id) && validTaskId(revision) ? { id: assignment_id, revision } : null
   return {
     id,
@@ -144,6 +145,7 @@ export function workdeskTask(raw: unknown): WorkdeskTask | null {
     status,
     executor,
     executor_model,
+    ...(typeof key === 'string' && /^[A-Z]{1,12}-[1-9][0-9]{0,15}$/.test(key) && { key }),
     ...(assignment && { assignment }),
   }
 }
