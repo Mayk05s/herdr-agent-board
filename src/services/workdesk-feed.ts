@@ -118,7 +118,8 @@ export async function feedOnce(o: FeedOptions, signal: AbortSignal): Promise<voi
     const watched = rows.filter(h => !state.tasks[h.task_id]?.closed)
     if (!watched.length) return
     await withWorkdeskMcp(settings, signal, async mcp => {
-      const listed = object(await mcp.call('list_board_tasks', { include_key: true }))?.tasks
+      // Without include_key: the URL keeps the card's number (#tasks/-257), which get_codex_review takes.
+      const listed = object(await mcp.call('list_board_tasks', {}))?.tasks
       if (!Array.isArray(listed)) throw new Error('Workdesk list unavailable')
       const active = new Map<number, { task: WorkdeskTask; summary: string }>()
       for (const raw of listed) {
