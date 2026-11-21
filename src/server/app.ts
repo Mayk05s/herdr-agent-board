@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto'
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
+import { allCards } from '../adapters/cards.ts'
 import { editNodes, editNodesAdding, loadConfig, saveFoundProfiles } from '../adapters/config-file.ts'
 import { dbFile } from '../adapters/db.ts'
 import { FILE_TOKEN } from '../adapters/files.ts'
@@ -43,6 +44,7 @@ import {
   writePidRecord,
 } from '../adapters/ssh.ts'
 import { connectWorkdeskEvents } from '../adapters/workdesk-events.ts'
+import { answerText, decisionsConfig } from '../core/decisions.ts'
 import { journalConfig } from '../core/journal.ts'
 import { messageGate } from '../core/message-gate.ts'
 import { deviceIdFromHost, fillThresholds, markRevoked, nodeConfig, nodesConfig } from '../core/nodes.ts'
@@ -71,6 +73,7 @@ import { createCalendarReminders } from '../services/calendar-reminders.ts'
 import { caseItems, liveOf } from '../services/case-sessions.ts'
 import { startCompactor } from '../services/compactor.ts'
 import { dayWatchTick } from '../services/day-watches.ts'
+import { decisionsPayload } from '../services/decisions.ts'
 import type { Deps } from '../services/deps.ts'
 import { createJournal } from '../services/journal.ts'
 import { createLaunches } from '../services/launch/launches.ts'
@@ -128,6 +131,7 @@ import { backupRoutes } from './routes/backup.ts'
 import { boardRoutes } from './routes/board.ts'
 import { boardEventRoutes } from './routes/board-events.ts'
 import { calendarRoutes, eventReveal } from './routes/calendar.ts'
+import { decisionsRoutes } from './routes/decisions.ts'
 import { fsRoutes } from './routes/fs.ts'
 import { journalRoutes } from './routes/journal.ts'
 import { launchRoutes } from './routes/launch.ts'
@@ -803,6 +807,11 @@ export async function startServer({
       const out = work.rev()
       return line && out ? { ...line, out } : line
     },
+    // Decisions (#487): while config.json turns them on, the queue from the items and the cards; off, nothing is read.
+    decisions: items => {
+      const on = decisionsConfig(cfg.decisions)
+      return on ? decisionsPayload(items, allCards(), { now: Date.now(), defaults: on.defaults }) : null
+    },
   })
   board.publish()
   // A pi day's task board copied into threads (#393), before each refresh: a change of pi's file is in
@@ -904,9 +913,25 @@ export async function startServer({
           const r = await send(deps, item, text)
           return r.ok ? { ok: true } : { ok: false, error: String(r.error ?? '') }
         },
-        async clearAsk(key, question) {
+        async clearAsk(key, question, answer) {
           const { readCard, writeCard } = await import('../adapters/cards.ts')
-          if (readCard(key)?.ask === question) writeCard(key, { ask: '', askSince: '' })
+          const card = readCard(key)
+          if (card?.ask !== question) return
+          // A decision it carried (#487) closes with it, as the owner's answer in the thread.
+          if (card.decision !== undefined) {
+            const { closeCardDecision, withDecisionsDb } = await import('../services/decisions.ts')
+            try {
+              withDecisionsDb(db =>
+                closeCardDecision(
+                  db,
+                  key,
+                  { answer: answer ? answerText(answer) : null, answeredBy: 'owner', via: 'text', at: Date.now() },
+                  { by: 'owner' },
+                ),
+              )
+            } catch {}
+          }
+          writeCard(key, { ask: '', askSince: '' })
         },
         work,
         confirm: teamConfirm,
@@ -920,6 +945,26 @@ export async function startServer({
     ),
     // Tasks (#202): points pinned on the board, done, reopened, removed; turned on or off.
     ...todosRoutes({ cfg, find: board.find, refresh }),
+    // Decisions (#487): an option or the owner's words typed in, Hold, the record; the phone too.
+    ...decisionsRoutes({
+      cfg,
+      find: board.find,
+      log,
+      refresh,
+      changed: () => board.publish(),
+      // A shared thread's answer (#394): sent now, or held for the passkey as the Threads panel's is.
+      work,
+      confirm: teamConfirm,
+      async tell(key, text) {
+        const { t } = await import('../core/lang.ts')
+        const { collect } = await import('../services/board.ts')
+        const { send } = await import('../services/actions.ts')
+        const item = (await collect(deps)).find(i => i.key === key)
+        if (!item) return { ok: false, error: t('err.gone') }
+        const r = await send(deps, item, text)
+        return r.ok ? { ok: true } : { ok: false, error: String(r.error ?? '') }
+      },
+    }),
     // Secret requests (#273): the owner's submit writes the sink, or the owner declines; the phone too.
     ...secretsRoutes({ refresh }),
     // Time entries by day and client, as billed (#233): read only, the remote page too.

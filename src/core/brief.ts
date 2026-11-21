@@ -1,5 +1,6 @@
 // What a session is told about the board (see entrypoints/hook.ts and codex-hook.ts).
 import { categoryFor } from './categories.ts'
+import type { DecisionsConfig } from './decisions.ts'
 import { languageName } from './lang.ts'
 import { type Presence, presenceBrief } from './presence.ts'
 import { type TodosConfig, todosBrief } from './todos.ts'
@@ -49,6 +50,8 @@ export function brief(
   threads: ThreadsConfig | null = null,
   /** Watches (#486, core/watches.ts), only where config.json turned them on: agents hear of `board wait --probe`. */
   watches = false,
+  /** Decisions (#487, core/decisions.ts), only where config.json turned them on. */
+  decisions: DecisionsConfig | null = null,
 ): string {
   const cat = card?.category
   const guess = categoryFor(cfg, cwd)
@@ -67,6 +70,7 @@ export function brief(
     `- board cat <id>: this session's lane. Now: ${now}. Known: ${known}. For a client that has none yet: board cat <new-id> "<Title>" adds it.`,
     '- board doing "<3-8 words>": when you start a distinct task, and again when you move to its next step.',
     '- board ask "<the question, short>": before ending a turn that needs the user\'s answer or decision (approve a draft, pick an option, give data). Puts the card under "needs the user"; cleared by itself when the user replies.',
+    agent === 'Claude' && decisions && decisionsBrief(decisions),
     '- board wait "<who/what>": before ending a turn blocked on something outside this chat (client reply, CI, another session, a date). The card stays in "waiting" until you run doing or done.',
     agent === 'Claude' && watches && watchesBrief(),
     '- board done ["<result>"]: task finished; clears doing, wait and ask.',
@@ -83,6 +87,15 @@ export function brief(
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+/** How to ask with options, a recommendation and a default (#487), while decisions are on. */
+export function decisionsBrief(cfg: DecisionsConfig): string {
+  const flags = cfg.defaults ? ' [--recommend <n>] [--default-after 2h]' : ' [--recommend <n>]'
+  const after = cfg.defaults
+    ? ' --default-after needs --recommend: with no answer and nothing from the owner in that time, the board types "go with your recommendation" and you go on. Only for what is easy to undo; never for something that cannot be undone or goes out to another person (a send, a post, a payment).'
+    : ' Defaults are off on this board: ask without --default-after.'
+  return `  With options: board ask "<question>" --option "<label>" --option "<label>"${flags}: two to four, answered with one click (the board types the label in).${after} board thread ask takes the same flags.`
 }
 
 /** How an agent asks the owner for a secret it must never see (#273), with the sinks there are. */

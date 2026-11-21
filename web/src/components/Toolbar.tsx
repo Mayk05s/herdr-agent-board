@@ -54,6 +54,7 @@ import { DeviceSwitch } from './devices/DeviceSwitch.tsx'
 import {
   AlarmIcon,
   ArchiveIcon,
+  DecisionsIcon,
   FilterIcon,
   GearIcon,
   JournalIcon,
@@ -104,6 +105,8 @@ export interface ToolbarProps {
   onTeam?: () => void
   /** Threads (#392), while the payload carries them: the button counts what needs the owner. */
   onThreads?: () => void
+  /** Decisions (#487), while the payload carries them: the button counts what waits on the owner. */
+  onDecisions?: () => void
   /** The calendar (#328): its panel, while the board has the calendar on. */
   onCalendar?: () => void
   /** The away journal (#489): "Since 23:56" opens the last return's list again, while there is one. */
@@ -142,6 +145,7 @@ export function Toolbar({
   onTime,
   onTeam,
   onThreads,
+  onDecisions,
   onCalendar,
   journal,
 }: ToolbarProps) {
@@ -204,6 +208,10 @@ export function Toolbar({
           next: data ? attentionCount(visible, ui.filter, categoryOf, ui.viewed) : 0,
           team: onTeam ? { unread: teamCount } : null,
           threads: onThreads && data?.threads ? { needsOwner: data.threads.needsOwner } : null,
+          decisions:
+            onDecisions && data?.decisions
+              ? { waiting: data.decisions.items.length, defaulted: data.decisions.defaulted.length }
+              : null,
           usage,
           presence: presenceSwitch(data?.presence, t),
           journal: journal?.label ?? null,
@@ -224,6 +232,7 @@ export function Toolbar({
     else if (id === 'time-open') onTime?.()
     else if (id === 'team-open') onTeam?.()
     else if (id === 'threads-open') onThreads?.()
+    else if (id === 'decisions-open') onDecisions?.()
     else if (id === 'archive-open') onArchive?.()
     else if (id === 'journal-open') journal?.onToggle()
     else if (id === 'next-attention') openNext()
@@ -383,6 +392,30 @@ export function Toolbar({
                   <ThreadsIcon />
                   <span>{t('wt.title')}</span>
                   <span className="n">{data.threads.needsOwner || ''}</span>
+                </button>
+              )}
+              {onDecisions && data?.decisions && (
+                <button
+                  type="button"
+                  className={
+                    data.decisions.items.length + data.decisions.defaulted.length > 0
+                      ? 'pill-toggle icon-only unread'
+                      : 'pill-toggle icon-only'
+                  }
+                  id="decisions-open"
+                  title={
+                    data.decisions.defaulted.length > 0
+                      ? t('dec.defaultedHint')
+                      : data.decisions.items.length > 0
+                        ? t('dec.needsHint', { n: data.decisions.items.length })
+                        : t('dec.openHint')
+                  }
+                  onClick={() => onDecisions()}
+                >
+                  <DecisionsIcon />
+                  <span>{t('dec.open')}</span>
+                  <span className="n">{data.decisions.items.length || ''}</span>
+                  {data.decisions.defaulted.length > 0 && <span className="n went" aria-hidden="true" />}
                 </button>
               )}
               {onTeam && (

@@ -13,6 +13,7 @@ import { listEntries, listWatches, readLog } from '../adapters/schedule-store.ts
 import { COLUMNS } from '../core/board.ts'
 import { categoryInfo, colorHex, laneRank, PALETTE } from '../core/categories.ts'
 import { compactDefaultText } from '../core/compact.ts'
+import type { DecisionsPayload } from '../core/decisions.ts'
 import { foldModeOf } from '../core/fold-mode.ts'
 import { LANGUAGES } from '../core/i18n/translator.ts'
 import { lang, t } from '../core/lang.ts'
@@ -109,6 +110,8 @@ interface Options {
   calendar?: () => CalendarPayload | null
   /** Threads' line (#379); null while they are off. */
   threads?: () => ThreadsPayload | null
+  /** Decisions' queue (#487) from the board's items; null while they are off. */
+  decisions?: (items: readonly Item[]) => DecisionsPayload | null
   workdesk?: () => WorkdeskPayload | null
   workdeskDialog?: () => DialogStatus | null
   observeSessions?: NonNullable<Parameters<typeof collect>[1]>['observed']
@@ -215,6 +218,11 @@ function calendarOf(calendar: Options['calendar']): { calendar?: CalendarPayload
   return line ? { calendar: line } : {}
 }
 
+function decisionsOf(decisions: Options['decisions'], items: readonly Item[]): { decisions?: DecisionsPayload } {
+  const line = decisions?.(items) ?? null
+  return line ? { decisions: line } : {}
+}
+
 function threadsOf(threads: Options['threads']): { threads?: ThreadsPayload } {
   const line = threads?.() ?? null
   return line ? { threads: line } : {}
@@ -256,6 +264,7 @@ export function createBoardState({
   time,
   calendar,
   threads,
+  decisions,
   workdesk,
   workdeskDialog,
   observeSessions,
@@ -362,6 +371,8 @@ export function createBoardState({
       ...threadsOf(threads),
       // journal: only while config.json turns it on (#489)
       ...journalOf(journal),
+      // decisions: only while config.json turns them on (#487)
+      ...decisionsOf(decisions, items),
       ...(workdeskLine && { workdesk: workdeskLine }),
       ...(dialogLine && { workdeskDialog: dialogLine }),
       // accessRev: the panel's cue to fetch the Remote access view again (never the view itself).
