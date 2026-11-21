@@ -367,6 +367,8 @@ export function createBoardState({
       ...timeOf(time),
       // calendar: only while config.json turns it on (#328)
       ...calendarOf(calendar),
+      // watches: only while config.json turns them on, for Settings' switch (#596)
+      ...(watchesConfig(cfg.watches) && { watches: true as const }),
       // threads: only while config.json turns them on (#379)
       ...threadsOf(threads),
       // journal: only while config.json turns it on (#489)

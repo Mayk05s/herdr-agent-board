@@ -975,7 +975,8 @@ function dropKept(): void {
  * The payload's line for the live config `cfg`: null while threads are off (nothing is read, no
  * connection is kept), zeros while there is no database yet (none is made for it). Settings'
  * Threads row (#410) reads the mode from it: `agents: false` and `share: false` only where config.json
- * says so, so `"threads": true` goes out as it did.
+ * says so, so `"threads": true` goes out as it did; its case files and verified done switches (#596)
+ * read `cases: true` and `verify: true`, there only while each is on.
  */
 export function threadsPayload(cfg: Pick<Config, 'threads'>): ThreadsPayload | null {
   const c = threadsConfig(cfg.threads)
@@ -983,7 +984,12 @@ export function threadsPayload(cfg: Pick<Config, 'threads'>): ThreadsPayload | n
     if (kept) dropKept()
     return null
   }
-  const mode = { ...(!c.agents && { agents: false as const }), ...(!c.share && { share: false as const }) }
+  const mode = {
+    ...(!c.agents && { agents: false as const }),
+    ...(!c.share && { share: false as const }),
+    ...(c.cases && { cases: true as const }),
+    ...(c.verify && { verify: true as const }),
+  }
   return { ...threadsRead(), ...mode }
 }
 

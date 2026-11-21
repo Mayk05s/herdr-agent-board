@@ -1,6 +1,6 @@
 // Settings, categories and profiles, written to config.json; the config watcher reloads it,
 // switches the language and pushes the new board. And Install into one profile's settings.json.
-import { type EditResult, editCategories, editSettings } from '../../adapters/config-file.ts'
+import { type EditResult, editCategories, editFeatures, editSettings } from '../../adapters/config-file.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { type Guard, json, type Route } from '../http.ts'
 
@@ -22,6 +22,11 @@ const edit = (
 /** Before and after the schedule's route, as main had them. */
 export const settingsRoute = (): Route => edit('/api/settings', editSettings)
 export const categoriesRoute = (): Route => edit('/api/categories', editCategories)
+/**
+ * Settings → Watches, Decisions and Away journal (#596), { watches?, decisions?, decisionsDefaults?,
+ * journal? } (editFeatures). On this computer only (core/remote.ts localOnly), as Settings → Threads.
+ */
+export const featureSettingsRoute = (): Route => edit('/api/feature-settings', editFeatures)
 /**
  * The Profiles panel's renames, colors, show/hide and folders added (this computer's home folder),
  * by `editProfile`, which installs into a profile it shows (services/profiles.ts); { op: 'install',

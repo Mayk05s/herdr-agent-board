@@ -150,7 +150,7 @@ import { revealRoute, revealState } from './routes/reveal.ts'
 import { scheduleRoute } from './routes/schedule.ts'
 import { secretsRoutes } from './routes/secrets.ts'
 import { sessionRoutes } from './routes/session.ts'
-import { categoriesRoute, profilesRoute, settingsRoute } from './routes/settings.ts'
+import { categoriesRoute, featureSettingsRoute, profilesRoute, settingsRoute } from './routes/settings.ts'
 import { setupRoute } from './routes/setup.ts'
 import { sleepRoute } from './routes/sleep.ts'
 import { staticRoute } from './routes/static.ts'
@@ -876,6 +876,8 @@ export async function startServer({
     ...uploadRoutes(),
     revealRoute(board, events, reveals, word => threadReveal({ cfg }, events, threadShown, word)),
     settingsRoute(),
+    // Settings → Watches, Decisions, Away journal (#596), on this computer only.
+    featureSettingsRoute(),
     // Settings → MokuPilot…: where a call starts, here or on the viewer's computer.
     ...mokupilotRoutes(cfg),
     // The user's presence: read, switched and set (the page, the phone, the Android app).
@@ -1399,13 +1401,23 @@ export async function startServer({
     watchFolder(cards, 150, refresh, log),
     // Entries added or cancelled by agents (`board remind`), and runs the scheduler made.
     watchFolder(scheduleDir(), 150, refresh, log),
-    // Watches (#486) set, checked or removed, only while config.json turns them on.
-    ...(watchesConfig(cfg.watches) ? [watchFolder(watchesDir(), 150, refresh, log)] : []),
     // Sessions an agent put in the archive (`board archive`), whose cards go at once.
     watchFolder(archiveDir(), 150, refresh, log),
     // A change to the page: build it again; the new version makes open pages reload.
     watchFolder(WEB, 200, () => void bundle.rebuild().then(refresh), log, true),
   ]
+  // Watches (#486) set, checked or removed, only while config.json turns them on; turned on or off
+  // later (Settings, #596), the folder's watcher follows the config.
+  let watchesWatcher: { close(): void } | null = null
+  const watchesFollow = (): void => {
+    const on = watchesConfig(cfg.watches) !== null
+    if (on && !watchesWatcher) watchesWatcher = watchFolder(watchesDir(), 150, refresh, log)
+    else if (!on && watchesWatcher) {
+      watchesWatcher.close()
+      watchesWatcher = null
+    }
+  }
+  watchesFollow()
   refresh()
   // The port makes it one board per machine, so one scheduler; claims cover an overlap.
   // Verified done (#492): the scheduler starts verifiers as a fork is started, and archives them after.
@@ -1485,12 +1497,14 @@ export async function startServer({
       holdLoopback6()
       doorFollows()
       linksFollow()
+      watchesFollow()
       await board.refresh()
       ownerTick()
     },
     async close() {
       clearInterval(poll)
       for (const watcher of watchers) watcher.close()
+      watchesWatcher?.close()
       omarchy?.close()
       scheduler.stop()
       workdeskStreamConfig = ''

@@ -10,6 +10,7 @@
 // modules are named work-thread: "thread" already means a session's conversation and a Team
 // thread in the code.
 
+import { switched, switchedOff, withField } from './feature-switch.ts'
 import type { CaseSessionView } from './work-cases.ts'
 
 export const THREAD_STATUSES = ['next', 'doing', 'waiting', 'owner', 'done', 'dropped'] as const
@@ -283,10 +284,13 @@ export interface VerifyConfig {
 export const VERIFY_LIMIT_MIN = 30
 export const VERIFY_MAX = 2
 
-/** `threads.verify`: `true` or an object is on, with its settings; absent or anything else is off. */
+/**
+ * `threads.verify`: `true` or an object is on, with its settings; absent, `"on": false` (Settings
+ * turned it off and kept its settings, #596) or anything else is off.
+ */
 export function verifyConfig(raw: unknown): VerifyConfig | null {
   if (raw === true) raw = {}
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || switchedOff(raw)) return null
   const r = raw as Record<string, unknown>
   const text = (v: unknown, max: number): string | null =>
     typeof v === 'string' && v.trim() && v.trim().length <= max ? v.trim() : null
@@ -365,6 +369,22 @@ export function threadsSetting(raw: unknown, change: { mode?: ThreadMode; share?
   if (share) delete section.share
   else section.share = false
   return Object.keys(section).length ? section : true
+}
+
+/**
+ * config.json's `threads` (on: `true` or an object) once Settings has turned case files or verified
+ * done on or off (#596): `cases` is `true` or absent; `verify` off keeps its settings (`model`,
+ * `lanes`, `brief`, ...) under `"on": false` so that on brings them back, on with none set is
+ * `true` (the defaults). The section's other fields stay; one left with nothing in it is `true`.
+ */
+export function threadsParts(raw: unknown, change: { cases?: boolean; verify?: boolean }): unknown {
+  let next = raw
+  if (change.cases !== undefined) next = withField(next, 'cases', change.cases ? true : undefined)
+  if (change.verify !== undefined) {
+    const section = typeof next === 'object' && next !== null ? (next as Record<string, unknown>) : {}
+    next = withField(next, 'verify', switched(section.verify, change.verify))
+  }
+  return next
 }
 
 // ------------------------------------------------------------------ limits

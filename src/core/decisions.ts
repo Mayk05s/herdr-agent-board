@@ -2,6 +2,7 @@
 // after a time; one queue of what waits on the owner; a record of every answer. Behind config.json's
 // `decisions` key: absent, nothing here runs. Pure: the config, the flags and their refusals, the
 // lines, the queue's order, whose prompt answers a question.
+import { switchedOff } from './feature-switch.ts'
 import { codeModeEvent, isNotice } from './notices.ts'
 import { oneLine } from './work-threads.ts'
 
@@ -10,10 +11,10 @@ export interface DecisionsConfig {
   defaults: boolean
 }
 
-/** config.json's `decisions`: `true` or an object turns it on; anything else is off (null). */
+/** config.json's `decisions`: `true` or an object turns it on; `"on": false` (Settings, #596) or anything else is off (null). */
 export function decisionsConfig(raw: unknown): DecisionsConfig | null {
   if (raw === true) return { defaults: true }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || switchedOff(raw)) return null
   return { defaults: (raw as Record<string, unknown>).defaults !== false }
 }
 

@@ -5,7 +5,9 @@
 // page's "While you were away" strip, the phone), and when the owner went away.
 //
 // config.json's `journal` turns it on: `true`, or { "returnMinutes": 15 } (how long an absence
-// lasts before the page shows the strip). Without it nothing is recorded, read or shown.
+// lasts before the page shows the strip). Without it nothing is recorded, read or shown. Settings
+// turns it off with `"on": false` when the section holds a field of its own (#596).
+import { switchedOff } from './feature-switch.ts'
 import type { Presence } from './presence.ts'
 import type { Item, Translator } from './types.ts'
 
@@ -28,10 +30,10 @@ export const MAX_ROWS = 20
 /** A line kept at most this long. */
 export const LINE_MAX = 200
 
-/** config.json's `journal`, or null while it is off (absent, false, anything but true or an object). */
+/** config.json's `journal`, or null while it is off (absent, false, `"on": false`, anything but true or an object). */
 export function journalConfig(raw: unknown): JournalConfig | null {
   if (raw === true) return { returnMinutes: DEFAULT_RETURN_MINUTES }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || switchedOff(raw)) return null
   const m = (raw as Record<string, unknown>).returnMinutes
   const ok = typeof m === 'number' && Number.isFinite(m) && m >= 1 && m <= 24 * 60
   return { returnMinutes: ok ? m : DEFAULT_RETURN_MINUTES }

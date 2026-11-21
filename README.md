@@ -1509,7 +1509,7 @@ an hour to sleep, when it is on). The board's entries are files, and the board k
 
 ## Watches
 
-Off unless you turn it on (#486). A session that waits on something outside (a CI run, a reply, a
+Off unless you turn it on (#486), in Settings → Watches on the computer's own page, or by hand. A session that waits on something outside (a CI run, a reply, a
 job) otherwise guesses a time with `board remind`: at that time a model rereads the whole
 conversation, looks, finds nothing and sleeps again, and a reply that came early sits until then.
 With watches the board does the looking, with no model: the agent gives it a command that says
@@ -1518,6 +1518,10 @@ whether the thing happened, and the board wakes the session only when it has.
 ```json
 "watches": true
 ```
+
+Settings → Watches writes `true` and takes the key out again (a section of fields of your own stays,
+with `"on": false`). The running board follows at once; sessions learn `board wait --probe` from
+their brief, so the ones started after it have it.
 
 ```
 board wait "CI run 123456789" --every 5m --silence 1d --probe 's=$(gh run view 123456789 --json status,conclusion --jq ".status + \" \" + .conclusion") || exit 2; case "$s" in completed*) echo "$s"; exit 0;; *) exit 1;; esac'
@@ -2268,7 +2272,9 @@ gone. No model runs for it, and nothing is typed into a session.
 ```
 
 `true` is the same with the default of 15 minutes: how long an absence lasts before your return
-shows the list on the page.
+shows the list on the page. Settings → Away journal on the computer's own page turns it on and off
+with no restart; off keeps a `returnMinutes` you wrote as `{ "returnMinutes": 30, "on": false }`, and
+on brings it back.
 
 What the list says, one line per session that changed, in this order:
 
@@ -2457,7 +2463,10 @@ runs on every prompt, the tables in `board.db` stay empty, and no task board is 
 sharing a thread with a teammate (phase 4 of the design) and MokuPilot's own side of phase 3 (in its
 repository).
 
-**Verified done** (#492). With `"threads": { "verify": { "model": "opus" } }` a thread can ask for
+**Verified done** (#492). Settings → Threads → Verified done (shown while threads are on) turns it on
+with the defaults (`"verify": true`) and off again; off keeps the settings you wrote (`model`,
+`lanes`, `brief`, ...) as `"on": false` in the `verify` object, so on brings them back. The board's
+next tick follows it, no restart. With `"threads": { "verify": { "model": "opus" } }` a thread can ask for
 verification: `board thread new --verify`, `board thread set <key> --verify on|off`, or
 `"lanes": ["<id>"]` for every new thread of a lane. `board thread post <key> --accept "<check>"` adds an
 acceptance line (what must be true for done; ten at most). A session's `done` on such a thread is
@@ -2499,7 +2508,9 @@ computer only your own logins reach them.
 
 ### Case files
 
-Off unless you turn them on inside threads (#488): `"threads": { "cases": true }`. A case (a ticket, a
+Off unless you turn them on inside threads (#488): Settings → Threads → Case files (shown while
+threads are on), or `"threads": { "cases": true }` by hand. Sessions learn the case commands from
+their brief, so the ones started after it have them. A case (a ticket, a
 migration, anything that lives for weeks) keeps its state in a thread instead of in whichever
 conversation touched it last, so a short check starts a fresh, small session from the thread
 instead of waking a large sleeper.
@@ -2593,7 +2604,10 @@ in the thread as a private entry, so on a shared thread the peers get none of it
 "decisions": true
 ```
 
-or `"decisions": { "defaults": false }` for the options, the queue and the record without anything
+Settings → Decisions on the computer's own page turns them on and off, and under it allows a default
+answer or not, with no restart; sessions learn the options from their brief, so the ones started
+after it have them. Off keeps `"defaults": false` aside as `"on": false`. By hand,
+`"decisions": true`, or `"decisions": { "defaults": false }` for the options, the queue and the record without anything
 deciding by itself: `--default-after` is refused with one line. With the key absent nothing changes:
 `board ask` takes every word as the question, the brief, the payload and the hook are as before, and
 the table in `board.db` stays empty. Not yet: the queue in a messenger with buttons, and approvals an

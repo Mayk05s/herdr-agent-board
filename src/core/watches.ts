@@ -5,18 +5,19 @@
 // the watch becomes after it, and the words the session, the card and `board schedule` get. Storage
 // is adapters/schedule-store.ts (the schedule's `watches` folder), the run adapters/watch-probe.ts,
 // the timer services/watches.ts.
+import { switchedOff } from './feature-switch.ts'
 import { t as current } from './lang.ts'
 import type { ScheduleEntry, SessionRef } from './schedule-rules.ts'
 import type { Translator } from './types.ts'
 import { parseDuration } from './when.ts'
 import { span } from './when-format.ts'
 
-/** config.json's `watches`: `true` or an object turns them on; absent (or anything else) they are off. */
+/** config.json's `watches`: `true` or an object turns them on; absent, `"on": false` (Settings, #596) or anything else, off. */
 export type WatchesConfig = { on: true }
 
 export function watchesConfig(raw: unknown): WatchesConfig | null {
   if (raw === true) return { on: true }
-  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? { on: true } : null
+  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) && !switchedOff(raw) ? { on: true } : null
 }
 
 const MIN = 60_000

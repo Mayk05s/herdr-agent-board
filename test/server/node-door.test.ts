@@ -188,6 +188,7 @@ const CLASSIFIED: Record<string, [method: string, raw: string, door: 'door' | 'r
   'GET ^\\/uploads\\/(\\d{4}-\\d{2}-\\d{2})\\/([^/]+)$': [['GET', '/uploads/2026-11-21/a.png', 'door']],
   'POST /api/reveal': [['POST', '/api/reveal', 'refused']],
   'POST /api/settings': [['POST', '/api/settings', 'refused']],
+  'POST /api/feature-settings': [['POST', '/api/feature-settings', 'refused']],
   'POST /api/schedule': [['POST', '/api/schedule', 'door']],
   'POST /api/sleep': [['POST', '/api/sleep', 'door']],
   'POST /api/move': [['POST', '/api/move', 'door']],
