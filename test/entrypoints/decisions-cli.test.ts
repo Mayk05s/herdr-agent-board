@@ -59,16 +59,38 @@ const scheduled = (box: Sandbox): Record<string, unknown>[] => {
     .map(n => JSON.parse(readFileSync(join(dir, n), 'utf8')) as Record<string, unknown>)
 }
 
-test('decisions absent: board ask takes every word as the question, as on main', async () => {
+test('decisions absent: board ask takes every word as the question, as on main, and says so where the flags were given (#596)', async () => {
   const box = await sandbox()
   config(box)
   const r = await cli(box, ['ask', 'Merge now?', '--option', 'yes', '--option', 'no', ...S])
   assert.equal(r.code, 0, r.out)
-  assert.equal(r.out, 'ok · category: not set · asks the user: Merge now? --option yes --option no')
+  assert.equal(
+    r.out,
+    'ok · category: not set · asks the user: Merge now? --option yes --option no · note: decisions are off in config.json, so --option is part of the question and no default will answer it',
+  )
   assert.equal(cardOf(box).ask, 'Merge now? --option yes --option no')
   assert.equal(cardOf(box).decision, undefined)
   const plain = await cli(box, ['ask', 'which branch?', ...S])
   assert.equal(plain.out, 'ok · category: not set · asks the user: which branch?')
+  // Decisions switched off by Settings ("on": false): the same, every flag named.
+  config(box, { decisions: { defaults: false, on: false } })
+  const all = await cli(box, [
+    'ask',
+    'Q',
+    '--option',
+    'a',
+    '--option',
+    'b',
+    '--recommend',
+    '1',
+    '--default-after',
+    '2h',
+    ...S,
+  ])
+  assert.equal(
+    all.out,
+    'ok · category: not set · asks the user: Q --option a --option b --recommend 1 --default-after 2h · note: decisions are off in config.json, so --option, --recommend, --default-after are part of the question and no default will answer it',
+  )
   assert.deepEqual(scheduled(box), [])
   assert.equal((await cli(box, ['decisions', ...S])).code, 1)
 })

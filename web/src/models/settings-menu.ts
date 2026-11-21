@@ -29,6 +29,7 @@ import { FOLD_MODES, type FoldMode, isFoldMode } from '../../../src/core/fold-mo
 import { isPresenceMode, PRESENCE_MODES, type PresenceMode } from '../../../src/core/presence.ts'
 import { isTodoMode, TODO_MODES, type TodoMode } from '../../../src/core/todos.ts'
 import type { Translator } from '../../../src/core/types.ts'
+import { isWatch } from '../../../src/core/watches.ts'
 import { isThreadMode, THREAD_MODES, type ThreadMode } from '../../../src/core/work-threads.ts'
 import { CARD_TEXTS, type CardText, isCardText } from './card-text.ts'
 import { isLook, LOOKS } from './look.ts'
@@ -101,6 +102,12 @@ export interface SettingsNow {
   threadsCases?: boolean | undefined
   /** Verified done on (#492, the payload's `threads.verify`); none given: no item (threads off, another device's page). */
   threadsVerify?: boolean | undefined
+  /** Watches being checked now: Off says they stop (#596). */
+  watchesRunning?: number | undefined
+  /** Decisions' defaults due to run: Off says they will not (#596). */
+  defaultsRunning?: number | undefined
+  /** The journal is on but journal.db did not open: what went wrong, shown in place of its line. */
+  journalError?: string | undefined
 }
 
 /** The features Settings switches on and off by themselves (#596). */
@@ -115,40 +122,64 @@ const isFeatureSwitch = (v: unknown): v is FeatureSwitch => FEATURE_SWITCHES.inc
  */
 export function featuresNow(payload: {
   watches?: true | undefined
-  decisions?: { defaults: boolean } | undefined
-  journal?: unknown
+  decisions?: { defaults: boolean; items?: readonly { defaultAt: number | null; held: boolean }[] } | undefined
+  journal?: { strip?: unknown; last?: unknown; error?: string | undefined } | undefined
   threads?: { cases?: true; verify?: true } | undefined
-}): Pick<SettingsNow, 'watches' | 'decisions' | 'decisionsDefaults' | 'journal' | 'threadsCases' | 'threadsVerify'> {
-  const { decisions, threads } = payload
+  schedules?: readonly unknown[] | undefined
+}): FeaturesNow {
+  const { decisions, threads, journal } = payload
+  const watches = payload.watches === true
+  const checked = watches ? (payload.schedules ?? []).filter(e => isWatch(e) && !e.off).length : 0
+  const defaults = (decisions?.items ?? []).filter(d => d.defaultAt !== null && !d.held).length
   return {
-    watches: payload.watches === true,
+    watches,
     decisions: !!decisions,
     ...(decisions && { decisionsDefaults: decisions.defaults !== false }),
-    journal: !!payload.journal,
+    journal: !!journal,
+    ...(journal?.error && { journalError: journal.error }),
+    ...(checked && { watchesRunning: checked }),
+    ...(defaults && { defaultsRunning: defaults }),
     ...(threads && { threadsCases: threads.cases === true, threadsVerify: threads.verify === true }),
   }
 }
 
-/** One feature's Off and On (#596), its line under the name; `more` after them. */
+type FeaturesNow = Pick<
+  SettingsNow,
+  | 'watches'
+  | 'decisions'
+  | 'decisionsDefaults'
+  | 'journal'
+  | 'journalError'
+  | 'watchesRunning'
+  | 'defaultsRunning'
+  | 'threadsCases'
+  | 'threadsVerify'
+>
+
+/**
+ * One feature's Off and On (#596), its line under the name (`note`: another line in its place);
+ * `running` things Off would leave behind are said on Off while it is on; `more` after them.
+ */
 function switchItem(
   now: SettingsNow,
   edit: { disabled?: boolean; reason?: string },
   id: FeatureSwitch,
   on: boolean | undefined,
-  more: MenuEntry[] = [],
+  o: { more?: MenuEntry[]; running?: number | undefined; note?: string | undefined } = {},
 ): MenuEntry[] {
   const { t } = now
   if (on === undefined) return []
+  const left = on && o.running ? { note: t(`set.${id}.offNote`, { n: o.running }) } : {}
   return [
     {
       id,
       label: t(`set.${id}`),
-      note: t(`set.${id}.note`),
+      note: o.note ?? t(`set.${id}.note`),
       ...edit,
       submenu: [
-        { id: `${id}:off`, label: t('set.feature.off'), checked: !on },
+        { id: `${id}:off`, label: t('set.feature.off'), checked: !on, ...left },
         { id: `${id}:on`, label: t('set.feature.on'), checked: on },
-        ...more,
+        ...(o.more ?? []),
       ],
     },
   ]
@@ -165,9 +196,11 @@ function featureItems(now: SettingsNow, edit: { disabled?: boolean; reason?: str
         ]
       : []
   return [
-    ...switchItem(now, edit, 'watches', now.watches),
-    ...switchItem(now, edit, 'decisions', decisions, defaults),
-    ...switchItem(now, edit, 'journal', now.journal),
+    ...switchItem(now, edit, 'watches', now.watches, { running: now.watchesRunning }),
+    ...switchItem(now, edit, 'decisions', decisions, { more: defaults, running: now.defaultsRunning }),
+    ...switchItem(now, edit, 'journal', now.journal, {
+      note: now.journal && now.journalError ? t('set.journal.error', { error: now.journalError }) : undefined,
+    }),
   ]
 }
 

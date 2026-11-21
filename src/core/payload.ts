@@ -231,6 +231,8 @@ export interface TimePayload {
 export interface JournalPayload {
   strip: (JournalList & { from: number; to: number }) | null
   last: { from: number; to: number } | null
+  /** On in config.json, but journal.db did not open: what went wrong (Settings shows it, #596). */
+  error?: string
 }
 
 /** What the board's payload says of threads (#379). */

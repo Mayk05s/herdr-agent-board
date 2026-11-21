@@ -16,6 +16,7 @@ import {
 } from '../../web/src/hooks/useSettingsMenu.ts'
 import type { MenuEntry } from '../../web/src/models/menu-model.ts'
 import { featuresNow, type SettingsNow, settingPicked, settingsMenu } from '../../web/src/models/settings-menu.ts'
+import { watchView } from '../../web/src/models/watch.ts'
 import { PanelProvider } from '../../web/src/state/PanelProvider.tsx'
 import { board, payload, renderInBoard } from './support/board.tsx'
 import { answers, restoreFetch, sent } from './support/fetch-answers.ts'
@@ -39,6 +40,8 @@ const entry = (items: readonly MenuEntry[], id: string) =>
   items.find(i => 'id' in i && i.id === id) as unknown as Sub | undefined
 const lines = (sub: Sub | undefined) =>
   (sub?.submenu ?? []).map(i => ('separator' in i ? '---' : `${i.id}${i.checked ? ' ✓' : ''}`))
+const offNote = (items: readonly MenuEntry[], id: string) =>
+  (entry(items, id)?.submenu[0] as { note?: string } | undefined)?.note
 const ids = (items: readonly MenuEntry[]) => items.flatMap(i => ('id' in i ? [i.id] : []))
 const OFF = { watches: false, decisions: false, journal: false }
 
@@ -64,9 +67,15 @@ test('Watches, Decisions and Away journal come after Threads, before Auto-compac
   expect(lines(entry(items, 'decisions'))).toEqual(['decisions:off ✓', 'decisions:on'])
   expect(lines(entry(items, 'journal'))).toEqual(['journal:off ✓', 'journal:on'])
   expect(['watches', 'decisions', 'journal'].map(id => [entry(items, id)?.label, entry(items, id)?.note])).toEqual([
-    ['Watches', 'A waiting session is woken only when its check command says it happened. New sessions learn it.'],
-    ['Decisions', 'Questions with options and a recommended answer, in one queue. New sessions learn it.'],
-    ['Away journal', 'Notes what changed while you were away and shows it when you come back.'],
+    [
+      'Watches',
+      'Wakes a waiting session only when its probe fires. Sessions already running learn it at their next start.',
+    ],
+    [
+      'Decisions',
+      'Questions with options and a default, in one queue. Sessions already running learn it at their next start.',
+    ],
+    ['Away journal', 'Shows what changed while you were away.'],
   ])
   expect(entry(items, 'watches')?.submenu.map(i => ('label' in i ? i.label : '---'))).toEqual(['Off', 'On'])
 })
@@ -104,8 +113,11 @@ test('under Threads while they are on: Case files and Verified done, a check eac
     'threadsVerify:off ✓',
   ])
   expect(on?.submenu.slice(4).map(i => ('label' in i ? [i.label, i.note] : []))).toEqual([
-    ['Case files', "A thread keeps a case's reference, state and sessions. New sessions learn it."],
-    ['Verified done', "A worker's done counts only after a fresh session has checked it."],
+    [
+      'Case files',
+      "A thread keeps a case's reference, state and sessions. Sessions already running learn it at their next start.",
+    ],
+    ['Verified done', "A worker's done counts once a new session has checked it."],
   ])
   // With Team's sharing too: after it.
   const shared = entry(
@@ -133,9 +145,7 @@ test('Russian, and gray without the board with the reason instead of the line', 
     'Решения',
     'Журнал отсутствия',
   ])
-  expect(entry(items, 'journal')?.note).toBe(
-    'Записывает, что менялось, пока вас не было, и показывает это, когда вы вернётесь.',
-  )
+  expect(entry(items, 'journal')?.note).toBe('Показывает, что менялось, пока вас не было.')
   expect(entry(items, 'watches')?.submenu.map(i => ('label' in i ? i.label : ''))).toEqual(['Выключено', 'Включено'])
   expect(
     entry(items, 'threads')
@@ -190,6 +200,88 @@ test('every new string: English and Russian, no long dashes', () => {
       expect(t(key)).not.toMatch(/[\u2013\u2014]/)
     }
   for (const key of keys) expect(ru(key)).not.toBe(en(key))
+})
+
+test("Off says what it leaves behind: watches no longer checked, defaults that will not run; the journal's error in its line", () => {
+  const items = settingsMenu({
+    ...now,
+    watches: true,
+    watchesRunning: 2,
+    decisions: true,
+    decisionsDefaults: true,
+    defaultsRunning: 1,
+    journal: true,
+    journalError: 'journal.db could not be opened',
+  })
+  const offOf = (id: string) => offNote(items, id)
+  expect(offOf('watches')).toBe('2 watches stop being checked until this is on again')
+  expect(offOf('decisions')).toBe('1 default will not run')
+  expect(entry(items, 'journal')?.note).toBe('On, but nothing is recorded: journal.db could not be opened')
+  expect(lines(entry(items, 'journal'))).toEqual(['journal:off', 'journal:on ✓'])
+  // Nothing running, or off already: no such line.
+  const quiet = settingsMenu({ ...now, watches: true, decisions: false, defaultsRunning: 3, journal: true })
+  expect(offNote(quiet, 'watches')).toBeUndefined()
+  expect(offNote(quiet, 'decisions')).toBeUndefined()
+  expect(entry(quiet, 'journal')?.note).toBe('Shows what changed while you were away.')
+  const ruItems = settingsMenu({
+    ...now,
+    t: ru,
+    watches: true,
+    watchesRunning: 5,
+    decisions: true,
+    decisionsDefaults: true,
+    defaultsRunning: 2,
+  })
+  expect(offNote(ruItems, 'watches')).toBe('5 наблюдений не будут проверяться, пока наблюдения выключены')
+  expect(offNote(ruItems, 'decisions')).toBe('2 ответа по умолчанию не сработают')
+})
+
+test('what Off leaves behind, counted from the payload: watches being checked, defaults set and not held', () => {
+  const watch = (id: string, off?: true) => ({
+    id,
+    key: id,
+    kind: 'watch',
+    text: 'x',
+    next: 0,
+    probe: { cmd: 'exit 1', everyMs: 60_000, timeoutMs: 1000 },
+    ...(off && { off }),
+  })
+  const d = (defaultAt: number | null, held = false) => ({ defaultAt, held })
+  expect(
+    featuresNow({
+      watches: true,
+      schedules: [watch('a'), watch('b'), { id: 'r', kind: 'reminder' }],
+      decisions: { defaults: true, items: [d(5), d(null), d(9, true)] },
+      journal: { strip: null, last: null, error: 'no db' },
+    }),
+  ).toEqual({
+    watches: true,
+    decisions: true,
+    decisionsDefaults: true,
+    journal: true,
+    journalError: 'no db',
+    watchesRunning: 2,
+    defaultsRunning: 1,
+  })
+  // Watches off: the ones left are not checked, nothing to count.
+  expect(featuresNow({ schedules: [watch('a', true)] })).toEqual({ watches: false, decisions: false, journal: false })
+})
+
+test('a watch the payload marks off: the card and the sheet say it is not checked, not when it was last checked', () => {
+  const w = {
+    id: 'a1b2c3',
+    key: 's1',
+    name: 'anna',
+    kind: 'watch' as const,
+    text: 'CI',
+    next: 0,
+    created: 0,
+    lastCheck: Date.now() - 240_000,
+    probe: { cmd: 'exit 1', everyMs: 600_000, timeoutMs: 1000 },
+  }
+  expect(watchView(w, Date.now(), en).state).toBe('checked 4 min ago, nothing yet')
+  expect(watchView({ ...w, off: true }, Date.now(), en).state).toBe('not checked: watches are off')
+  expect(watchView({ ...w, off: true }, Date.now(), ru).state).toBe('не проверяется: наблюдения выключены')
 })
 
 test('the state as the payload says it: off without each line; defaults only while decisions are on', () => {

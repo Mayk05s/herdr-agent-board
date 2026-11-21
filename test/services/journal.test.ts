@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite'
 import { expect, onTestFinished, test } from 'bun:test'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { journalFile, journalStore, openJournalDb } from '../../src/adapters/journal-store.ts'
 import { KEEP_MS } from '../../src/core/journal.ts'
 import type { Presence } from '../../src/core/presence.ts'
@@ -465,4 +465,20 @@ test('a session seen under its pane key first, then its session id: one row, a l
   const list = j.list(t0)
   expect(list?.rows.map(r => [r.key, r.kind])).toEqual([[sid, 'owner']])
   expect(list?.rest).toEqual({ work: 0, idle: 0 })
+})
+
+test('on in config.json with journal.db that does not open: the view says on, with the error, for Settings (#596)', () => {
+  fresh()
+  // A folder where the file goes: it cannot be opened.
+  mkdirSync(journalFile(), { recursive: true })
+  const { j } = journalOf({ cfg: { returnMinutes: 30 } })
+  j.observe([item('anna')])
+  const view = j.view()
+  expect(view).toMatchObject({ strip: null, last: null })
+  expect(typeof view?.error).toBe('string')
+  expect(view?.error).not.toBe('')
+  // Off in config.json: nothing, as before.
+  const off = journalOf({ cfg: { returnMinutes: 30, on: false } })
+  off.j.observe([item('anna')])
+  expect(off.j.view()).toBeNull()
 })

@@ -12,7 +12,7 @@ import { decisionsConfig } from '../../src/core/decisions.ts'
 import { journalConfig } from '../../src/core/journal.ts'
 import { useLanguage } from '../../src/core/lang.ts'
 import { watchesConfig } from '../../src/core/watches.ts'
-import { threadsConfig, verifyConfig } from '../../src/core/work-threads.ts'
+import { threadsConfig, verifyConfig, verifyKeptOff } from '../../src/core/work-threads.ts'
 import { dispatch } from '../../src/server/http.ts'
 import { featureSettingsRoute } from '../../src/server/routes/settings.ts'
 import { remoteRefusal } from '../../src/server/streams.ts'
@@ -120,6 +120,15 @@ test('a switch already in the state asked changes nothing, and touches no other 
   expect(config().threads).toEqual(hand.threads)
 })
 
+test('a switch already in the state asked leaves the value exactly as written: {}, false, a value that reads as off', () => {
+  fresh({ watches: {}, journal: false, decisions: 'yes' })
+  expect(editFeatures({ watches: true, journal: false, decisions: false }).ok).toBe(true)
+  expect(config()).toEqual({ watches: {}, journal: false, decisions: 'yes' })
+  writeConfig({ decisions: {} })
+  expect(editFeatures({ decisionsDefaults: true }).ok).toBe(true)
+  expect(config().decisions).toEqual({})
+})
+
 test('anything that is not a switch: refused in words, nothing written', () => {
   fresh({ language: 'en', watches: true })
   const before = readFileSync(configFile(), 'utf8')
@@ -199,6 +208,32 @@ test('verified done: off keeps model, lanes and brief under "on": false; on brin
   expect(threadsConfig(config().threads)?.verify).toMatchObject({ model: null, lanes: [], brief: null })
 })
 
+test('threads off and on again keeps agents, share: false, cases and verify\'s fields (#597); every reader takes "on": false as off', () => {
+  const section = { agents: false, share: false, cases: true, verify: { model: 'opus', lanes: ['atlas'] } }
+  fresh({ threads: section })
+  expect(editThreads({ mode: 'none' })).toEqual({ ok: true, on: false })
+  expect(config().threads).toEqual({ ...section, on: false })
+  expect(threadsConfig(config().threads)).toBeNull()
+  expect(threadsPayload({ threads: config().threads })).toBeNull()
+  expect(verifyKeptOff(config().threads)).toBe(true)
+  // Off: sharing, case files and verify are refused, the file as it was.
+  const before = readFileSync(configFile(), 'utf8')
+  for (const body of [{ share: true }, { cases: false }, { verify: true }])
+    expect(editThreads(body)).toEqual({ ok: false, error: 'Threads are off (config.json: "threads")' })
+  expect(readFileSync(configFile(), 'utf8')).toBe(before)
+  // Off again changes nothing.
+  expect(editThreads({ mode: 'none' }).ok).toBe(true)
+  expect(config().threads).toEqual({ ...section, on: false })
+  // On, with either mode: the section back, still kept off the hub.
+  expect(editThreads({ mode: 'agents' })).toEqual({ ok: true, on: true })
+  expect(config().threads).toEqual({ share: false, cases: true, verify: section.verify })
+  expect(threadsConfig(config().threads)).toMatchObject({ agents: true, share: false, cases: true })
+  expect(threadsConfig(config().threads)?.verify).toMatchObject({ model: 'opus', lanes: ['atlas'] })
+  expect(editThreads({ mode: 'none' }).ok).toBe(true)
+  expect(editThreads({ mode: 'mine' }).ok).toBe(true)
+  expect(config().threads).toEqual({ share: false, cases: true, verify: section.verify, agents: false })
+})
+
 test("the payload's threads line: cases and verify only while on; every other shape as before", () => {
   isolatedHome()
   expect(JSON.stringify(threadsPayload({ threads: true }))).toBe('{"rev":0,"needsOwner":0}')
@@ -238,7 +273,7 @@ test('the route stays on the computer: every remote listener refuses it, the own
   expect('watches' in config()).toBe(false)
   expect(await post({ watches: true })).toEqual({ status: 200, body: { ok: true } })
   expect(config().watches).toBe(true)
-  expect((await post({ watches: 'on' })).status).toBe(409)
+  expect((await post({ watches: 'on' })).status).toBe(400)
 })
 
 test('a running board: each switch from Settings shows in its payload at once, and goes again; untouched, the payload has none of it', async () => {

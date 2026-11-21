@@ -60,7 +60,7 @@ import { MAX_NAME } from '../core/team-wire.ts'
 import { boardPorts, forwardSpec, publicHosts, sshArgs, tunnelConfig, tunnelProblems } from '../core/tunnel.ts'
 import type { Config } from '../core/types.ts'
 import { watchesConfig } from '../core/watches.ts'
-import { threadsConfig } from '../core/work-threads.ts'
+import { threadsConfig, verifyKeptOff } from '../core/work-threads.ts'
 import { workdeskConfig } from '../core/workdesk.ts'
 import { workdeskEventsConfig } from '../core/workdesk-events.ts'
 import { teamDesktop } from '../integrations/team-toast.ts'
@@ -1433,6 +1433,23 @@ export async function startServer({
   })
   // A reminder for a node's card goes through its node (#501): asked only for a key with a device's
   // prefix, which exists only with `nodes`.
+  // Verified done turned off (#596): its held dones go to the owner once, as it goes off. At start, only
+  // a config that still keeps a verify section turned off is looked at (switched off while the board
+  // was not running); a board that never had verify reads nothing.
+  let verifyWas = !!threadsConfig(cfg.threads)?.verify
+  const verifyGone = (): void => {
+    try {
+      verifier.switchedOff()
+    } catch (err) {
+      log(`verify: ${messageOf(err)}`)
+    }
+  }
+  const verifyFollow = (): void => {
+    const on = !!threadsConfig(cfg.threads)?.verify
+    if (verifyWas && !on) verifyGone()
+    verifyWas = on
+  }
+  if (!verifyWas && verifyKeptOff(cfg.threads)) verifyGone()
   const scheduler = startScheduler({ deps, onChange: refresh, remote: () => nodeProxy, verify: verifier })
   workdesk.configChanged()
   workdeskDialog.configChanged()
@@ -1498,6 +1515,7 @@ export async function startServer({
       doorFollows()
       linksFollow()
       watchesFollow()
+      verifyFollow()
       await board.refresh()
       ownerTick()
     },

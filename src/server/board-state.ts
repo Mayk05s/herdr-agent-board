@@ -1,6 +1,6 @@
 // The board as the web page sees it: the latest items, whether they are fresh, and the payload
 // GET /api/board answers with and the event stream pushes.
-import { statSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { readArchiveLog } from '../adapters/archive-store.ts'
 import { readUsageFile } from '../adapters/claude-home.ts'
 import { createEdgeLog, type EdgeLog } from '../adapters/edge-log.ts'
@@ -9,7 +9,7 @@ import { notify } from '../adapters/herdr.ts'
 import { createLinks } from '../adapters/links.ts'
 import { usageFileFor } from '../adapters/paths.ts'
 import { forgetProfilePanes } from '../adapters/profile-panes.ts'
-import { listEntries, listWatches, readLog } from '../adapters/schedule-store.ts'
+import { listEntries, listWatches, readLog, watchesDir } from '../adapters/schedule-store.ts'
 import { COLUMNS } from '../core/board.ts'
 import { categoryInfo, colorHex, laneRank, PALETTE } from '../core/categories.ts'
 import { compactDefaultText } from '../core/compact.ts'
@@ -34,6 +34,7 @@ import type {
 import type { PresenceView } from '../core/presence.ts'
 import { DEFAULT_PROFILE, type Profile, profileLabel } from '../core/profiles.ts'
 import type { RemoteView } from '../core/remote.ts'
+import type { ScheduleEntry } from '../core/schedule-rules.ts'
 import type { SetupSummary } from '../core/setup.ts'
 import { todosConfig } from '../core/todos.ts'
 import type { Item } from '../core/types.ts'
@@ -277,6 +278,21 @@ export function createBoardState({
   let stale = true
   let lastSuccessfulRefreshAt: number | null = null
   let payload = ''
+  // Watches turned off (#596) with watches still set: the page shows them as not checked. Null until
+  // the first payload with watches off looks for the folder once, so a board that never had watches
+  // (no folder) reads nothing on its refreshes.
+  let offWatches: boolean | null = null
+
+  /** The watches for the payload: all of them while on; while off, the ones left, marked `off`. */
+  function watchesFor(): ScheduleEntry[] {
+    if (watchesConfig(cfg.watches)) {
+      offWatches = true
+      return listWatches().map(({ claim, ...watch }) => watch)
+    }
+    if (offWatches === null) offWatches = existsSync(watchesDir())
+    if (!offWatches) return []
+    return listWatches().map(({ claim, ...watch }) => ({ ...watch, off: true as const }))
+  }
 
   /** The board as clients see it, without the time of the last successful refresh. */
   function board(): Omit<BoardPayload, 'lastSuccessfulRefreshAt'> {
@@ -315,8 +331,8 @@ export function createBoardState({
     const theirs = others?.items.map(({ todos: own, ...rest }) => (todos && own ? { ...rest, todos: own } : rest))
     // The schedule without the scheduler's bookkeeping; the log is what was sent or missed lately.
     const schedules = listEntries().map(({ claim, tried, waited, ...entry }) => entry)
-    // Watches (#486) only while config.json turns them on: off, the page sees none.
-    if (watchesConfig(cfg.watches)) schedules.push(...listWatches().map(({ claim, ...watch }) => watch))
+    // Watches (#486): while config.json turns them on; off, the ones still set, marked as not checked (#596).
+    schedules.push(...watchesFor())
     // The usage the pill shows: the board's own profile's (the default one's when its env points to
     // none), as before profiles.
     const profiles = boardProfiles(deps, items)

@@ -81,6 +81,8 @@ export function durationWords(ms: number): string {
 }
 
 const FLAGS = ['--option', '--recommend', '--default-after'] as const
+/** The flags `board ask` takes while decisions are on; off, `board ask` says they are words of the question (#596). */
+export const DECISION_FLAGS: readonly string[] = FLAGS
 
 /**
  * `board ask`'s words: the flags among `before` (the words before a lone `--`), the question the

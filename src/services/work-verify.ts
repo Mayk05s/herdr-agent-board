@@ -25,6 +25,7 @@ import type { Config, Item } from '../core/types.ts'
 import {
   briefFor,
   isSession,
+  OWNER,
   oneLine,
   type Party,
   SUMMARY_MAX,
@@ -85,7 +86,15 @@ export interface Verifier {
   sweep(items: () => Promise<Item[]>): Promise<void>
   /** A `verify` entry is due: the time limit, or the archive after the verdict. */
   due(entry: ScheduleEntry, items: Item[]): Promise<void>
+  /**
+   * Verified done was turned off (Settings, config.json; #596): every held done goes to the owner,
+   * its verifier's run ended as a verdict ends it (the verifier archived once free). How many went.
+   */
+  switchedOff(): number
 }
+
+/** What a held done waits on once verified done was turned off (#596). */
+export const SWITCHED_OFF = 'verification was switched off'
 
 /** The board's verifier side over `host`. */
 export function createVerifier(host: VerifyHost): Verifier {
@@ -320,6 +329,37 @@ export function createVerifier(host: VerifyHost): Verifier {
     })
   }
 
+  function switchedOff(): number {
+    // Threads may be off as well: the entries are written all the same, the owner finds them when they are on.
+    const cfg = threadsConfig(host.cfg.threads) ?? (threadsConfig(true) as ThreadsConfig)
+    return host.withDb(db => {
+      if (!db) return 0
+      let n = 0
+      for (const head of heldThreads(db)) {
+        const run = head.verify?.run
+        try {
+          postEntry(ctxOf(db, cfg, OWNER), head, {
+            type: 'note',
+            text: SWITCHED_OFF,
+            status: 'owner',
+            waitingOn: SWITCHED_OFF,
+            ...(run && { set: { verifier: null } }),
+            ...(sharingOf(head) && { private: true }),
+          })
+          n++
+        } catch (err) {
+          host.log(`verify ${head.key}: ${messageOf(err)}`)
+          continue
+        }
+        started.delete(head.id)
+        // The verifier, if one runs, ends as after a verdict: its limit goes to the archive phase.
+        if (run) endVerifierRun(run.key, now())
+      }
+      if (n) host.log(`verify: switched off, ${n} held done${n === 1 ? '' : 's'} sent to the owner`)
+      return n
+    })
+  }
+
   async function due(entry: ScheduleEntry, items: Item[]): Promise<void> {
     const cfg = threadsConfig(host.cfg.threads)
     const thread = typeof entry.thread === 'string' ? entry.thread : ''
@@ -392,7 +432,7 @@ export function createVerifier(host: VerifyHost): Verifier {
     }))
   }
 
-  return { sweep, due }
+  return { sweep, due, switchedOff }
 }
 
 /** The profile facts a start keeps: those of the worker's card, or of its archive record. */

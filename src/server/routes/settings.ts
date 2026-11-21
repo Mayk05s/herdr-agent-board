@@ -24,9 +24,19 @@ export const settingsRoute = (): Route => edit('/api/settings', editSettings)
 export const categoriesRoute = (): Route => edit('/api/categories', editCategories)
 /**
  * Settings → Watches, Decisions and Away journal (#596), { watches?, decisions?, decisionsDefaults?,
- * journal? } (editFeatures). On this computer only (core/remote.ts localOnly), as Settings → Threads.
+ * journal? } (editFeatures). On this computer only (core/remote.ts localOnly), as Settings → Threads,
+ * and its refusals answer 400 as that one's do.
  */
-export const featureSettingsRoute = (): Route => edit('/api/feature-settings', editFeatures)
+export const featureSettingsRoute = (): Route => ({
+  method: 'POST',
+  path: '/api/feature-settings',
+  guard: ['board-header'],
+  // A refusal answers 400, as Settings → Threads' does.
+  async handle(_req, ctx) {
+    const r = editFeatures(await ctx.rawBody())
+    return json(r.ok ? 200 : 400, r)
+  },
+})
 /**
  * The Profiles panel's renames, colors, show/hide and folders added (this computer's home folder),
  * by `editProfile`, which installs into a profile it shows (services/profiles.ts); { op: 'install',

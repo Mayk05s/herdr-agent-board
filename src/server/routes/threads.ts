@@ -10,7 +10,7 @@
 //   POST /api/threads/<key or id> {op: 'share', to, history?} | 'unshare' | 'decline-share'
 //                                 | 'take' | 'decline' (an offer) | 'history'
 //   POST /api/threads {op: 'track', topic, lane}               a Team topic as a thread (13.3)
-//   POST /api/threads-settings {mode?, share?}                 Settings → Threads (#410), also while off
+//   POST /api/threads-settings {mode?, share?, cases?, verify?}  Settings → Threads (#410, #596), also while off
 //   GET  /api/threads/events                                               SSE: `rev` on each change
 //
 // A write over HTTP is the owner's: the party comes from the path, never from the body (3.2). A
@@ -515,8 +515,10 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
   }
 
   /**
-   * Settings → Threads (#410), { mode?, share? }: config.json's `threads` under its lock; turned on,
-   * the skill goes where the install action puts it. The running board follows the file (liveConfig).
+   * Settings → Threads (#410), { mode?, share?, cases?, verify? } (case files and verified done,
+   * #596): config.json's `threads` under its lock; turned on, the skill goes where the install action
+   * puts it. The running board follows the file (liveConfig). The change is made once config.json is
+   * written: a skill that could not be copied after it is said in `note`, the answer still ok.
    */
   function settings(body: Record<string, unknown>): Response {
     const r = editThreads(body)
@@ -525,9 +527,9 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
       try {
         app.skill()
       } catch (err) {
-        return json(500, {
-          ok: false,
-          error: t('thread.err.skill', { error: err instanceof Error ? err.message : String(err) }),
+        return json(200, {
+          ok: true,
+          note: t('thread.err.skill', { error: err instanceof Error ? err.message : String(err) }),
         })
       }
     }

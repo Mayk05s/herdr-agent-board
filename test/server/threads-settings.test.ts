@@ -39,18 +39,23 @@ function writeConfig(raw: Record<string, unknown>): void {
   writeFileSync(configFile(), JSON.stringify(raw))
 }
 
-test('each mode into config.json: off takes the key out, mine is agents false, agents is true', () => {
+test('each mode into config.json: off takes `true` out and keeps a section under "on": false (#597), mine is agents false, agents is true', () => {
   isolatedHome()
   useLanguage('en')
   writeConfig({ language: 'en', todos: true })
   expect(editThreads({ mode: 'agents' })).toEqual({ ok: true, on: true })
   expect(config().threads).toBe(true)
+  expect(editThreads({ mode: 'none' })).toEqual({ ok: true, on: false })
+  expect('threads' in config()).toBe(false)
   expect(editThreads({ mode: 'mine' })).toEqual({ ok: true, on: true })
   expect(config().threads).toEqual({ agents: false })
   expect(editThreads({ mode: 'none' })).toEqual({ ok: true, on: false })
-  expect('threads' in config()).toBe(false)
+  expect(config().threads).toEqual({ agents: false, on: false })
+  expect(editThreads({ mode: 'mine' })).toEqual({ ok: true, on: true })
+  expect(config().threads).toEqual({ agents: false })
   // Every other key as it was.
-  expect(config()).toEqual({ language: 'en', todos: true })
+  const { threads: _t, ...rest } = config()
+  expect(rest).toEqual({ language: 'en', todos: true })
 })
 
 test("the section's other fields stay; sharing changes threads that are on and is refused while off", () => {

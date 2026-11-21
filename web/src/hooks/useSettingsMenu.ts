@@ -27,6 +27,7 @@ import {
   type FeatureSwitch,
   featuresNow,
   offersMokupilot,
+  type SettingsNow,
   settingPicked,
   settingsMenu,
   threadsNow,
@@ -130,6 +131,8 @@ export interface SettingsDeps {
   /** Under Threads: case files and verified done on (#596); none: no item. */
   threadsCases?(): boolean | undefined
   threadsVerify?(): boolean | undefined
+  /** What Off would leave behind and the journal's error (#596). */
+  featureExtras?(): Pick<SettingsNow, 'watchesRunning' | 'defaultsRunning' | 'journalError'>
 }
 
 /** What Settings → Threads asks the board for (POST /api/threads-settings, #410; case files and verified done, #596). */
@@ -188,6 +191,7 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
       journal: deps.journal?.(),
       threadsCases: deps.threadsCases?.(),
       threadsVerify: deps.threadsVerify?.(),
+      ...deps.featureExtras?.(),
     })
     const source: MenuSource = keyboard ? 'keyboard' : deps.coarse() ? 'touch' : 'mouse'
     deps.menu.open(items, {
@@ -543,7 +547,14 @@ export function useSettingsMenu(
       chooseThreads: body => {
         const { t, board } = latest.current
         if (!board.canEdit) return board.toast(t('live.off'), true)
-        api.post('/api/threads-settings', body).catch(err => board.toast(errorText(err, t), true))
+        api
+          .post('/api/threads-settings', body)
+          // Made, but the agents' skill was not copied after it: said, as an error.
+          .then(r => {
+            const note = (r as { note?: unknown } | null)?.note
+            if (typeof note === 'string' && note) board.toast(note, true)
+          })
+          .catch(err => board.toast(errorText(err, t), true))
       },
       // An older board sends no default: no Auto-compact item.
       compact: () => latest.current.board.data?.compactDefault,
@@ -565,6 +576,14 @@ export function useSettingsMenu(
       journal: () => localFeatures()?.journal,
       threadsCases: () => localFeatures()?.threadsCases,
       threadsVerify: () => localFeatures()?.threadsVerify,
+      featureExtras: () => {
+        const f = localFeatures()
+        return {
+          ...(f?.watchesRunning && { watchesRunning: f.watchesRunning }),
+          ...(f?.defaultsRunning && { defaultsRunning: f.defaultsRunning }),
+          ...(f?.journalError && { journalError: f.journalError }),
+        }
+      },
       chooseFeature: body => {
         const { t, board } = latest.current
         if (!board.canEdit) return board.toast(t('live.off'), true)
