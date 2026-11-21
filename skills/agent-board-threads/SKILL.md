@@ -77,6 +77,26 @@ Where the owner turned case files on (`board thread --help` lists `--ref`, `--st
 - For depth, `board thread show <key> --full` (in a fork or a subagent). A question only a past session can answer goes to it by name as a message, and only then: it wakes with its whole conversation. Never resume a past session yourself; `board resume` is the owner's way back.
 - The reference, the state and the session list stay on this board, also on a shared thread: an entry that carries only a state or a reference is private, and the state of an entry with text does not go along.
 
+## Verified done
+
+On a thread that asks for verification (`verify on` in `show`), your `done` is held: the board
+starts a fresh verifier that checks the work against the acceptance lines (`accept:` in `show`) and
+the checklist, knowing nothing of your conversation. Write the done so a stranger can check it: what
+you changed, where (paths, record ids, the pull request), how you tested it, and what you could not
+do. A fail comes back to you as one line ("verification failed: ..."): read the reasons with
+`board thread show <key>`, fix, and say done again. The second fail in a row goes to the owner. If the owner keeps your held
+done open, you hear that in one line too: the work is back with you.
+While your done is held, another done is refused: `post --status doing` takes it back first.
+You cannot turn verification off on a thread you hold or whose done is held.
+
+Handing work out: `board thread new --verify --accept "<what must be true>" ... "<title>"`, one
+`--accept` per check, each one checkable by someone who only sees the result. You hear "done
+(verified)" when it passes, nothing while it is held.
+
+If you are the verifier (your first message starts with `[board verify]`): change nothing, look at
+everything yourself, and end with exactly one `board thread verdict <key> pass --file <report> |
+fail | unsure "<line>"`, run in your own pane: herdr must confirm the session it runs in.
+
 ## What the board does on its own
 
 - Who wrote an entry is set from where the write came from: a `board` command run in your session writes as you, never as the owner or another session.

@@ -216,6 +216,8 @@ export type FeedItem =
         | 'shared'
         | 'unshared'
         | 'said'
+        | 'verifier'
+        | 'verdict'
       to: ThreadStatus
     }
   | { kind: 'ask'; entry: ThreadEntryView; open: boolean }
@@ -238,8 +240,9 @@ export function feedOf(head: ThreadHead, entries: readonly ThreadEntryView[], op
   const shared = sharingOf(head) !== null
   let h: ThreadHead | null = null
   let day = ''
+  const { verify: _verify, ...rest } = head
   const blank: ThreadHead = {
-    ...head,
+    ...rest,
     title: '',
     summary: '',
     status: 'next',
@@ -285,23 +288,27 @@ export function feedOf(head: ThreadHead, entries: readonly ThreadEntryView[], op
             : 'said'
         : e.closed
           ? 'closed'
-          : proposed
-            ? 'proposed'
-            : confirmed
-              ? 'confirmed'
-              : kept
-                ? 'kept'
-                : set.status !== undefined && changed
-                  ? 'status'
-                  : !words &&
-                      !e.files?.length &&
-                      !e.links?.length &&
-                      set.state !== undefined &&
-                      Object.keys(set).length === 1
-                    ? 'state'
-                    : !words && !e.files?.length && !e.links?.length && Object.keys(set).length
-                      ? 'fields'
-                      : null
+          : set.verdict
+            ? 'verdict'
+            : set.verifier
+              ? 'verifier'
+              : proposed
+                ? 'proposed'
+                : confirmed
+                  ? 'confirmed'
+                  : kept
+                    ? 'kept'
+                    : set.status !== undefined && changed
+                      ? 'status'
+                      : !words &&
+                          !e.files?.length &&
+                          !e.links?.length &&
+                          set.state !== undefined &&
+                          Object.keys(set).length === 1
+                        ? 'state'
+                        : !words && !e.files?.length && !e.links?.length && Object.keys(set).length
+                          ? 'fields'
+                          : null
     if (did) out.push({ kind: 'status', entry: e, did, to: after.status })
     if (words || e.files?.length || e.links?.length) out.push({ kind: 'message', entry: e })
   }
