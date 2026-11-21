@@ -6,6 +6,8 @@ import {
   fitToolbar,
   moreAlert,
   moreEntries,
+  NARROW_MAX,
+  narrowToolbar,
   oneRowFits,
   ROW_GAP,
   TOOLBAR_PRIORITY,
@@ -175,5 +177,15 @@ describe('what More lists', () => {
     expect(moreAlert(moreEntries(entries, ['sched-open']))).toBe(true)
     expect(moreAlert(moreEntries(entries, ['todos-open', 'archive-open']))).toBe(false)
     expect(moreAlert([])).toBe(false)
+  })
+})
+
+describe('a phone’s width (#599)', () => {
+  test('two rows up to a phone’s width are a phone’s; one row, a wider toolbar or no width yet are not', () => {
+    expect(NARROW_MAX).toBe(480)
+    for (const width of [320, 358, 398, 430, 480]) expect(narrowToolbar(width, true)).toBe(true)
+    for (const width of [481, 560, 768, 1100]) expect(narrowToolbar(width, true)).toBe(false)
+    expect(narrowToolbar(390, false)).toBe(false)
+    expect(narrowToolbar(0, true)).toBe(false)
   })
 })
