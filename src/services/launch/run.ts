@@ -29,7 +29,7 @@ import {
   worktreeOpen,
 } from '../../adapters/herdr.ts'
 import { readNodeEnv } from '../../adapters/node-env.ts'
-import { pause } from '../../adapters/pacing.ts'
+import { knobMs, pause } from '../../adapters/pacing.ts'
 import { run } from '../../adapters/process.ts'
 import { keyTowardYes, sameFolder, type TrustDialog, trustDialog } from '../../core/dialogs/trust.ts'
 import { t } from '../../core/lang.ts'
@@ -50,7 +50,7 @@ import type { LaunchPlace } from '../../core/placement.ts'
 import type { Item, LaunchFailure, LaunchState, LaunchStep } from '../../core/types.ts'
 import type { Deps } from '../deps.ts'
 import { LaunchError, type LaunchEvents, launcherFor, notePane, openInProfile } from './launcher.ts'
-import { boxDraft, claudeRename, inputEmpty, piName, takenNames, typeLine } from './prompt.ts'
+import { claudeRename, inputEmpty, piName, screenNow, takenNames, typeLine } from './prompt.ts'
 import type { LaunchRequest } from './request.ts'
 
 /** A launch as the board keeps it while it runs. */
@@ -153,6 +153,8 @@ export interface LaunchRunner {
 }
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+/** How long a launch waits for a dialog to be answered in its terminal, as for any dialog on the way up. */
+const DIALOG_WAIT_MS = 15 * 60_000
 const ready = (agent: HerdrAgent | null): boolean => agent?.status === 'idle' || agent?.status === 'done'
 
 /**
@@ -274,7 +276,7 @@ export function launchRunner({
         // Another dialog holds it: the user answers it in herdr, the board waits and goes on.
         l.state = 'waiting'
         step(l, 'dialog')
-        kind = (await untilReady(l, 15 * 60_000))?.kind || kind
+        kind = (await untilReady(l, DIALOG_WAIT_MS))?.kind || kind
         l.state = 'starting'
       }
       // What the launcher did not get to: herdr's own start named the agent, so /rename and the
@@ -391,8 +393,14 @@ export function launchRunner({
       })
       // A /rename Claude did not take may still be in its box: the message would go with it as
       // one, the name eating it (#479). Asked only when no rename showed; a box herdr cannot show
-      // (null) is taken for empty, as before.
-      left = !renamed && !!l.message && !!(await boxDraft(pane))
+      // (null) is taken for empty, as before. A dialog there is waited out first (pastDialog), and
+      // the name tried once more: the one typed while it was up went to the dialog.
+      if (!renamed && l.message) {
+        let box = await pastDialog(l, pane, 'rename')
+        if (box.waited && (await claudeRename(pane, l.name).catch(() => false))) box = { draft: '', waited: true }
+        else if (box.waited) box = await pastDialog(l, pane, 'rename')
+        left = !!box.draft
+      }
     } else if (kind === PI_AGENT && !l.resume) {
       step(l, 'rename')
       await piName(pane, l.name).catch(err => deps.log(`launch ${l.name}: /name: ${messageOf(err)}`))
@@ -424,6 +432,37 @@ export function launchRunner({
       if (ready(agent)) return agent
     }
     throw new LaunchError(t(l.dismissed ? 'launch.err.dismissed' : 'launch.err.dialogTimeout'), 'dialog')
+  }
+
+  /**
+   * Asked once the box was found not empty before a name or the first message. A dialog there (one
+   * Claude drew after herdr called it ready: a first-run notice, an upsell, core/dialogs/input-box.ts)
+   * holds the launch as any other dialog does, the card saying so, until it is answered in the
+   * terminal and the box is back; then the launch goes on at `at`. What the box holds then (draft):
+   * '' empty, the text typed in it, null when the screen shows neither a box nor a dialog; waited:
+   * whether a dialog held it.
+   */
+  async function pastDialog(
+    l: Launch,
+    pane: string,
+    at: LaunchStep,
+  ): Promise<{ draft: string | null; waited: boolean }> {
+    let shown = await screenNow(pane)
+    if (shown?.kind !== 'dialog') return { draft: shown ? shown.draft : null, waited: false }
+    l.state = 'waiting'
+    step(l, 'dialog')
+    const deadline = Date.now() + knobMs('BOARD_DIALOG_WAIT_MS', DIALOG_WAIT_MS)
+    // Once it is answered the box takes a moment to be drawn: a screen with neither is waited out too.
+    while (shown?.kind !== 'box') {
+      if (l.dismissed || l.closed || Date.now() >= deadline)
+        throw new LaunchError(t(l.dismissed ? 'launch.err.dismissed' : 'launch.err.dialogTimeout'), 'dialog')
+      await pause(1500)
+      await agentNow(l)
+      shown = await screenNow(pane)
+    }
+    l.state = 'starting'
+    step(l, at)
+    return { draft: shown.draft, waited: true }
   }
 
   /**
@@ -504,8 +543,12 @@ export function launchRunner({
           .catch(err => deps.log(`launch ${l.name}: naming: ${messageOf(err)}`))
     } else if (kind === 'claude') {
       step(l, 'rename')
+      // A box that is not empty may be a dialog Claude drew once herdr called it ready: waited out
+      // when a first message comes after the name. Without one the name alone, which is cosmetic,
+      // holds nothing: it is skipped as before.
+      const empty = (await inputEmpty(pane)) || (!!l.message && (await pastDialog(l, pane, 'rename')).draft === '')
       try {
-        if ((await inputEmpty(pane)) && (await claudeRename(pane, l.name)) && nameAgent) {
+        if (empty && (await claudeRename(pane, l.name)) && nameAgent) {
           const taken = await takenNames()
           await herdr(['agent', 'rename', pane, uniqueSlug(agentSlug(l), taken)])
         }
@@ -527,7 +570,9 @@ export function launchRunner({
     }
     if (l.message) {
       step(l, 'message')
-      if (kind !== PI_AGENT && !(await inputEmpty(pane)))
+      // The second read is of the visible screen (the first one's recent lines are refused while herdr
+      // calls the agent blocked): a box it shows empty there takes the message.
+      if (kind !== PI_AGENT && !(await inputEmpty(pane)) && (await pastDialog(l, pane, 'message')).draft !== '')
         throw new LaunchError(t('launch.err.message.draft'), 'message')
       if (!(await typeLine(pane, l.message))) throw new LaunchError(t('launch.err.message.lost'), 'message')
     }
