@@ -54,7 +54,7 @@ import type { ScheduleEntry } from '../core/schedule-rules.ts'
 import { agentBoardOf, isMirrored } from '../core/thread-import.ts'
 import type { Config } from '../core/types.ts'
 import { safeName } from '../core/upload-name.ts'
-import { caseOnly, cleanRef, cleanState, REF_MAX, STATE_LINES, STATE_MAX, sameRef } from '../core/work-cases.ts'
+import { cleanRef, cleanState, REF_MAX, STATE_LINES, STATE_MAX, sameRef } from '../core/work-cases.ts'
 import {
   ACCEPT_LINE_MAX,
   ACCEPT_MAX,
@@ -476,18 +476,15 @@ export function postEntry(ctx: ThreadsCtx, head: ThreadHead, input: PostInput): 
       throw new ThreadError('owner_only', `${head.key} is shared: only the owner drops it`)
     if ((input.files?.length ?? 0) > 1) throw new ThreadError('files', `${head.key} is shared: one file per entry`)
   }
-  // Verification's own fields (#492) stay on this board: a teammate's board would get an empty line.
-  const verifyOnly =
-    !!shared &&
-    !text &&
-    !links.length &&
-    !input.files?.length &&
-    Object.keys(set).length > 0 &&
-    Object.keys(set).every(k => k === 'verify' || k === 'verifyLane' || k === 'accept')
-  if (verifyOnly) input = { ...input, private: true }
-  // An entry with nothing but case fields (#488: a state, a reference) stays on this board: the
-  // case is this board's working memory, and a peer's board would get an empty line.
-  const priv = !!input.private || caseOnly({ text, set, links, files: input.files ?? [] })
+  // An entry with nothing but fields that stay on this board stays here: case fields (#488: a state,
+  // a reference) on any thread, verification's own (#492) on a shared one, and the two together;
+  // a peer's board would get an empty line.
+  const keys = Object.keys(set)
+  const caseKey = (k: string): boolean => k === 'ref' || k === 'state'
+  const verifyKey = (k: string): boolean => k === 'verify' || k === 'verifyLane' || k === 'accept'
+  const fieldsOnly = !text && !links.length && !input.files?.length && keys.length > 0
+  const home = fieldsOnly && keys.every(k => caseKey(k) || verifyKey(k)) && (keys.every(caseKey) || !!shared)
+  const priv = !!input.private || home
   const out = input.out ?? outOf(ctx, head, priv)
   const me = shared || input.out ? meOf(ctx) : undefined
   const entryId = randomUUID()

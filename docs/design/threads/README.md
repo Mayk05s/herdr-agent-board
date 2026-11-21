@@ -257,7 +257,9 @@ no `verify.profile`, nothing starts and the thread goes to the owner (`error`) s
 or a launch that fails later sends the thread to the owner (`error`). The board's own entries about a
 verifier carry its name and id as their author.
 
-**The brief** (core/work-verify.ts, at most 12,000 characters): who it is and the rule (it changes
+**The brief** (core/work-verify.ts, at most 12,000 characters; the rule, the acceptance lines, the held done,
+the checklist (3,000 characters at most) and a finishing line with the verdict always fit, and the
+thread's oldest entries are what gives way, said in a line): who it is and the rule (it changes
 nothing: no edits, commits, pushes or thread posts; single test files, never a whole suite on a shared
 machine unless the checklist says so), the time limit, the three verdict commands, the acceptance
 lines, the held done's words with its files by path and links, then the thread as #488's case brief
@@ -265,7 +267,10 @@ prints it (`caseBriefText`, 11.8) without its sessions (the verifier asks none o
 then the checklist. On a shared thread no peer's words go in, as the digest's `local` keeps them out
 of a session: the case brief quotes them, so the verifier's copy is built from a thread where a
 title, summary or waiting-on a peer gave (as the feed folds) is replaced by a pointer, and a peer's
-entry keeps its number, time and author but none of its text, fields, files or links. The checklist: `docs/agents/verify-checklist.md` (general: evidence the verifier looked at itself for each
+entry keeps its number, time and author but none of its text, fields, files or links. So does an
+owner's system entry that copies the peers' head (a share or a share again, which carries the title,
+summary and waiting-on the peers hold), and the first entry of a thread made from a Team topic
+(shared as it was made, with the topic's title). The checklist: `docs/agents/verify-checklist.md` (general: evidence the verifier looked at itself for each
 acceptance line, each claim checked against the thing it names, the whole task, nothing changed
 outside it, what could not be checked said plainly), or the file `verify.brief` names, per lane if an
 object (`docs/agents/verify-checklist-code.md` holds #308's list for code).
@@ -309,10 +314,11 @@ private; a pass goes out as a plain `done` with the summary ("done: <summary>"),
 verifier's line or report: the entry main would have sent at once, later. A verdict as such does not
 cross the hub.
 
-**With the key absent** `--verify`, `--accept`, `set --verify` and `verdict` are refused
-(`verify_off`), no done is held, the scheduler reads nothing for it, and every head, line and payload
-is what it was. A thread that asks for verification when the key is removed keeps a done held then:
-the owner confirms it on the panel.
+**With the key absent** `board thread` is main's: its usage leaves out the verify lines, `--verify` and
+`--accept` are unknown flags and `verdict` an unknown command, refused as main refuses any, no done
+is held, the scheduler reads nothing for it, and every head, line and payload is what it was. A
+thread that asks for verification when the key is removed keeps a done held then: the owner confirms
+it on the panel.
 
 ## 4. Storage and sync
 

@@ -13,7 +13,7 @@ import { getThread, setScope, threadByKey } from '../../src/adapters/work-thread
 import type { ScheduleEntry } from '../../src/core/schedule-rules.ts'
 import type { Item } from '../../src/core/types.ts'
 import type { Party, ThreadHead } from '../../src/core/work-threads.ts'
-import { type ThreadCmdContext, threadCmd } from '../../src/entrypoints/thread-cli.ts'
+import { THREAD_USAGE, type ThreadCmdContext, threadCmd, VERIFY_USAGE } from '../../src/entrypoints/thread-cli.ts'
 import { holdEntries } from '../../src/services/archive.ts'
 import {
   commandLauncher,
@@ -223,17 +223,16 @@ test('show and list say a done is held and what verifies it', async () => {
   assert.match((await s.run(master, ['list'])).out, /^atlas-1 · doing, done proposed \(verifying\) · ben/)
 })
 
-test('threads.verify absent: --verify, --accept and verdict are refused, a done is a done, heads carry no verify field', async () => {
+test('threads.verify absent: --verify, --accept and verdict are not there, as on main; a done is a done, heads carry no verify field', async () => {
   const s = setUp(true)
-  assert.deepEqual(await s.json(master, ['new', '--verify', 'X']), {
-    ok: false,
-    error: 'verify_off',
-    message: 'verification is off on this board (threads.verify in config.json)',
-  })
+  // The usage is main's, and the flags and the command are refused as main refuses any unknown one.
+  assert.equal((await s.run(master, ['--help'])).out, THREAD_USAGE)
+  assert.equal((await s.json(master, ['new', '--verify', 'X'])).error, 'usage')
   await s.run(master, ['new', '--to', 'ben', 'Map it'])
-  assert.equal((await s.json(ben, ['post', 'atlas-1', '--accept', 'y'])).error, 'verify_off')
-  assert.equal((await s.json(ben, ['set', 'atlas-1', '--verify', 'on'])).error, 'verify_off')
-  assert.equal((await s.json(ben, ['verdict', 'atlas-1', 'pass', 'ok'])).error, 'verify_off')
+  assert.equal((await s.json(ben, ['post', 'atlas-1', '--accept', 'y'])).error, 'usage')
+  assert.equal((await s.json(ben, ['set', 'atlas-1', '--verify', 'on'])).error, 'usage')
+  const verdict = await s.run(ben, ['verdict', 'atlas-1', 'pass', 'ok'])
+  assert.equal(verdict.err, `no command "board thread verdict"\n${THREAD_USAGE}`)
   assert.equal((await s.run(ben, ['done', 'atlas-1', 'mapped'])).out, 'ok · atlas-1 · done')
   const j = await s.json(master, ['show', 'atlas-1'])
   assert.equal('verify' in j.thread, false)
@@ -849,7 +848,7 @@ test('review 2: a verdict is refused, saying why, when herdr cannot confirm the 
   assert.equal(s.head('atlas-1').proposed?.verify, true)
   const off = setUp(true)
   await off.run(master, ['new', '--to', 'ben', 'Plain'])
-  assert.equal((await off.json(ben, ['verdict', 'atlas-1', 'pass', 'x'], ask({ key: 'x' }))).error, 'verify_off')
+  assert.equal((await off.json(ben, ['verdict', 'atlas-1', 'pass', 'x'], ask({ key: 'x' }))).error, 'usage')
   assert.equal(asked, 1)
 })
 
@@ -942,3 +941,71 @@ test('second pass 1: past the grace with no card and no launch on its way, the l
   assert.deepEqual(s.archived, [])
   assert.equal(key.length, 36)
 })
+
+test('last pass 4: with threads.verify on, the usage adds its own lines after main’s', async () => {
+  const s = setUp()
+  assert.equal((await s.run(master, ['--help'])).out, `${THREAD_USAGE}\n${VERIFY_USAGE}`)
+})
+
+test('last pass 3: on a shared thread an entry with only case and verification fields stays here', async () => {
+  const s = setUp({ agents: true, cases: true, verify: { model: 'opus', lanes: ['vlane'] } })
+  await verifyThread(s)
+  const db = openDb() as BoardDb
+  try {
+    const id = s.head('atlas-1').id
+    db.write('test', tx =>
+      setScope(tx, id, { kind: 'peer', peer: 'peer-ben', topic: `peer-ben/${id}`, key: 'atlas-1', by: 'me', at: NOW }),
+    )
+  } finally {
+    db.close()
+  }
+  const both = await s.json(master, [
+    'post',
+    'atlas-1',
+    '--state',
+    'rows 1-100 mapped, the rest next',
+    '--accept',
+    'rows match',
+  ])
+  assert.equal(both.ok, true, JSON.stringify(both))
+  assert.equal(both.entry.private, true)
+  const set = await s.json(owner, ['set', 'atlas-1', '--ref', 'T-17', '--verify', 'off'])
+  assert.equal(set.ok, true, JSON.stringify(set))
+  assert.equal(set.entry.private, true)
+  // An entry with words still goes out.
+  assert.notEqual((await s.json(master, ['post', 'atlas-1', '--accept', 'one more', 'a note'])).entry.private, true)
+})
+
+for (const how of ['confirm', 'doing'] as const)
+  test(`last pass 5: ${how === 'confirm' ? 'Confirm' : 'the worker’s doing'} before the verifier’s card exists keeps its limit until the card comes`, async () => {
+    const s = setUp()
+    await verifyThread(s)
+    await s.run(ben, ['done', 'atlas-1', 'all rows mapped'])
+    const v = s.verifier()
+    await v.sweep(async () => s.items)
+    const key = (verifierOf(s.head('atlas-1')) as { key: string }).key
+    if (how === 'confirm') {
+      const { confirmClose } = await import('../../src/services/work-threads.ts')
+      const db = openDb() as BoardDb
+      try {
+        const ctx = { db, cfg: { agents: true, gapSec: 60, share: true, verify: null }, actor: owner, now: NOW }
+        confirmClose(ctx, getThread(db, s.head('atlas-1').id) as ThreadHead)
+      } finally {
+        db.close()
+      }
+      assert.equal(s.head('atlas-1').status, 'done')
+    } else {
+      assert.equal((await s.run(ben, ['post', 'atlas-1', '--status', 'doing', 'taking it back'])).code, 0)
+      assert.equal(s.head('atlas-1').proposed, null)
+    }
+    // The next tick moves the limit to its archive phase; no card yet, the launch still starting: it stays.
+    await v.sweep(async () => s.items)
+    expect(limits()[0]).toMatchObject({ key, next: NOW, archive: true })
+    await v.due(limits()[0] as ScheduleEntry, s.items)
+    expect(limits()[0]).toMatchObject({ key, next: NOW + 60_000 })
+    s.at(NOW + 60_000)
+    const verifierItem = { key, name: 'verify-atlas-1', session: key, agent: 'claude', pane: 'wP:p9' } as Item
+    await v.due(limits()[0] as ScheduleEntry, [...s.items, verifierItem])
+    assert.deepEqual(s.archived, [key])
+    assert.deepEqual(limits(), [])
+  })

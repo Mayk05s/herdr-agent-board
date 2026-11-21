@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { THREADS_SKILL } from '../../src/core/setup.ts'
-import { CASES_USAGE, THREAD_USAGE } from '../../src/entrypoints/thread-cli.ts'
+import { CASES_USAGE, THREAD_USAGE, VERIFY_USAGE } from '../../src/entrypoints/thread-cli.ts'
 import { root } from '../support/sandbox.ts'
 
 const text = readFileSync(join(root, 'skills', THREADS_SKILL, 'SKILL.md'), 'utf8')
@@ -22,7 +22,7 @@ function usage(): Map<string, Set<string>> {
   const ops = new Map<string, Set<string>>()
   let op = ''
   // Case files' lines (#488) too: the skill tells agents what they do where the owner turned them on.
-  for (const line of `${THREAD_USAGE}\n${CASES_USAGE}`.split('\n')) {
+  for (const line of `${THREAD_USAGE}\n${CASES_USAGE}\n${VERIFY_USAGE}`.split('\n')) {
     const m = /^board thread ([a-z]+)(.*)$/.exec(line)
     if (m) op = m[1] ?? ''
     else if (!/^\s{20,}/.test(line)) op = ''

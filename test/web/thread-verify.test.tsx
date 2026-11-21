@@ -150,7 +150,7 @@ test('the feed: the verifier started and the verdict, its line and report as the
     />,
     value,
   )
-  expect(html).toContain('started the verifier')
+  expect(html).toContain('starting the verifier')
   expect(html).toContain('verdict: pass · Done')
   expect(html).toContain('report.md')
 })

@@ -630,7 +630,7 @@ export function entryWords(
   else if (s.status) parts.push(`→ ${s.status}`)
   if (s.verify !== undefined) parts.push(`verify ${s.verify ? 'on' : 'off'}`)
   if (s.accept) parts.push(`accept: ${s.accept}`)
-  if (s.verifier) parts.push(`verifier ${s.verifier.name} started`)
+  if (s.verifier) parts.push(`starting verifier ${s.verifier.name}`)
   const peer = e.author.kind === 'peer'
   const said = (t: string): string => (peer ? quotedPeer(t) : t)
   if (e.type === 'ask') parts.push(`asks the owner: ${said(e.text)}`)

@@ -86,12 +86,12 @@ import {
 } from '../services/work-threads.ts'
 import { giveVerdict, type SelfAnswer, verdictGate } from '../services/work-verify.ts'
 
-export const THREAD_USAGE = `board thread new [--lane <id>] [--parent <key>] [--to <session>] [--doing] [--verify] [--accept "<check>"]... "<title>"
+export const THREAD_USAGE = `board thread new [--lane <id>] [--parent <key>] [--to <session>] [--doing] "<title>"
 board thread post <key> [--status next|doing|waiting|owner|done|dropped] [--summary "<line>"] [--waiting "<on what>"]
-                        [--file <path>]... [--link <url>]... [--reply <entry>] [--private] [--accept "<check>"]... ["<text>"]
+                        [--file <path>]... [--link <url>]... [--reply <entry>] [--private] ["<text>"]
 board thread done <key> ["<summary>"] [--file <path>]... [--link <url>]...
 board thread ask <key> "<question for the owner>" [--option "<label>"]... [--recommend <n>] [--default-after <30m|2h>] (the flags: decisions on)
-board thread set <key> [--title "<t>"] [--assignee <session|none>] [--lane <id>] [--parent <key|none>] [--verify on|off]
+board thread set <key> [--title "<t>"] [--assignee <session|none>] [--lane <id>] [--parent <key|none>]
 board thread show <key> [--last <n>] [--since <n>] [--full]
 board thread list [--mine | --lane <id> | --all] [--status <s>] [--done]
 board thread changes [--peek] [--all]
@@ -102,15 +102,21 @@ board thread link <key> | --base
 board thread open <key>
 board thread import <task board file> [--lane <id>]
 board thread share <key> <name|team|channel> [--history]
-board thread verdict <key> pass|fail|unsure [--file <report>] "<one line>"
   <key>: a key (atlas-12), the first 8 characters of an id, or a bare number in your lane. Every
   command takes --json. A thread's creator hears of its status changes, its assignee of the owner's
   answers: one line, "[board reminder from threads] atlas-13 done: <summary>", never its own changes.
   watch --owner: whatever starts or stops waiting on the owner, any lane, a card's board ask too, as
   "[board reminder from asks] anna asks the owner: <question> · ben: settled"; not your own.
   share asks the owner to share the thread with a teammate's board; on a shared thread every entry
-  that is not --private goes to them (or waits for the owner, as a team post of yours would).
-  --verify (threads.verify on): a session's done is held until a verifier the board starts checks it
+  that is not --private goes to them (or waits for the owner, as a team post of yours would).`
+
+/** What the usage says more while verified done is on (#492). */
+export const VERIFY_USAGE = `verified done (#492):
+board thread new [--lane <id>] [--to <session>] --verify [--accept "<check>"]... "<title>"
+board thread post <key> --accept "<check>"
+board thread set <key> --verify on|off
+board thread verdict <key> pass|fail|unsure [--file <report>] "<one line>"
+  On a thread with --verify, a session's done is held until a verifier the board starts checks it
   against the --accept lines; only that verifier gives the verdict, a pass with its report as --file.`
 
 /** What the usage says more while case files are on (#488). */
@@ -125,19 +131,17 @@ board thread brief <key>                       the case for a fresh session: sta
   the sessions do. spawn-agent --thread <key> starts a new session from the brief and gives it the thread.`
 
 /** The usage, with the case files' lines while they are on. */
-const usageText = (cfg: ThreadsConfig | null): string => (cfg?.cases ? `${THREAD_USAGE}\n${CASES_USAGE}` : THREAD_USAGE)
+const usageText = (cfg: ThreadsConfig | null): string =>
+  [THREAD_USAGE, ...(cfg?.cases ? [CASES_USAGE] : []), ...(cfg?.verify ? [VERIFY_USAGE] : [])].join('\n')
 
 /** The flags each command takes: with a value, and bare. `--json` and `--help` go with every one. */
 const FLAGS: Record<string, { values: readonly string[]; bare: readonly string[] }> = {
-  new: { values: ['--lane', '--parent', '--to', '--accept'], bare: ['--doing', '--verify'] },
-  post: {
-    values: ['--status', '--summary', '--waiting', '--file', '--link', '--reply', '--accept'],
-    bare: ['--private'],
-  },
+  new: { values: ['--lane', '--parent', '--to'], bare: ['--doing'] },
+  post: { values: ['--status', '--summary', '--waiting', '--file', '--link', '--reply'], bare: ['--private'] },
   done: { values: ['--summary', '--file', '--link', '--reply'], bare: ['--private'] },
   // --option, --recommend, --default-after: decisions (#487), only while they are on (parseArgs).
   ask: { values: ['--option', '--recommend', '--default-after'], bare: [] },
-  set: { values: ['--title', '--assignee', '--lane', '--parent', '--verify'], bare: [] },
+  set: { values: ['--title', '--assignee', '--lane', '--parent'], bare: [] },
   show: { values: ['--last', '--since'], bare: ['--full'] },
   list: { values: ['--lane', '--status'], bare: ['--mine', '--all', '--done'] },
   changes: { values: [], bare: ['--peek', '--all'] },
@@ -147,7 +151,6 @@ const FLAGS: Record<string, { values: readonly string[]; bare: readonly string[]
   open: { values: [], bare: [] },
   import: { values: ['--lane'], bare: ['--todos'] },
   share: { values: [], bare: ['--history'] },
-  verdict: { values: ['--file'], bare: [] },
 }
 const EVERY = ['--json', '--help']
 // Decisions' flags on `ask` (#487).
@@ -166,11 +169,28 @@ const CASE_FLAGS: Record<string, { values: readonly string[]; bare: readonly str
   brief: { values: [], bare: [] },
 }
 
-function flagsOf(sub: string, cases: boolean): { values: readonly string[]; bare: readonly string[] } | undefined {
+/** The flags and the command verified done adds (#492), only while threads.verify is on: off, every command takes what it took. */
+const VERIFY_FLAGS: Record<string, { values: readonly string[]; bare: readonly string[] }> = {
+  new: { values: ['--accept'], bare: ['--verify'] },
+  post: { values: ['--accept'], bare: [] },
+  set: { values: ['--verify'], bare: [] },
+  verdict: { values: ['--file'], bare: [] },
+}
+
+function flagsOf(
+  sub: string,
+  cases: boolean,
+  verify = false,
+): { values: readonly string[]; bare: readonly string[] } | undefined {
   const own = FLAGS[sub]
-  const more = cases ? CASE_FLAGS[sub] : undefined
-  if (!more) return own
-  return { values: [...(own?.values ?? []), ...more.values], bare: [...(own?.bare ?? []), ...more.bare] }
+  const more = [cases ? CASE_FLAGS[sub] : undefined, verify ? VERIFY_FLAGS[sub] : undefined].filter(
+    (m): m is { values: readonly string[]; bare: readonly string[] } => !!m,
+  )
+  if (!more.length) return own
+  return {
+    values: [...(own?.values ?? []), ...more.flatMap(m => m.values)],
+    bare: [...(own?.bare ?? []), ...more.flatMap(m => m.bare)],
+  }
 }
 
 class Usage extends ThreadError {
@@ -190,8 +210,13 @@ interface Args {
  * The words and flags of `board thread <sub> …`. A flag the command does not take is refused, so a
  * mistyped one never turns into text; text that starts with `--` goes after a lone `--`.
  */
-export function parseArgs(sub: string, rest: readonly string[], cases = false, o: { decisions?: boolean } = {}): Args {
-  const flags = flagsOf(sub, cases)
+export function parseArgs(
+  sub: string,
+  rest: readonly string[],
+  cases = false,
+  o: { decisions?: boolean; verify?: boolean } = {},
+): Args {
+  const flags = flagsOf(sub, cases, o.verify)
   // Decisions off (#487): `ask` takes no value flag, as on main, so what it prints is main's.
   const known = (sub === 'ask' && !o.decisions ? undefined : flags) ?? { values: [], bare: [] }
   const words: string[] = []
@@ -372,7 +397,7 @@ export async function threadCmd(rest: readonly string[], ctx: ThreadCmdContext):
         )
       return await forward(sub, args, ctx, out, json)
     }
-    const a = parseArgs(sub, args, !!cfg?.cases, { decisions: !!ctx.decisions })
+    const a = parseArgs(sub, args, !!cfg?.cases, { decisions: !!ctx.decisions, verify: !!cfg?.verify })
     const base = `http://127.0.0.1:${typeof ctx.cfg.port === 'number' ? ctx.cfg.port : 12422}/`
 
     // How MokuPilot finds the board (9.1): its address and whether threads are on, on or off.
@@ -744,6 +769,8 @@ class Run {
         return
       }
       case 'verdict': {
+        // Verified done off: no such command, as on main.
+        if (!this.write.cfg.verify) throw new Usage(`no command "board thread ${sub}"`)
         const [key, outcome, ...words] = a.words
         const head = this.thread(key)
         if (outcome !== 'pass' && outcome !== 'fail' && outcome !== 'unsure')
