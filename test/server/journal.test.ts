@@ -74,3 +74,40 @@ test('with the key: a change between refreshes is one move, in the list and the 
   proc.kill()
   await proc.exited
 })
+
+/** Refreshes until the payload's items pass `ok`. */
+async function shows(proc: Child, url: string, ok: (items: { key: string; status?: string }[]) => boolean) {
+  const deadline = Date.now() + 10_000
+  for (;;) {
+    proc.send('refresh')
+    const b = await board(url)
+    const items = (b.items ?? []) as { key: string; status?: string }[]
+    if (!b.stale && ok(items)) return b
+    if (Date.now() > deadline) throw new Error(`not shown: ${JSON.stringify(items)}`)
+    await Bun.sleep(50)
+  }
+}
+
+test('a session seen as pane-<id> before herdr reports its session id is one row under the session', async () => {
+  const box = await sandbox()
+  cwd = box.dir
+  const panes = (p: Record<string, unknown>[]) => ({
+    'api snapshot': { result: { snapshot: { panes: p, tabs: [], workspaces: [] } } },
+  })
+  box.state(panes([]))
+  const { url, proc } = await serveBoard(box, { journal: true })
+  await shows(proc, url, items => items.length === 0)
+  // herdr knows the agent before the hook has told it the session id
+  // (here it even finishes a turn before that, so the old key has a row of its own to leave behind)
+  box.state(panes([{ pane_id: 'p1', agent: 'claude', agent_status: 'done', cwd }]))
+  await shows(proc, url, items => items[0]?.key === 'pane-p1' && items[0]?.status === 'done')
+  box.state(panes([pane('working', cwd)]))
+  await shows(proc, url, items => items[0]?.key === sid && items[0]?.status === 'working')
+  const { journal } = (await (await fetch(`${url}/api/journal?since=0`)).json()) as {
+    journal: { rows: { key: string; kind: string }[]; rest: { work: number; idle: number } }
+  }
+  expect(journal.rows.map(x => [x.key, x.kind])).toEqual([[sid, 'done']])
+  expect(journal.rest).toEqual({ work: 0, idle: 0 })
+  proc.kill()
+  await proc.exited
+})

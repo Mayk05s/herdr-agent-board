@@ -2187,26 +2187,35 @@ What the list says, one line per session that changed, in this order:
 
 1. waits on you (its question), and then how many cards were already waiting on you before you
    left and still are, as a count ("and 2 more were waiting on you before");
-2. stopped on an error (Claude Code's `API Error` line);
+2. stopped on an error (its last words are Claude Code's own API error message);
 3. finished (what it finished). A session that finished and then started on the next task, or went
    to sleep, is still listed as finished, with that line; a later finish wins over an earlier error;
 4. waits on someone else (what it waits for);
 5. the rest only counted: "and 7 more moved: 5 working, 2 idle".
 
 Twenty session lines at most, then "and N more". A card no longer on the board waits on no one,
-so it is not listed as waiting. Asked for a time before the journal began recording (just turned
-on, or the board was not running), the list says so instead of reporting that nothing changed.
+so it is not listed as waiting. Asked for a time before the journal began recording (it was just
+turned on), the list says so instead of reporting that nothing changed. A time the board was down
+later on is not reported that way: what changed meanwhile is recorded at its first refresh after
+the restart, with that refresh's time.
+
+The list covers this computer's sessions only: the cards of other devices (`nodes`) that the
+board shows beside them are not recorded.
 
 When the list is shown:
 
 - on the page, after a return: a "While you were away, 23:56 to 08:10" strip under the toolbar,
   each row opening its card. Dismiss it and it stays dismissed (on every page and the phone) until
   the next return; the toolbar's "Since 23:56" closes it on that page or opens the list of that
-  absence again, up to now. A return when nothing changed shows no strip.
+  absence again, up to now. A return where no card moved shows no strip, even when some were
+  already waiting on you before you left.
 - `board journal [--since <when> | --away] [--json]` prints it. `--away` (the default) lists since
-  you last went away; `--since` takes a time of day (`23:56`, the last one), a time back (`3h`,
-  `90m`) or a date and time (`2026-11-20 23:00`). `--json` gives
-  `{ since, rows: [{ key, name, lane, kind, line, at }], more, rest: { work, idle }, before }`.
+  you last went away; `--since` takes a time of day (`23:56`, the last one, so yesterday's when it
+  is not that late yet), a time back (`3h`, `90m`), a date (`2026-11-20`, from its midnight) or a
+  date and time (`2026-11-20 23:00`); any other time ahead of now is refused. `--json` gives
+  `{ ok: true, since, rows: [{ key, name, lane, kind, line, at }], more, rest: { work, idle }, before }`,
+  with `recordedFrom` (when the journal began recording) when that is after `since`, and
+  `{ ok: false, error, message }` when it cannot answer (`off`, `usage`, `since`, `no_absence`).
 - `GET /api/journal?since=<ms>` or `?away=1` gives `{ journal }` in the same shape, and the board's
   payload carries the strip as `journal: { strip, last }` for the page and the phone.
   `POST /api/journal` with `x-board: 1` and `{ "op": "dismiss" }` dismisses the strip. Like
@@ -2222,7 +2231,9 @@ What counts as away and back:
 - Without presence, the board's live streams decide: the page drops its stream while it is hidden,
   so no stream at all for `returnMinutes` and then one opening is a return. A client that keeps a
   stream open all day (a page left on show, say, on another screen or a phone) means no return is
-  ever seen. Presence is the way to get the strip reliably.
+  ever seen. The other way round, a board window covered by others for `returnMinutes` while you
+  sit at the terminal counts as an absence too, and showing it again as a return. Presence is the
+  way to get the strip reliably.
 
 The records live in `journal.db` in the board's state folder, a file of its own beside `board.db`:
 it is the history of the live board, so a restore of `board.db` does not roll it back and a card's

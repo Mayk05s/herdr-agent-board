@@ -84,10 +84,28 @@ export function journalStore(db: BoardDb) {
         .all(since)
         .map(m => ({ ...m, kind: m.kind as JournalKind }))
     },
-    /** The moves and the changed states of one refresh, in one transaction. */
-    record(moves: readonly Move[], states: ReadonlyMap<string, StateRow>): void {
-      if (!moves.length && !states.size) return
+    /**
+     * One refresh, in one transaction: its moves, the changed states, the cards whose key changed
+     * (`renames`, old to new: their moves and state go under the new key), and the start mark of
+     * the refresh that seeded the journal.
+     */
+    record(
+      moves: readonly Move[],
+      states: ReadonlyMap<string, StateRow>,
+      { renames = [], start }: { renames?: readonly (readonly [string, string])[]; start?: number } = {},
+    ): void {
+      if (!moves.length && !states.size && !renames.length && start === undefined) return
       db.write(STORE, ({ db: sql }) => {
+        const rekey = sql.query('UPDATE moves SET key = ? WHERE key = ?')
+        const drop = sql.query('DELETE FROM last_state WHERE key = ?')
+        for (const [from, to] of renames) {
+          rekey.run(to, from)
+          drop.run(from)
+        }
+        if (start !== undefined)
+          sql
+            .query('INSERT INTO marks VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value=excluded.value')
+            .run('start', String(start))
         const insert = sql.query('INSERT INTO moves (key, name, lane, kind, line, at) VALUES (?, ?, ?, ?, ?, ?)')
         for (const m of moves) insert.run(m.key, m.name, m.lane, m.kind, m.line, m.at)
         const upsert =

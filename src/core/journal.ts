@@ -54,10 +54,13 @@ export interface Move extends CardState {
   key: string
 }
 
-// Control characters (an agent's text may carry escapes) become spaces, then runs of space one.
+// Control characters (an agent's text may carry escapes) become spaces, format characters (a
+// right-to-left override, a zero-width space) go, then runs of space become one: the lines reach
+// the owner and any agent that runs `board journal`.
 const clean = (s: unknown): string =>
   String(s ?? '')
     .replace(/\p{Cc}/gu, ' ')
+    .replace(/\p{Cf}/gu, '')
     .replace(/\s+/g, ' ')
     .trim()
 const clipLine = (s: unknown): string => {
@@ -65,11 +68,8 @@ const clipLine = (s: unknown): string => {
   return one.length > LINE_MAX ? `${one.slice(0, LINE_MAX - 1)}…` : one
 }
 
-/** Claude Code's own words for a turn that ended on an API error. */
-const API_ERROR = /^API Error(?::|\s\()/
-
-/** The journal's kind of a card. */
-export function kindOf(item: Pick<Item, 'column' | 'lastText'>): JournalKind {
+/** The journal's kind of a card. "Stopped on an error": its last words are Claude Code's API error message (Item.apiError). */
+export function kindOf(item: Pick<Item, 'column' | 'lastText' | 'apiError'>): JournalKind {
   switch (item.column) {
     case 'me':
       return 'owner'
@@ -78,7 +78,7 @@ export function kindOf(item: Pick<Item, 'column' | 'lastText'>): JournalKind {
     case 'work':
       return 'work'
     default:
-      if (API_ERROR.test(clean(item.lastText))) return 'error'
+      if (item.apiError && clean(item.lastText)) return 'error'
       return item.column === 'done' ? 'done' : 'idle'
   }
 }
@@ -107,22 +107,40 @@ const nameOf = (item: Item): string => clean(item.name || item.autoName) || item
  * the first time afterwards is a move (a session started). A changed line in the same kind is
  * written to its state, no move; a card gone from the board keeps its state, marked gone, so one
  * that comes back unchanged records nothing.
+ *
+ * A card's key is its Claude session id, or `pane-<id>` while herdr has not reported one for its
+ * pane (services/board.ts): a session just started can be seen under the pane key first. When a
+ * card with a session id appears and its pane's key is on record, still on the board, that is the
+ * same session: `renames` moves its history to the new key, so the list has one row, not two.
  */
 export function diffStates(
   before: ReadonlyMap<string, StateRow>,
   items: readonly Item[],
   at: number,
   seed = false,
-): { moves: Move[]; states: Map<string, StateRow> } {
+): { moves: Move[]; states: Map<string, StateRow>; renames: [string, string][] } {
   const moves: Move[] = []
   const states = new Map<string, StateRow>()
+  const renames: [string, string][] = []
   const seen = new Set<string>()
+  const keys = new Set(items.map(i => i?.key))
   for (const item of items) {
     if (!item?.key || seen.has(item.key)) continue
     seen.add(item.key)
     const kind = kindOf(item)
     const now = { kind, line: lineOf(item, kind), name: nameOf(item), lane: item.category || 'other' }
-    const old = before.get(item.key)
+    let old = before.get(item.key)
+    const paneKey = item.session && item.pane ? `pane-${item.pane}` : ''
+    const was = paneKey && !old && !keys.has(paneKey) ? before.get(paneKey) : undefined
+    if (was && was.gone === null) {
+      renames.push([paneKey, item.key])
+      seen.add(paneKey)
+      old = was
+      if (old.kind === kind) {
+        states.set(item.key, { ...now, at: old.at, gone: null })
+        continue
+      }
+    }
     if (!old || old.kind !== kind) {
       const state: StateRow = { ...now, at, gone: null }
       states.set(item.key, state)
@@ -131,8 +149,11 @@ export function diffStates(
       states.set(item.key, { ...now, at: old.at, gone: null })
   }
   for (const [key, old] of before) if (!seen.has(key) && old.gone === null) states.set(key, { ...old, gone: at })
-  return { moves, states }
+  return { moves, states, renames }
 }
+
+/** Whether anything moved in the list's window: a row, or a session only counted. */
+export const moved = (list: JournalList): boolean => list.rows.length + list.more + list.rest.work + list.rest.idle > 0
 
 /** One row of the list: a session and the state it is listed under. */
 export interface JournalRow {

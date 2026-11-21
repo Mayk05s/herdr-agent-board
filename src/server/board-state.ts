@@ -298,7 +298,7 @@ export function createBoardState({
     // process and its pipe.
     // Tasks (#202) only while config.json turns them on: off, the page sees none.
     const todos = todosConfig(cfg.todos)
-    const list = items.map(({ transcript, claudeRoot, alive, since, pipe, todos: own, ...rest }) =>
+    const list = items.map(({ transcript, claudeRoot, alive, since, pipe, apiError, todos: own, ...rest }) =>
       launches.decorate(todos && own ? { ...rest, todos: own } : rest),
     )
     // Another device's cards carry their tasks only while this board's config turns them on, as its own.

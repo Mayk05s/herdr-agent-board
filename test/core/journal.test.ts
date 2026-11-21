@@ -8,6 +8,7 @@ import {
   journalList,
   kindOf,
   type Move,
+  moved,
   type StateRow,
   withRecord,
 } from '../../src/core/journal.ts'
@@ -56,19 +57,20 @@ describe('journalConfig', () => {
 })
 
 describe('kindOf', () => {
-  test('the column, with an API error told apart', () => {
+  test("the column, with Claude Code's API error message told apart", () => {
     expect(kindOf(item('a', { column: 'me' }))).toBe('owner')
     expect(kindOf(item('a', { column: 'ext' }))).toBe('ext')
     expect(kindOf(item('a', { column: 'work' }))).toBe('work')
     expect(kindOf(item('a', { column: 'done' }))).toBe('done')
     expect(kindOf(item('a', { column: 'idle' }))).toBe('idle')
-    expect(kindOf(item('a', { column: 'done', lastText: 'API Error: 529 overloaded' }))).toBe('error')
-    expect(kindOf(item('a', { column: 'idle', lastText: 'API Error: 500' }))).toBe('error')
+    const err = { apiError: true as const }
+    expect(kindOf(item('a', { column: 'done', lastText: 'API Error: 529 overloaded', ...err }))).toBe('error')
+    expect(kindOf(item('a', { column: 'idle', lastText: 'API Error: 500', ...err }))).toBe('error')
     // still working after an error: working
-    expect(kindOf(item('a', { column: 'work', lastText: 'API Error: 500' }))).toBe('work')
-    expect(kindOf(item('a', { column: 'done', lastText: 'Fixed the API Error handling' }))).toBe('done')
-    expect(kindOf(item('a', { column: 'done', lastText: 'API error handling is now retried' }))).toBe('done')
-    expect(kindOf(item('a', { column: 'done', lastText: 'API Error (request timed out)' }))).toBe('error')
+    expect(kindOf(item('a', { column: 'work', lastText: 'API Error: 500', ...err }))).toBe('work')
+    // an agent's closing words that begin with the same text are no error
+    expect(kindOf(item('a', { column: 'done', lastText: 'API Error: fixed, the retry now waits' }))).toBe('done')
+    expect(kindOf(item('a', { column: 'done', lastText: 'API Error (request timed out) is handled' }))).toBe('done')
   })
 })
 
@@ -80,6 +82,15 @@ describe('lines', () => {
       5,
     )
     expect(r.moves[0]?.line).toBe('ok? [2J go')
+  })
+
+  test('format characters (a right-to-left override, a zero-width space) are taken out', () => {
+    const r = diffStates(
+      new Map([['x', state('idle', 1)]]),
+      [item('anna', { column: 'me', question: 'push\u202E to main\u200B?' })],
+      5,
+    )
+    expect(r.moves[0]?.line).toBe('push to main?')
   })
 })
 
@@ -122,6 +133,48 @@ describe('diffStates', () => {
   test('a session first seen after the seed is a move; one key twice counts once', () => {
     const r = diffStates(new Map([['x', state('idle', 1)]]), [item('atlas', { column: 'work' }), item('atlas')], 5)
     expect(r.moves).toEqual([{ ...move('atlas', 'work', 5), name: 'atlas' }])
+  })
+})
+
+describe('a card first seen under its pane key', () => {
+  test('gets its session id: one history under the new key, no second row', () => {
+    const pane = item('pane-p7', { session: null, pane: 'p7', column: 'work' })
+    const first = diffStates(new Map([['x', state('idle', 1)]]), [item('x'), pane], 100)
+    expect(first.moves.map(m => m.key)).toEqual(['pane-p7'])
+    const before = new Map([
+      ['x', state('idle', 1)],
+      ['pane-p7', first.states.get('pane-p7') as StateRow],
+    ])
+    // the same kind under the session id: renamed, no move, its time kept
+    const same = diffStates(before, [item('x'), item('s-anna', { pane: 'p7', column: 'work' })], 200)
+    expect(same.renames).toEqual([['pane-p7', 's-anna']])
+    expect(same.moves).toEqual([])
+    expect(same.states.get('s-anna')).toMatchObject({ kind: 'work', at: 100, gone: null })
+    expect(same.states.has('pane-p7')).toBe(false)
+    // another kind: renamed, and the move is the session's
+    const asks = diffStates(before, [item('x'), item('s-anna', { pane: 'p7', column: 'me', question: 'ok?' })], 300)
+    expect(asks.renames).toEqual([['pane-p7', 's-anna']])
+    expect(asks.moves.map(m => [m.key, m.kind])).toEqual([['s-anna', 'owner']])
+  })
+
+  test('not folded when the pane key is still on the board, gone, or the session is known', () => {
+    const before = new Map([
+      ['pane-p7', state('work', 100)],
+      ['pane-p8', state('work', 100, '', 150)],
+      ['s-ben', state('work', 50)],
+    ])
+    const r = diffStates(
+      before,
+      [
+        item('pane-p7', { session: null, pane: 'p7', column: 'work' }),
+        item('s-anna', { pane: 'p7', column: 'work' }),
+        item('s-cleo', { pane: 'p8', column: 'work' }),
+        item('s-ben', { pane: 'p9', column: 'work' }),
+      ],
+      200,
+    )
+    expect(r.renames).toEqual([])
+    expect(r.moves.map(m => m.key).sort()).toEqual(['s-anna', 's-cleo'])
   })
 })
 
@@ -195,6 +248,42 @@ describe('journalList', () => {
     expect(asks.rows.map(r => [r.kind, r.line])).toEqual([['owner', 'next?']])
   })
 
+  test('an error, then woken for the next task: still stopped on an error, with its line', () => {
+    const list = journalList(
+      [move('a', 'error', 1100, 'API Error: 529'), move('a', 'work', 1200)],
+      states({ a: state('work', 1200) }),
+      since,
+    )
+    expect(list.rows.map(r => [r.kind, r.line])).toEqual([['error', 'API Error: 529']])
+    expect(list.rest).toEqual({ work: 0, idle: 0 })
+  })
+
+  test('a finish and a later error: the error wins', () => {
+    const list = journalList(
+      [move('a', 'done', 1100, 'step one done'), move('a', 'work', 1150), move('a', 'error', 1200, 'API Error: 500')],
+      states({ a: state('error', 1200, 'API Error: 500') }),
+      since,
+    )
+    expect(list.rows.map(r => [r.kind, r.line])).toEqual([['error', 'API Error: 500']])
+  })
+
+  test('waiting on someone else now wins over an earlier finish or error', () => {
+    const list = journalList(
+      [
+        move('a', 'done', 1100, 'x'),
+        move('a', 'ext', 1200, 'CI'),
+        move('b', 'error', 1100, 'e'),
+        move('b', 'ext', 1300, 'ben'),
+      ],
+      states({ a: state('ext', 1200, 'CI'), b: state('ext', 1300, 'ben') }),
+      since,
+    )
+    expect(list.rows.map(r => [r.key, r.kind, r.line])).toEqual([
+      ['a', 'ext', 'CI'],
+      ['b', 'ext', 'ben'],
+    ])
+  })
+
   test('a waiting card shows its latest line', () => {
     const list = journalList([move('a', 'owner', 1100, 'first')], states({ a: state('owner', 1100, 'second') }), since)
     expect(list.rows[0]?.line).toBe('second')
@@ -214,6 +303,13 @@ describe('journalList', () => {
     )
     expect(list.rows.map(r => r.key)).toEqual(['a'])
     expect(list.before).toBe(2)
+  })
+
+  test('only cards that waited before: the count, and nothing moved', () => {
+    const list = journalList([], states({ old: state('owner', 500, 'waiting since yesterday') }), since)
+    expect(list.before).toBe(1)
+    expect(moved(list)).toBe(false)
+    expect(moved(journalList([move('a', 'work', 1100)], states({ a: state('work', 1100) }), since))).toBe(true)
   })
 
   test('a card that left the board waits on no one: no row, no count', () => {

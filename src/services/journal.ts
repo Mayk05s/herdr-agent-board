@@ -19,9 +19,9 @@ import {
   type JournalConfig,
   type JournalList,
   journalConfig,
-  journalEntries,
   journalList,
   KEEP_MS,
+  moved,
   type StateRow,
   withRecord,
 } from '../core/journal.ts'
@@ -66,16 +66,29 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
   let prunedAt = 0
   let logged = false
 
+  // Everything is read before the store is kept: a read that fails leaves nothing half open, and
+  // the next refresh opens it again.
   function open(): JournalStore {
     if (store) return store
-    db = openJournalDb(true)
-    if (!db) throw new Error('journal.db could not be opened')
-    store = journalStore(db)
-    states = store.states()
-    strip = store.strip()
-    stripList = null
-    prunedAt = 0
-    return store
+    const opened = openJournalDb(true)
+    if (!opened) throw new Error('journal.db could not be opened')
+    try {
+      const s = journalStore(opened)
+      const read = s.states()
+      const shown = s.strip()
+      db = opened
+      states = read
+      strip = shown
+      stripList = null
+      prunedAt = 0
+      store = s
+      return s
+    } catch (err) {
+      try {
+        opened.close()
+      } catch {}
+      throw err
+    }
   }
   function close(): void {
     try {
@@ -127,7 +140,8 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
     const from = marks.left
     back = Math.max(back, from + 1)
     const list = back - from >= c.returnMinutes * 60_000 ? listOf(s, from, back) : null
-    const next = list && journalEntries(list).length ? { from, to: back, dismissed: false } : undefined
+    // No strip for a return where no card moved, even with cards that waited on the owner before.
+    const next = list && moved(list) ? { from, to: back, dismissed: false } : undefined
     s.setMarks({ back, ...(next && { strip: next }) })
     if (next) {
       strip = next
@@ -147,11 +161,13 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
       safe(undefined, () => {
         const s = open()
         const at = now()
-        const seed = states.size === 0
-        if (seed && s.start() === null) s.setMarks({ start: at })
-        const { moves, states: changed } = diffStates(states, items, at, seed)
-        if (moves.length || changed.size) {
-          s.record(moves, changed)
+        // The first refresh with the journal on notes the cards and sets the start mark, in one
+        // transaction: a board with no cards then still records the first session started later.
+        const seed = s.start() === null
+        const { moves, states: changed, renames } = diffStates(states, items, at, seed)
+        if (seed || moves.length || changed.size || renames.length) {
+          s.record(moves, changed, { renames, ...(seed && { start: at }) })
+          for (const [from] of renames) states.delete(from)
           for (const [key, state] of changed) states.set(key, state)
         }
         if (at - prunedAt >= HOUR) {

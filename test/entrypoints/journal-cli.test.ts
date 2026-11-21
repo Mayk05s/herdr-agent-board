@@ -50,6 +50,13 @@ test('sinceOf: a time back, the last such time of day, a date and time', () => {
   expect(sinceOf('23:56', NOW)).toBe(new Date(2026, 10, 20, 23, 56).getTime())
   expect(sinceOf('2026-11-20 18:00', NOW)).toBe(new Date(2026, 10, 20, 18, 0).getTime())
   expect(sinceOf('2026-12-01 18:00', NOW)).toBeNull()
+  // a date and time later today, or tomorrow, is ahead: refused, not moved back a day
+  expect(sinceOf('2026-11-21 09:00', NOW)).toBeNull()
+  expect(sinceOf('2026-11-22 09:00', NOW)).toBeNull()
+  expect(sinceOf('tomorrow 9:00', NOW)).toBeNull()
+  // a bare time of day still means the last one
+  expect(sinceOf('9:00', NOW)).toBe(new Date(2026, 10, 20, 9, 0).getTime())
+  expect(sinceOf('at 9:00', NOW)).toBe(new Date(2026, 10, 20, 9, 0).getTime())
   expect(sinceOf('soon', NOW)).toBeNull()
   // ahead is no time back; a date alone is its midnight
   expect(sinceOf('in 2h', NOW)).toBeNull()

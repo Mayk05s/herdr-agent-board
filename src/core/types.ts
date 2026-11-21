@@ -267,6 +267,8 @@ export interface TranscriptInfo {
   tool?: ToolCall | null
   question?: string
   replied?: boolean
+  /** lastText is Claude Code's own API error message (isApiErrorMessage on its line, #489). */
+  apiError?: boolean
   /** The time of its newest user or assistant line. */
   lastAt?: number
   /** Claude Code's newest recap of the session (away_summary, #321) and its time; absent with none. */
@@ -314,6 +316,8 @@ export interface Item {
   title?: string
   prompt?: string
   lastText?: string
+  /** Its last words are Claude Code's own API error message (isApiErrorMessage, #489); absent otherwise. Kept off the payload. */
+  apiError?: true
   /** The time of its transcript's newest user or assistant line (#321), else null. */
   lastAt?: number | null
   /** Claude Code's newest recap of the session and its time (#321): '' and null with none. */

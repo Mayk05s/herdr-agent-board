@@ -389,3 +389,80 @@ test('a clock set back does not keep the owner away or write on every refresh', 
   j.observe([item('anna')])
   expect(marks()).toEqual(first)
 })
+
+test('a return where no card moved shows no strip, even with a card that waited before', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock, env } = journalOf({ at: t0, viewers: 1 })
+  j.observe([item('anna', { column: 'work' }), item('ben', { column: 'me', question: 'May I push?' })])
+  env.viewers = 0
+  clock.at = t0 + MIN
+  j.observe([item('anna', { column: 'work' }), item('ben', { column: 'me', question: 'May I push?' })])
+  env.viewers = 1
+  clock.at = t0 + 60 * MIN
+  j.observe([item('anna', { column: 'work' }), item('ben', { column: 'me', question: 'May I push?' })])
+  expect(j.view()).toEqual({ strip: null, last: null })
+  expect(j.list(t0 + MIN)?.before).toBe(1)
+})
+
+test('seeded once, on its own mark: a board with no cards records the first session started later', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock } = journalOf({ at: t0 })
+  j.observe([])
+  clock.at = t0 + MIN
+  j.observe([item('anna', { column: 'work' })])
+  clock.at = t0 + 2 * MIN
+  j.observe([item('anna', { column: 'me', question: 'ok?' })])
+  expect(movesIn()).toEqual([
+    { key: 'anna', kind: 'work' },
+    { key: 'anna', kind: 'owner' },
+  ])
+})
+
+test('a read that fails once does not seed again or rewrite the times on record', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const first = journalOf({ at: t0 })
+  first.j.observe([item('anna', { column: 'done', result: 'shipped' }), item('ben', { column: 'work' })])
+  first.j.stop()
+  const raw = new Database(journalFile())
+  raw.run('ALTER TABLE last_state RENAME TO last_state_away')
+  const second = journalOf({ at: t0 + 10 * MIN })
+  second.j.observe([item('anna', { column: 'done', result: 'shipped' }), item('ben', { column: 'idle' })])
+  expect(second.logs.length).toBe(1)
+  raw.run('ALTER TABLE last_state_away RENAME TO last_state')
+  raw.close()
+  second.clock.at = t0 + 11 * MIN
+  second.j.observe([item('anna', { column: 'done', result: 'shipped' }), item('ben', { column: 'idle' })])
+  expect(movesIn()).toEqual([{ key: 'ben', kind: 'idle' }])
+  const db = openJournalDb(false)
+  if (!db) throw new Error('no journal.db')
+  try {
+    expect(journalStore(db).states().get('anna')?.at).toBe(t0)
+    expect(journalStore(db).start()).toBe(t0)
+  } finally {
+    db.close()
+  }
+})
+
+test('a session seen under its pane key first, then its session id: one row, a live link', () => {
+  fresh()
+  const t0 = 1_800_000_000_000
+  const { j, clock } = journalOf({ at: t0 })
+  j.observe([item('ben', { column: 'work' })])
+  clock.at = t0 + MIN
+  j.observe([item('ben', { column: 'work' }), item('pane-w1:p7', { session: null, pane: 'w1:p7', column: 'work' })])
+  clock.at = t0 + 2 * MIN
+  const sid = '5a6b7c8d-1e2f-4a3b-9c4d-5e6f7a8b9c0d'
+  j.observe([item('ben', { column: 'work' }), item(sid, { pane: 'w1:p7', column: 'work' })])
+  clock.at = t0 + 3 * MIN
+  j.observe([item('ben', { column: 'work' }), item(sid, { pane: 'w1:p7', column: 'me', question: 'May I push?' })])
+  expect(movesIn()).toEqual([
+    { key: sid, kind: 'work' },
+    { key: sid, kind: 'owner' },
+  ])
+  const list = j.list(t0)
+  expect(list?.rows.map(r => [r.key, r.kind])).toEqual([[sid, 'owner']])
+  expect(list?.rest).toEqual({ work: 0, idle: 0 })
+})

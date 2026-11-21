@@ -73,6 +73,23 @@ test('the toolbar: "Since" only while there is a return', () => {
     ).map(text)
   expect(ids()).toEqual([])
   expect(ids({ label: 'Since 00:05', open: false, onToggle() {} })).toEqual(['Since 00:05'])
+  // it names the strip it controls only while the strip is there
+  const button = (open: boolean) =>
+    findAll(
+      renderInBoard(
+        <Toolbar limitsAnchor={createRef()} journal={{ label: 'Since 00:05', open, onToggle() {} }} />,
+        board(),
+      ),
+      el => el.attrs.get('id') === 'journal-open',
+    )[0]
+  expect([button(false)?.attrs.get('aria-expanded'), button(false)?.attrs.get('aria-controls')]).toEqual([
+    'false',
+    undefined,
+  ])
+  expect([button(true)?.attrs.get('aria-expanded'), button(true)?.attrs.get('aria-controls')]).toEqual([
+    'true',
+    'away-strip',
+  ])
 })
 
 // ---------------------------------------------------------------- on a real DOM
