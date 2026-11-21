@@ -230,6 +230,10 @@ test('last pass 1: a share entry copies the peers’ head, and a Team topic’s 
   )
   // The title was made here: it stays.
   assert.match(brief, /\nCase atlas-1 · [a-z ]+ · Map the price columns\n/)
+  // Then the sharing stops for good: the thread is no longer shared, the copy still is the peers' words.
+  const stopped = verifyBrief({ head: { ...h, scope: 'local' }, entries: feed, ...opts })
+  assert.doesNotMatch(stopped, /pass it at once|a verdict pass from the verifier/)
+  assert.match(stopped, /#5 [^\n]*owner: a copy of the teammates' head, not quoted here/)
   // A thread made from a Team topic, shared as it was made: the topic's title is the peers' words.
   n = 0
   const topic = [

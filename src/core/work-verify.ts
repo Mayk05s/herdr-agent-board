@@ -173,7 +173,8 @@ export function withoutPeers(
   h: ThreadHead,
   entries: readonly ThreadEntry[],
 ): { head: ThreadHead; entries: ThreadEntry[] } {
-  const shared = sharingOf(h) !== null
+  // Shared now, or once: a feed with a teammate's entry was shared, even when the sharing stopped since.
+  const shared = sharingOf(h) !== null || entries.some(e => e.author.kind === 'peer')
   const look = `board thread show ${h.key}`
   const shareLike = (e: ThreadEntry): boolean =>
     shared && e.type === 'system' && e.author.kind === 'owner' && e.n !== 1 && setsWords(e)
