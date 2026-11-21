@@ -10,6 +10,7 @@
 // modules are named work-thread: "thread" already means a session's conversation and a Team
 // thread in the code.
 
+import { switched, switchedOff, withField } from './feature-switch.ts'
 import type { CaseSessionView } from './work-cases.ts'
 
 export const THREAD_STATUSES = ['next', 'doing', 'waiting', 'owner', 'done', 'dropped'] as const
@@ -283,10 +284,13 @@ export interface VerifyConfig {
 export const VERIFY_LIMIT_MIN = 30
 export const VERIFY_MAX = 2
 
-/** `threads.verify`: `true` or an object is on, with its settings; absent or anything else is off. */
+/**
+ * `threads.verify`: `true` or an object is on, with its settings; absent, `"on": false` (Settings
+ * turned it off and kept its settings, #596) or anything else is off.
+ */
 export function verifyConfig(raw: unknown): VerifyConfig | null {
   if (raw === true) raw = {}
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || switchedOff(raw)) return null
   const r = raw as Record<string, unknown>
   const text = (v: unknown, max: number): string | null =>
     typeof v === 'string' && v.trim() && v.trim().length <= max ? v.trim() : null
@@ -323,10 +327,13 @@ export function briefFor(c: Pick<VerifyConfig, 'brief'>, lane: string): string |
 
 export const GAP_SEC = 60
 
-/** config.json's `threads`: `true` is everything on; an object is on, with its settings; absent or anything else is off. */
+/**
+ * config.json's `threads`: `true` is everything on; an object is on, with its settings; absent,
+ * `"on": false` (Settings turned them off and kept the settings, #596) or anything else is off.
+ */
 export function threadsConfig(raw: unknown): ThreadsConfig | null {
   if (raw === true) return { agents: true, gapSec: GAP_SEC, share: true }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || switchedOff(raw)) return null
   const r = raw as Record<string, unknown>
   const events = typeof r.events === 'object' && r.events !== null ? (r.events as Record<string, unknown>) : {}
   const gap = Number(events.gapSec)
@@ -348,23 +355,46 @@ export const threadModeOf = (c: Pick<ThreadsConfig, 'agents'> | null): ThreadMod
 
 /**
  * config.json's `threads` once Settings has set `mode` and, when given, `share` (#410); undefined:
- * the key goes. Off takes the key out, as Tasks' Off does. On keeps the section's other fields
- * (`events`, ...): `agents` and `share` are written only where they are not the default, and a
- * section left with nothing else in it is `true`. `share` alone changes threads that are on;
- * off, it leaves the value as it was.
+ * the key goes. Off keeps a section with fields of its own (`agents`, `share`, `cases`, `verify`,
+ * `events`, ...) under `"on": false` (#596, #597) and takes `true` out. On brings that section back
+ * (`share: false` stays unless `share` is given): `agents` and `share` are written only where they
+ * are not the default, and a section left with nothing else in it is `true`. `share` alone changes
+ * threads that are on; off, it leaves the value as it was.
  */
 export function threadsSetting(raw: unknown, change: { mode?: ThreadMode; share?: boolean }): unknown {
   const now = threadsConfig(raw)
   const mode = change.mode ?? threadModeOf(now)
-  if (mode === 'none') return change.mode === undefined ? raw : undefined
-  const section: Record<string, unknown> =
-    now && typeof raw === 'object' && raw !== null ? { ...(raw as Record<string, unknown>) } : {}
+  if (mode === 'none') return change.mode === undefined ? raw : switched(raw, false)
+  const { on: _off, ...section }: Record<string, unknown> =
+    typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
   if (mode === 'mine') section.agents = false
   else delete section.agents
-  const share = change.share ?? now?.share ?? true
+  const share = change.share ?? section.share !== false
   if (share) delete section.share
   else section.share = false
   return Object.keys(section).length ? section : true
+}
+
+/** A `threads` section that keeps verified done's settings while it is off (`"on": false` on it or on threads, #596). */
+export function verifyKeptOff(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !('verify' in raw)) return false
+  return switchedOff(raw) || switchedOff((raw as Record<string, unknown>).verify)
+}
+
+/**
+ * config.json's `threads` (on: `true` or an object) once Settings has turned case files or verified
+ * done on or off (#596): `cases` is `true` or absent; `verify` off keeps its settings (`model`,
+ * `lanes`, `brief`, ...) under `"on": false` so that on brings them back, on with none set is
+ * `true` (the defaults). The section's other fields stay; one left with nothing in it is `true`.
+ */
+export function threadsParts(raw: unknown, change: { cases?: boolean; verify?: boolean }): unknown {
+  let next = raw
+  if (change.cases !== undefined) next = withField(next, 'cases', change.cases ? true : undefined)
+  if (change.verify !== undefined) {
+    const section = typeof next === 'object' && next !== null ? (next as Record<string, unknown>) : {}
+    next = withField(next, 'verify', switched(section.verify, change.verify))
+  }
+  return next
 }
 
 // ------------------------------------------------------------------ limits

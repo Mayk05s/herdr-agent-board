@@ -5,18 +5,19 @@
 // the watch becomes after it, and the words the session, the card and `board schedule` get. Storage
 // is adapters/schedule-store.ts (the schedule's `watches` folder), the run adapters/watch-probe.ts,
 // the timer services/watches.ts.
+import { switchedOff } from './feature-switch.ts'
 import { t as current } from './lang.ts'
 import type { ScheduleEntry, SessionRef } from './schedule-rules.ts'
 import type { Translator } from './types.ts'
 import { parseDuration } from './when.ts'
 import { span } from './when-format.ts'
 
-/** config.json's `watches`: `true` or an object turns them on; absent (or anything else) they are off. */
+/** config.json's `watches`: `true` or an object turns them on; absent, `"on": false` (Settings, #596) or anything else, off. */
 export type WatchesConfig = { on: true }
 
 export function watchesConfig(raw: unknown): WatchesConfig | null {
   if (raw === true) return { on: true }
-  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? { on: true } : null
+  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) && !switchedOff(raw) ? { on: true } : null
 }
 
 const MIN = 60_000
@@ -69,7 +70,8 @@ export interface Probe {
  * A watch: a schedule entry of kind 'watch', `text` the card's wait text, `next` its next check.
  * The timer's own fields: checks (runs that said "nothing yet"), lastCheck, errors (in a row),
  * lastError, errorsTold (this streak was told), firstDone (the scheduler's first check ran),
- * silenceTold, goneSince (its session is not on the board), claim (a run on its way).
+ * silenceTold, goneSince (its session is not on the board), claim (a run on its way). `off` only in
+ * the payload: watches are turned off in config.json and nothing checks it (#596).
  */
 export type WatchEntry = ScheduleEntry & {
   kind: 'watch'
@@ -82,6 +84,7 @@ export type WatchEntry = ScheduleEntry & {
   firstDone?: boolean
   silenceTold?: boolean
   goneSince?: number
+  off?: true
 }
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -304,6 +307,7 @@ export function afterRun(
 
 /** The watch's state in words, for the card, the sheet and `board schedule`. */
 export function watchState(w: WatchEntry, now: number, t: Translator = current): string {
+  if (w.off) return t('watch.state.off')
   if (w.goneSince) return t('watch.state.gone')
   const until = Math.max(0, w.next - now)
   if (w.errors && w.lastError) return t('watch.state.error', { why: quotedWhy(w.lastError), in: spanOf(until, t) })

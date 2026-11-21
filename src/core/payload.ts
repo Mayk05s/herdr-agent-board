@@ -146,6 +146,8 @@ export interface BoardPayload {
    * many wait on the owner. The threads themselves never ride in the payload.
    */
   threads?: ThreadsPayload
+  /** Watches are on (#486, config.json's `watches`), for Settings' switch (#596): absent while off. */
+  watches?: true
   /** The away journal's strip and the last return (#489), only while config.json has `journal`. */
   journal?: JournalPayload
   /**
@@ -229,6 +231,8 @@ export interface TimePayload {
 export interface JournalPayload {
   strip: (JournalList & { from: number; to: number }) | null
   last: { from: number; to: number } | null
+  /** On in config.json, but journal.db did not open: what went wrong (Settings shows it, #596). */
+  error?: string
 }
 
 /** What the board's payload says of threads (#379). */
@@ -241,6 +245,10 @@ export interface ThreadsPayload {
   agents?: false
   /** Kept on this board also with Team on (`share: false`, #410): absent while they may be shared. */
   share?: false
+  /** Case files are on (`threads.cases`, #488), for Settings' switch (#596): absent while off. */
+  cases?: true
+  /** Verified done is on (`threads.verify`, #492), for Settings' switch (#596): absent while off. */
+  verify?: true
 }
 
 /** What the board's payload says of the calendar (#328). */

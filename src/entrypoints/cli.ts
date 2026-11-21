@@ -168,7 +168,8 @@ import { peekPiSleepers } from '../adapters/wake-files.ts'
 import { COLUMNS, noteOf, statusText } from '../core/board.ts'
 import { withBoardPaths } from '../core/board-paths.ts'
 import { categoryFor, categoryInfo, laneRank } from '../core/categories.ts'
-import { decisionsConfig } from '../core/decisions.ts'
+import { DECISION_FLAGS, decisionsConfig } from '../core/decisions.ts'
+import { switchedOff } from '../core/feature-switch.ts'
 import { translator } from '../core/i18n/translator.ts'
 import { t, useLanguage } from '../core/lang.ts'
 import { parseMove } from '../core/move.ts'
@@ -1073,6 +1074,12 @@ async function main(): Promise<void> {
       if (!text) throw new Error('usage: board ask <question>')
       // `decision: ''` takes off one left from when decisions were on (#487); on any other card it writes nothing.
       writeCard(s.key, { ask: text, askSince: now, by: 'agent', decision: '' })
+      // Decisions off (#596): the options' flags are words of the question, as before; said only where given.
+      {
+        const given = DECISION_FLAGS.filter(f => flagWords.includes(f))
+        if (given.length)
+          tail = ` · note: decisions are off in config.json, so ${given.join(', ')} ${given.length > 1 ? 'are' : 'is'} part of the question and no default will answer it`
+      }
       break
     case 'done':
       if (decisionsOn) (await import('./decisions-cli.ts')).withdrawDecision(s.key, now)
@@ -1207,6 +1214,7 @@ const casesOn = (): boolean =>
   typeof cfg.threads === 'object' &&
   cfg.threads !== null &&
   !Array.isArray(cfg.threads) &&
+  !switchedOff(cfg.threads) &&
   (cfg.threads as { cases?: unknown }).cases === true
 
 /**

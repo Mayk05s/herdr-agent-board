@@ -65,6 +65,8 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
   let stripList: JournalList | null = null
   let prunedAt = 0
   let logged = false
+  // What the last failed step said (journal.db that does not open, say), for Settings (#596); '' after one that worked.
+  let failed = ''
 
   // Everything is read before the store is kept: a read that fails leaves nothing half open, and
   // the next refresh opens it again.
@@ -104,9 +106,11 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
     try {
       const out = run()
       logged = false
+      failed = ''
       return out
     } catch (err) {
-      if (!logged) log(`journal: ${err instanceof Error ? err.message : String(err)}`)
+      failed = err instanceof Error ? err.message : String(err)
+      if (!logged) log(`journal: ${failed}`)
       logged = true
       return fallback
     }
@@ -178,7 +182,9 @@ export function createJournal({ cfg, log, presence, viewers, onChange, now = Dat
       })
     },
     view() {
-      if (!journalConfig(cfg.journal) || !store) return null
+      if (!journalConfig(cfg.journal)) return null
+      // On in config.json with no store (it did not open): on all the same, with what went wrong (#596).
+      if (!store) return { strip: null, last: null, ...(failed && { error: failed }) }
       if (!strip) return { strip: null, last: null }
       const { from, to, dismissed } = strip
       if (!dismissed && !stripList) {

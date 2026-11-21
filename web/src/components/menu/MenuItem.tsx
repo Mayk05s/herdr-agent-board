@@ -1,5 +1,5 @@
 // One item of a context menu: its check (when the menu has a check column), a lane's or a
-// column's color, the label and, when it is gray, why; a choice's count (a folded toolbar
+// column's color, the label and, when it is gray, why (else its note, a line on what it does); a choice's count (a folded toolbar
 // control's, as its segment shows it); a submenu's chevron or a key hint.
 import type { MenuItem as MenuItemModel } from '../../models/menu-model.ts'
 import { classNames } from '../class-names.ts'
@@ -37,7 +37,11 @@ export function MenuItem({ item, id, index, checks, active, expanded }: MenuItem
       {color && <span className={classNames('mi-dot', !!item.dot && 'round')} style={{ '--dot': color }} />}
       <span className="mi-text">
         <span className="mi-label">{item.label}</span>
-        {item.reason && <span className="mi-reason">{item.reason}</span>}
+        {item.reason ? (
+          <span className="mi-reason">{item.reason}</span>
+        ) : (
+          item.note && <span className="mi-reason mi-note">{item.note}</span>
+        )}
       </span>
       {item.count !== undefined && (
         <span

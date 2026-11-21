@@ -36,10 +36,17 @@ async function schedulesOf(url: string): Promise<Record<string, unknown>[]> {
   return ((await (await fetch(`${url}/api/board`)).json()) as { schedules: Record<string, unknown>[] }).schedules
 }
 
-test('the payload: no watch while watches are off, the watch without its claim while on', async () => {
+test('the payload: while watches are off a watch left is there marked off (#596), none without the folder; the watch without its claim while on', async () => {
+  const never = await sandbox()
+  assert.deepEqual(await schedulesOf((await serveBoard(never)).url), [])
+
   const off = await sandbox()
   putWatch(off, 'aaaaa1')
-  assert.deepEqual(await schedulesOf((await serveBoard(off)).url), [])
+  const left = await schedulesOf((await serveBoard(off)).url)
+  assert.equal(left.length, 1)
+  assert.equal(left[0]?.kind, 'watch')
+  assert.equal(left[0]?.off, true)
+  assert.equal('claim' in (left[0] ?? {}), false)
 
   const on = await sandbox()
   putWatch(on, 'aaaaa1')

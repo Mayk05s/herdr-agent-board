@@ -13,6 +13,7 @@ import { CAL_STRINGS } from './cal-strings.ts'
 import { CALL_STRINGS } from './call-strings.ts'
 import { COMPACT_STRINGS } from './compact-strings.ts'
 import { DECISION_STRINGS } from './decision-strings.ts'
+import { FEATURE_STRINGS } from './feature-strings.ts'
 import { FORK_STRINGS } from './fork-strings.ts'
 import { HELPER_STRINGS } from './helper-strings.ts'
 import { JOURNAL_STRINGS } from './journal-strings.ts'
@@ -1440,6 +1441,7 @@ for (const code of Object.keys(WATCH_STRINGS) as Lang[]) Object.assign(STRINGS[c
 // And decisions (#487).
 for (const code of Object.keys(DECISION_STRINGS) as Lang[]) Object.assign(STRINGS[code], DECISION_STRINGS[code])
 for (const code of Object.keys(THREAD_STRINGS) as Lang[]) Object.assign(STRINGS[code], THREAD_STRINGS[code])
+for (const code of Object.keys(FEATURE_STRINGS) as Lang[]) Object.assign(STRINGS[code], FEATURE_STRINGS[code])
 for (const code of Object.keys(VERIFY_STRINGS) as Lang[]) Object.assign(STRINGS[code], VERIFY_STRINGS[code])
 for (const code of Object.keys(SECRET_STRINGS) as Lang[]) Object.assign(STRINGS[code], SECRET_STRINGS[code])
 // And the peer network (#231).

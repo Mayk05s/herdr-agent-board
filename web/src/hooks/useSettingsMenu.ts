@@ -4,7 +4,9 @@
 // (components/panel/place.ts), whether sleeping sessions show, with more than one profile folder
 // the Profiles panel, while wake's state line is in the payload Sleep and wake…, and how sessions
 // asleep in "Waiting" fold, for every board; on the local board, Remote access…; on a page
-// signed in through the owner's domain, Sign out; Presence (#172), the board's, for every board.
+// signed in through the owner's domain, Sign out; Presence (#172), the board's, for every board;
+// on the local board's page Watches, Decisions, Away journal, and under Threads Case files and
+// Verified done (#596).
 // The items are models/settings-menu.ts.
 import { useEffect, useState } from 'react'
 import type { FoldMode } from '../../../src/core/fold-mode.ts'
@@ -21,7 +23,15 @@ import { LOOK_KEY, lookNow, setLook } from '../models/look.ts'
 import { type Dock, isDock } from '../models/panel-layout.ts'
 import { offersProfiles } from '../models/profiles.ts'
 import { keptAuth, remotePage, UNPAIRED } from '../models/remote-page.ts'
-import { offersMokupilot, settingPicked, settingsMenu, threadsNow } from '../models/settings-menu.ts'
+import {
+  type FeatureSwitch,
+  featuresNow,
+  offersMokupilot,
+  type SettingsNow,
+  settingPicked,
+  settingsMenu,
+  threadsNow,
+} from '../models/settings-menu.ts'
 import { reducedMotion } from '../models/spring.ts'
 import { offersTeam } from '../models/team.ts'
 import { setTheme, THEME_KEY, themeNow } from '../models/theme.ts'
@@ -111,10 +121,27 @@ export interface SettingsDeps {
   /** The board on another device: Paths on this computer… is offered. */
   localPaths?(): boolean
   openLocalPaths?(): void
+  /** Watches, decisions, the away journal on (#596); none: no item. */
+  watches?(): boolean | undefined
+  decisions?(): boolean | undefined
+  /** A decision's default may answer it; none: no choice. */
+  decisionsDefaults?(): boolean | undefined
+  journal?(): boolean | undefined
+  chooseFeature?(body: FeatureSetting): void
+  /** Under Threads: case files and verified done on (#596); none: no item. */
+  threadsCases?(): boolean | undefined
+  threadsVerify?(): boolean | undefined
+  /** What Off would leave behind and the journal's error (#596). */
+  featureExtras?(): Pick<SettingsNow, 'watchesRunning' | 'defaultsRunning' | 'journalError'>
 }
 
-/** What Settings → Threads asks the board for (POST /api/threads-settings, #410). */
-export type ThreadsSetting = { mode: ThreadMode } | { share: boolean }
+/** What Settings → Threads asks the board for (POST /api/threads-settings, #410; case files and verified done, #596). */
+export type ThreadsSetting = { mode: ThreadMode } | { share: boolean } | { cases: boolean } | { verify: boolean }
+
+/** What Settings → Watches, Decisions or Away journal asks the board for (POST /api/feature-settings, #596). */
+export type FeatureSetting =
+  | { [K in FeatureSwitch]: Record<K, boolean> }[FeatureSwitch]
+  | { decisionsDefaults: boolean }
 
 /** What Settings → Presence asks the board for (POST /api/presence { op: 'settings', … }). */
 export type PresenceSetting = { on: false } | { on: true; mode?: PresenceMode; idleMinutes?: number }
@@ -158,6 +185,13 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
       threadsShare: deps.threadsShare?.(),
       compact: deps.compact?.(),
       localPaths: deps.localPaths?.() ?? false,
+      watches: deps.watches?.(),
+      decisions: deps.decisions?.(),
+      decisionsDefaults: deps.decisionsDefaults?.(),
+      journal: deps.journal?.(),
+      threadsCases: deps.threadsCases?.(),
+      threadsVerify: deps.threadsVerify?.(),
+      ...deps.featureExtras?.(),
     })
     const source: MenuSource = keyboard ? 'keyboard' : deps.coarse() ? 'touch' : 'mouse'
     deps.menu.open(items, {
@@ -193,6 +227,11 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
         else if (pick?.kind === 'todos') deps.chooseTodos?.(pick.value)
         else if (pick?.kind === 'threads') deps.chooseThreads?.({ mode: pick.value })
         else if (pick?.kind === 'threadsShare') deps.chooseThreads?.({ share: pick.value })
+        else if (pick?.kind === 'threadsCases') deps.chooseThreads?.({ cases: pick.value })
+        else if (pick?.kind === 'threadsVerify') deps.chooseThreads?.({ verify: pick.value })
+        else if (pick?.kind === 'feature')
+          deps.chooseFeature?.({ [pick.feature]: pick.value } as Record<FeatureSwitch, boolean>)
+        else if (pick?.kind === 'decisionsDefaults') deps.chooseFeature?.({ decisionsDefaults: pick.value })
         else if (pick?.kind === 'compact') deps.chooseCompact?.(pick.value)
         else if (pick?.kind === 'localPaths') deps.openLocalPaths?.()
       },
@@ -385,6 +424,10 @@ export function useSettingsMenu(
     openDevices,
   })
   const [expanded, setExpanded] = useState(false)
+  const localFeatures = () => {
+    const data = latest.current.board.data
+    return data && !remotePage() ? featuresNow(data) : undefined
+  }
   const [gear] = useState(() => {
     const open = settingsMenuFrom({
       menu,
@@ -504,7 +547,14 @@ export function useSettingsMenu(
       chooseThreads: body => {
         const { t, board } = latest.current
         if (!board.canEdit) return board.toast(t('live.off'), true)
-        api.post('/api/threads-settings', body).catch(err => board.toast(errorText(err, t), true))
+        api
+          .post('/api/threads-settings', body)
+          // Made, but the agents' skill was not copied after it: said, as an error.
+          .then(r => {
+            const note = (r as { note?: unknown } | null)?.note
+            if (typeof note === 'string' && note) board.toast(note, true)
+          })
+          .catch(err => board.toast(errorText(err, t), true))
       },
       // An older board sends no default: no Auto-compact item.
       compact: () => latest.current.board.data?.compactDefault,
@@ -519,6 +569,26 @@ export function useSettingsMenu(
       },
       localPaths: remotePage,
       openLocalPaths: () => latest.current.openLocalPaths(),
+      // The feature switches (#596), on the local board's page, as Threads.
+      watches: () => localFeatures()?.watches,
+      decisions: () => localFeatures()?.decisions,
+      decisionsDefaults: () => localFeatures()?.decisionsDefaults,
+      journal: () => localFeatures()?.journal,
+      threadsCases: () => localFeatures()?.threadsCases,
+      threadsVerify: () => localFeatures()?.threadsVerify,
+      featureExtras: () => {
+        const f = localFeatures()
+        return {
+          ...(f?.watchesRunning && { watchesRunning: f.watchesRunning }),
+          ...(f?.defaultsRunning && { defaultsRunning: f.defaultsRunning }),
+          ...(f?.journalError && { journalError: f.journalError }),
+        }
+      },
+      chooseFeature: body => {
+        const { t, board } = latest.current
+        if (!board.canEdit) return board.toast(t('live.off'), true)
+        api.post('/api/feature-settings', body).catch(err => board.toast(errorText(err, t), true))
+      },
     })
     return settingsGear(menu, open, setExpanded)
   })

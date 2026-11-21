@@ -15,6 +15,8 @@ export interface MenuItem {
   id: string
   label: string
   hint?: string
+  /** One line under the label on what the item does (a Settings switch, #596); a gray item's reason shows instead. */
+  note?: string
   /** Set (true or false): the item has a check, and the menu a check column. */
   checked?: boolean
   disabled?: boolean
