@@ -264,6 +264,16 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX decisions_by_session ON decisions (session, asked_at);
     `,
   },
+  {
+    version: 9,
+    store: 'threads',
+    // Verified done (#492, core/work-threads.ts VerifyHead): a thread's verification as its entries
+    // fold it (on or off, acceptance lines, the verifier running, fails in a row, the last verdict),
+    // JSON; NULL for a thread that never had one.
+    sql: `
+      ALTER TABLE threads ADD COLUMN verify TEXT;
+    `,
+  },
 ]
 
 /** The version the code makes a file: the last step's. */

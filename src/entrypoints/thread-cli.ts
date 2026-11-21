@@ -20,6 +20,7 @@
 //   board thread open <key>
 //   board thread import <task board file> [--lane <id>]
 //   board thread share <key> <name|team|channel> [--history]   a request the owner confirms (#394)
+//   board thread verdict <key> pass|fail|unsure [--file <report>] "<one line>"   the verifier's alone (#492)
 // <key>: a key (atlas-12), the first 8 characters of an id, or a bare number in the session's lane.
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -36,6 +37,7 @@ import {
   mineIds,
   ThreadError,
   threadsWithRef,
+  verifyingThreads,
   watchesOf,
 } from '../adapters/work-thread-store.ts'
 import { type AskSpec, askSpec, type DecisionsConfig, type ReservedDecision } from '../core/decisions.ts'
@@ -82,6 +84,7 @@ import {
   type Written,
   watch,
 } from '../services/work-threads.ts'
+import { giveVerdict, type SelfAnswer, verdictGate } from '../services/work-verify.ts'
 
 export const THREAD_USAGE = `board thread new [--lane <id>] [--parent <key>] [--to <session>] [--doing] "<title>"
 board thread post <key> [--status next|doing|waiting|owner|done|dropped] [--summary "<line>"] [--waiting "<on what>"]
@@ -107,6 +110,15 @@ board thread share <key> <name|team|channel> [--history]
   share asks the owner to share the thread with a teammate's board; on a shared thread every entry
   that is not --private goes to them (or waits for the owner, as a team post of yours would).`
 
+/** What the usage says more while verified done is on (#492). */
+export const VERIFY_USAGE = `verified done (#492):
+board thread new [--lane <id>] [--to <session>] --verify [--accept "<check>"]... "<title>"
+board thread post <key> --accept "<check>"
+board thread set <key> --verify on|off
+board thread verdict <key> pass|fail|unsure [--file <report>] "<one line>"
+  On a thread with --verify, a session's done is held until a verifier the board starts checks it
+  against the --accept lines; only that verifier gives the verdict, a pass with its report as --file.`
+
 /** What the usage says more while case files are on (#488). */
 export const CASES_USAGE = `case files (#488):
 board thread new [--lane <id>] [--ref <ticket id or link>] "<title>"
@@ -119,7 +131,8 @@ board thread brief <key>                       the case for a fresh session: sta
   the sessions do. spawn-agent --thread <key> starts a new session from the brief and gives it the thread.`
 
 /** The usage, with the case files' lines while they are on. */
-const usageText = (cfg: ThreadsConfig | null): string => (cfg?.cases ? `${THREAD_USAGE}\n${CASES_USAGE}` : THREAD_USAGE)
+const usageText = (cfg: ThreadsConfig | null): string =>
+  [THREAD_USAGE, ...(cfg?.cases ? [CASES_USAGE] : []), ...(cfg?.verify ? [VERIFY_USAGE] : [])].join('\n')
 
 /** The flags each command takes: with a value, and bare. `--json` and `--help` go with every one. */
 const FLAGS: Record<string, { values: readonly string[]; bare: readonly string[] }> = {
@@ -156,11 +169,28 @@ const CASE_FLAGS: Record<string, { values: readonly string[]; bare: readonly str
   brief: { values: [], bare: [] },
 }
 
-function flagsOf(sub: string, cases: boolean): { values: readonly string[]; bare: readonly string[] } | undefined {
+/** The flags and the command verified done adds (#492), only while threads.verify is on: off, every command takes what it took. */
+const VERIFY_FLAGS: Record<string, { values: readonly string[]; bare: readonly string[] }> = {
+  new: { values: ['--accept'], bare: ['--verify'] },
+  post: { values: ['--accept'], bare: [] },
+  set: { values: ['--verify'], bare: [] },
+  verdict: { values: ['--file'], bare: [] },
+}
+
+function flagsOf(
+  sub: string,
+  cases: boolean,
+  verify = false,
+): { values: readonly string[]; bare: readonly string[] } | undefined {
   const own = FLAGS[sub]
-  const more = cases ? CASE_FLAGS[sub] : undefined
-  if (!more) return own
-  return { values: [...(own?.values ?? []), ...more.values], bare: [...(own?.bare ?? []), ...more.bare] }
+  const more = [cases ? CASE_FLAGS[sub] : undefined, verify ? VERIFY_FLAGS[sub] : undefined].filter(
+    (m): m is { values: readonly string[]; bare: readonly string[] } => !!m,
+  )
+  if (!more.length) return own
+  return {
+    values: [...(own?.values ?? []), ...more.flatMap(m => m.values)],
+    bare: [...(own?.bare ?? []), ...more.flatMap(m => m.bare)],
+  }
 }
 
 class Usage extends ThreadError {
@@ -180,8 +210,13 @@ interface Args {
  * The words and flags of `board thread <sub> …`. A flag the command does not take is refused, so a
  * mistyped one never turns into text; text that starts with `--` goes after a lone `--`.
  */
-export function parseArgs(sub: string, rest: readonly string[], cases = false, o: { decisions?: boolean } = {}): Args {
-  const flags = flagsOf(sub, cases)
+export function parseArgs(
+  sub: string,
+  rest: readonly string[],
+  cases = false,
+  o: { decisions?: boolean; verify?: boolean } = {},
+): Args {
+  const flags = flagsOf(sub, cases, o.verify)
   // Decisions off (#487): `ask` takes no value flag, as on main, so what it prints is main's.
   const known = (sub === 'ask' && !o.decisions ? undefined : flags) ?? { values: [], bare: [] }
   const words: string[] = []
@@ -217,6 +252,12 @@ export interface ThreadCmdContext {
   findSession: (word: string) => Promise<Party | null>
   /** A session on the board by its key alone (an imported item's owner_id); null when none has it. */
   sessionByKey?: (key: string) => Promise<Party | null>
+  /**
+   * The session that runs the command itself, never the one --session names, as herdr confirms it
+   * for the pane it runs in, or why it could not (services/work-verify.ts paneSelf): a verdict is
+   * the verifier's own (#492). Absent (a node's forwarded call): no verdict.
+   */
+  self?: () => Promise<SelfAnswer>
   /** Puts the question on the session's card, as `board ask` does; with decisions on (#487), its decision too, whose line it returns. */
   setAsk?: (
     question: string,
@@ -356,7 +397,7 @@ export async function threadCmd(rest: readonly string[], ctx: ThreadCmdContext):
         )
       return await forward(sub, args, ctx, out, json)
     }
-    const a = parseArgs(sub, args, !!cfg?.cases, { decisions: !!ctx.decisions })
+    const a = parseArgs(sub, args, !!cfg?.cases, { decisions: !!ctx.decisions, verify: !!cfg?.verify })
     const base = `http://127.0.0.1:${typeof ctx.cfg.port === 'number' ? ctx.cfg.port : 12422}/`
 
     // How MokuPilot finds the board (9.1): its address and whether threads are on, on or off.
@@ -373,7 +414,10 @@ export async function threadCmd(rest: readonly string[], ctx: ThreadCmdContext):
     const now = ctx.now ?? Date.now()
     // A lane id as categories have them, whatever case config.json wrote it in.
     const lane = ctx.lane ? ctx.lane.toLowerCase() : null
-    const run = new Run(db, cfg, { ...ctx, lane }, a, base, now, out, json)
+    // A running verifier's session id is no session's to read (#492): it is what a verdict is told by.
+    const self = ctx.actor.kind === 'session' ? ctx.actor.key : ''
+    const said = cfg.verify && self ? (line: string) => out(hideVerifiers(db as BoardDb, line, self)) : out
+    const run = new Run(db, cfg, { ...ctx, lane }, a, base, now, said, json)
     await run.dispatch(sub)
     return 0
   } catch (err) {
@@ -480,6 +524,16 @@ const callBoard =
     }
   }
 
+/** `line` with the session id of every verifier running now replaced, but the reader's own. */
+function hideVerifiers(db: BoardDb, line: string, self: string): string {
+  let out = line
+  for (const h of verifyingThreads(db)) {
+    const key = h.verify?.run?.key
+    if (key && key !== self) out = out.replaceAll(key, 'hidden')
+  }
+  return out
+}
+
 class Run {
   constructor(
     readonly db: BoardDb,
@@ -570,6 +624,7 @@ class Run {
         const toWord = a.one('--to')
         const to = toWord ? await this.party(toWord, '--to') : null
         const ref = a.one('--ref')
+        const accept = a.all('--accept')
         const w = newThread(this.write, {
           lane,
           title,
@@ -577,6 +632,8 @@ class Run {
           to,
           doing: a.has('--doing'),
           ...(ref !== undefined && { ref }),
+          ...(a.has('--verify') && { verify: true }),
+          ...(accept.length && { accept }),
         })
         return this.wrote(w, w.head.assignee ? [partyName(w.head.assignee)] : [])
       }
@@ -605,6 +662,7 @@ class Run {
           links: a.all('--link'),
           ...(reply && { replyTo: findEntry(this.db, head.id, reply).id }),
           ...(a.has('--private') && { private: true }),
+          ...(a.all('--accept').length && { accept: a.all('--accept') }),
         })
         const n = w.entry.files?.length ?? 0
         return this.wrote(w, n ? [`${n} ${n === 1 ? 'file' : 'files'}`] : [])
@@ -652,8 +710,12 @@ class Run {
         const title = a.one('--title')
         const lane = a.one('--lane')
         const ref = a.one('--ref')
+        const verify = a.one('--verify')
+        if (verify !== undefined && verify !== 'on' && verify !== 'off')
+          throw new Usage(`--verify is on or off, not "${verify}"`)
         const w = setFields(this.write, head, {
           ...(ref !== undefined && { ref: ref.trim().toLowerCase() === 'none' ? null : ref }),
+          ...(verify !== undefined && { verify: verify === 'on' }),
           ...(title !== undefined && { title }),
           ...(assignee !== undefined && { assignee: await this.party(assignee, '--assignee') }),
           ...(lane !== undefined && { lane }),
@@ -705,6 +767,26 @@ class Run {
         if (this.json) this.out(JSON.stringify({ ok: true, thread: w.head, asked: to }))
         else this.out(`ok · ${w.head.key} · share with ${to} asked: the owner confirms on the board`)
         return
+      }
+      case 'verdict': {
+        // Verified done off: no such command, as on main.
+        if (!this.write.cfg.verify) throw new Usage(`no command "board thread ${sub}"`)
+        const [key, outcome, ...words] = a.words
+        const head = this.thread(key)
+        if (outcome !== 'pass' && outcome !== 'fail' && outcome !== 'unsure')
+          throw new Usage(`usage: board thread verdict <key> pass|fail|unsure [--file <report>] "<one line>"`)
+        // Refused for what needs no herdr first: verification off, none running, another session.
+        verdictGate(this.write, head)
+        const self = await this.ctx.self?.().catch((err: unknown) => ({
+          why: err instanceof Error ? err.message : String(err),
+        }))
+        const w = giveVerdict(this.write, head, {
+          outcome,
+          line: words.join(' '),
+          files: a.all('--file'),
+          self: self ?? null,
+        })
+        return this.wrote(w, [`verdict ${outcome}`])
       }
       default:
         throw new Usage(`no command "board thread ${sub}"`)
@@ -794,6 +876,7 @@ class Run {
         full,
         ...(sharingOf(head) && { shared: true }),
         ...(c && { caseLines: caseHeadLines(head, c.sessions, c.live, this.now) }),
+        ...(head.proposed?.verify && !head.verify?.run && { verifiers: verifyingThreads(this.db).length }),
       }),
     )
   }
