@@ -143,7 +143,7 @@ watches (6.2).
 |---|---|---|
 | `id` | UUID v4 | On a shared thread, the id of the Team message that carries it. |
 | `thread` | thread id | |
-| `n` | integer | A counter per thread: one more than the highest this board has seen (4.3). |
+| `n` | integer | A counter per thread: one more than the highest this board has seen (4.3). On a shared thread a private entry takes the number of the entry it follows, so a number can name more than one entry there (#541). |
 | `at` | time | |
 | `author` | party | |
 | `type` | `note`, `ask`, `answer`, `system` | `ask` is a question for the owner. `answer` replies to one. `system` is written by the board: created, imported, shared. |
@@ -273,7 +273,9 @@ and has no order across senders. So each board that takes part holds its own cop
 thread, and the copies have to come out the same. Three rules do that:
 
 1. Entries are immutable and carry `n`, a counter per thread. A board writes its entry with one
-   more than the highest `n` it has seen on that thread (a Lamport counter).
+   more than the highest `n` it has seen on that thread (a Lamport counter). A private entry,
+   which stays on its board, takes the `n` of the entry it follows instead (#541), so the numbers
+   the peers see have no holes that rule 3 would read as missed entries.
 2. A head field takes the value from the entry that is last in the order `(n, at, author's peer
    id)`. Two boards that hold the same entries compute the same head, whatever order the entries
    arrived in.
@@ -327,7 +329,8 @@ What each one does:
 - `ask` writes an `ask` entry, sets the thread to `owner` with the question as `waitingOn`, and
   sets the session's `card.ask` so the card moves to "needs the user" exactly as `board ask` does.
 - `show` prints the head and the last 5 entries, each cut to 300 characters, 1,500 characters in
-  all. `--since <n>` prints only entries after `n`. `--full` prints everything and is meant for a
+  all. `--since <n>` prints only entries after `n` (on a shared thread also a private entry with
+  that number, which may have come after it). `--full` prints everything and is meant for a
   fork or a subagent. A file is shown as its name, size and path, never its content.
 - `list` prints one line per open thread: key, status, assignee, title, summary. 20 lines at
   most, then "and 14 more (--all)". `--mine` is the threads the session created, is assigned or

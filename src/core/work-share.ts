@@ -4,7 +4,8 @@
 // WorkBody), sent only to a board whose caps say `work`. Every board that takes part keeps its own
 // copy, and the copies come out the same:
 //
-//   1. Entries are immutable and carry `n`, one more than the highest the writer had seen.
+//   1. Entries are immutable and carry `n`, one more than the highest the writer had seen; a
+//      private entry, which no peer gets, the `n` of the entry it follows (#541).
 //   2. A head field takes the value of the entry that is last in the order (n, at, author's peer
 //      id): foldShared below. Two boards with the same entries get the same head, whatever order the
 //      entries arrived in.
@@ -52,12 +53,26 @@ export const authorPeer = (p: Party, me: string): string => (p.kind === 'peer' ?
 export const isAdoption = (e: Pick<ThreadEntry, 'type' | 'private' | 'author'>): boolean =>
   e.type === 'system' && e.private === true && e.author.kind === 'peer'
 
-/** Entries in the order every board folds a shared thread in: (n, at, author's peer id), an adoption after its sender's entry, then the id. */
+/** A private entry this board wrote itself (#541): it shares its number with the entry it follows, and folds after it. */
+const ownPrivate = (e: Pick<ThreadEntry, 'private' | 'author'>): boolean =>
+  e.private === true && e.author.kind !== 'peer'
+
+/** Where an entry stands in this board's journal; the one being written (no row yet) is the last. */
+const writtenAt = (e: Pick<ThreadEntry, 'seq'>): number => e.seq || Number.MAX_SAFE_INTEGER
+
+/**
+ * Entries in the order every board folds a shared thread in: (n, at, author's peer id), an adoption
+ * after its sender's entry, then the id. This board's own private entries, which no other board
+ * holds, come after the others of their number, whatever the clocks say, and among themselves in
+ * the order they were written.
+ */
 export function sharedOrder(entries: readonly ThreadEntry[], me: string): ThreadEntry[] {
   const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
   return [...entries].sort(
     (a, b) =>
       a.n - b.n ||
+      Number(ownPrivate(a)) - Number(ownPrivate(b)) ||
+      (ownPrivate(a) && ownPrivate(b) ? writtenAt(a) - writtenAt(b) : 0) ||
       a.at - b.at ||
       cmp(authorPeer(a.author, me), authorPeer(b.author, me)) ||
       Number(isAdoption(a)) - Number(isAdoption(b)) ||
