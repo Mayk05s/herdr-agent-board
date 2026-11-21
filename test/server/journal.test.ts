@@ -2,7 +2,7 @@
 // before and no file is made; with it, a pane's change between two refreshes is one move, the
 // payload carries the strip's part and GET /api/journal the list.
 import { expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { serveBoard } from '../support/board-server.ts'
 import { type Child, type Sandbox, sandbox } from '../support/sandbox.ts'
@@ -108,6 +108,44 @@ test('a session seen as pane-<id> before herdr reports its session id is one row
   }
   expect(journal.rows.map(x => [x.key, x.kind])).toEqual([[sid, 'done']])
   expect(journal.rest).toEqual({ work: 0, idle: 0 })
+  proc.kill()
+  await proc.exited
+})
+
+test('an API error stop: listed as stopped on an error, and the flag stays off the payload and the detail', async () => {
+  const box = await sandbox()
+  cwd = box.dir
+  box.state(snapshot('working'))
+  const { url, proc } = await serveBoard(box, { journal: true })
+  await showing(proc, url, 'working')
+  const project = join(box.env.HOME as string, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(project, { recursive: true })
+  const line = (o: Record<string, unknown>) => JSON.stringify({ timestamp: '2026-11-21T08:00:00.000Z', cwd, ...o })
+  writeFileSync(
+    join(project, `${sid}.jsonl`),
+    [
+      line({ type: 'user', message: { role: 'user', content: 'go' } }),
+      line({
+        type: 'assistant',
+        isApiErrorMessage: true,
+        message: {
+          role: 'assistant',
+          model: '<synthetic>',
+          content: [{ type: 'text', text: 'API Error: 529 overloaded' }],
+        },
+      }),
+    ].join('\n') + '\n',
+  )
+  box.state(snapshot('done'))
+  const payload = await showing(proc, url, 'done')
+  const { journal } = (await (await fetch(`${url}/api/journal?since=0`)).json()) as {
+    journal: { rows: { kind: string; line: string }[] }
+  }
+  expect(journal.rows.map(r => [r.kind, r.line])).toEqual([['error', 'API Error: 529 overloaded']])
+  expect((payload.items as Record<string, unknown>[]).some(i => 'apiError' in i)).toBe(false)
+  const detail = (await (await fetch(`${url}/api/session/${sid}`)).json()) as { item: Record<string, unknown> }
+  expect(detail.item.key).toBe(sid)
+  expect('apiError' in detail.item).toBe(false)
   proc.kill()
   await proc.exited
 })

@@ -112,6 +112,10 @@ const nameOf = (item: Item): string => clean(item.name || item.autoName) || item
  * pane (services/board.ts): a session just started can be seen under the pane key first. When a
  * card with a session id appears and its pane's key is on record, still on the board, that is the
  * same session: `renames` moves its history to the new key, so the list has one row, not two.
+ * Two limits: a strip already cached at a return keeps its `pane-<id>` row (a dead link) until it
+ * is dismissed, when the card gets its session id after that return; and a pane whose agent never
+ * reported a session id, replaced between two refreshes by a Claude session in the same pane,
+ * hands its moves to that session.
  */
 export function diffStates(
   before: ReadonlyMap<string, StateRow>,

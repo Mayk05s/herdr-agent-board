@@ -57,6 +57,15 @@ test('sinceOf: a time back, the last such time of day, a date and time', () => {
   // a bare time of day still means the last one
   expect(sinceOf('9:00', NOW)).toBe(new Date(2026, 10, 20, 9, 0).getTime())
   expect(sinceOf('at 9:00', NOW)).toBe(new Date(2026, 10, 20, 9, 0).getTime())
+  // in any spelling of a time of day parseWhen takes
+  expect(sinceOf('9pm', NOW)).toBe(new Date(2026, 10, 20, 21, 0).getTime())
+  expect(sinceOf('9 pm', NOW)).toBe(new Date(2026, 10, 20, 21, 0).getTime())
+  expect(sinceOf('3:30pm', NOW)).toBe(new Date(2026, 10, 20, 15, 30).getTime())
+  expect(sinceOf('7am', NOW)).toBe(new Date(2026, 10, 21, 7, 0).getTime())
+  expect(sinceOf('9am', NOW)).toBe(new Date(2026, 10, 20, 9, 0).getTime())
+  // a day word makes it no bare time: ahead is refused
+  expect(sinceOf('today 9pm', NOW)).toBeNull()
+  expect(sinceOf('fri 9am', NOW)).toBeNull()
   expect(sinceOf('soon', NOW)).toBeNull()
   // ahead is no time back; a date alone is its midnight
   expect(sinceOf('in 2h', NOW)).toBeNull()

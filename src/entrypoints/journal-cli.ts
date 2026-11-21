@@ -9,12 +9,13 @@ import { awaySince, type JournalList, journalConfig, journalLines, journalList, 
 import { t } from '../core/lang.ts'
 import { presenceConfig } from '../core/presence.ts'
 import type { Config } from '../core/types.ts'
-import { parseDuration, parseWhen } from '../core/when.ts'
+import { dayOf, parseDuration, parseWhen } from '../core/when.ts'
 
 /**
- * `--since`: a time back (3h, 90m), a bare time of day (the last one, today or yesterday), a date
- * (its midnight) or a date and time. Anything ahead of now that is not a bare time of day
- * ("2026-11-22 09:00", "tomorrow 9:00", "in 2h") is refused, not moved back.
+ * `--since`: a time back (3h, 90m), a bare time of day (23:56, 9pm, 3:30pm: the last one, today or
+ * yesterday), a date (its midnight) or a date and time. A time of day is bare with no date and no
+ * day word; anything else ahead of now ("2026-11-22 09:00", "tomorrow 9:00", "in 2h") is refused,
+ * not moved back.
  */
 export function sinceOf(text: string, now: number): number | null {
   // "in 2h" is ahead, not back
@@ -28,7 +29,9 @@ export function sinceOf(text: string, now: number): number | null {
   if (back !== null) return now - back
   let at = parseWhen(text, now)
   if (at === null) return null
-  if (at > now && /^\s*(?:at\s+)?\d{1,2}(?::\d{2})?\s*$/i.test(text)) {
+  const words = text.trim().toLowerCase().split(/\s+/)
+  const bare = !/^\d{4}-/.test(words[0] ?? '') && !words.some(w => dayOf(w) !== null)
+  if (at > now && bare) {
     const d = new Date(at)
     d.setDate(d.getDate() - 1)
     at = d.getTime()
