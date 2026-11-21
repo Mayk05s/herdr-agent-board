@@ -64,6 +64,8 @@ const facts = (over: Partial<NodeFacts> = {}): NodeFacts => ({
   herdr: null,
   claude: null,
   serverBun: null,
+  hostname: 'server-1',
+  nodeConfig: null,
   ...over,
 })
 
@@ -72,7 +74,7 @@ const wanted = (over: Partial<NodeWanted> = {}): NodeWanted => ({
   port: 12430,
   linkKey: KEY,
   master: { id: 'laptop', name: 'Ноутбук Ромы 100%', tokenHash: 'ab'.repeat(32) },
-  plugin: { path: '/var/tmp/agent-board-plugin.tar', sha256: 'cd'.repeat(32) },
+  plugin: { path: '/var/tmp/agent-board-plugin.tar', sha256: 'cd'.repeat(32), commit: 'ef'.repeat(20) },
   ceiling: ceilingFor(facts()) as NonNullable<ReturnType<typeof ceilingFor>>,
   packages: false,
   ...over,
@@ -317,8 +319,9 @@ describe('the plan', () => {
       ['linkKey', { linkKey: 'ssh-ed25519 AAAA\nrm -rf /' }],
       ['master.name', { master: { id: 'laptop', name: 'a\nb', tokenHash: 'ab'.repeat(32) } }],
       ['master.tokenHash', { master: { id: 'laptop', name: 'a', tokenHash: 'AB'.repeat(32) } }],
-      ['plugin.path', { plugin: { path: '/var/tmp/../etc/shadow', sha256: 'cd'.repeat(32) } }],
-      ['plugin.path', { plugin: { path: '/var/tmp/a b.tar', sha256: 'cd'.repeat(32) } }],
+      ['plugin.path', { plugin: { path: '/var/tmp/../etc/shadow', sha256: 'cd'.repeat(32), commit: 'ef'.repeat(20) } }],
+      ['plugin.path', { plugin: { path: '/var/tmp/a b.tar', sha256: 'cd'.repeat(32), commit: 'ef'.repeat(20) } }],
+      ['plugin.commit', { plugin: { path: '/var/tmp/a.tar', sha256: 'cd'.repeat(32), commit: "ef'; rm -rf /" } }],
     ]
     for (const [field, over] of bad) {
       expect([field, nodeWantedProblem(wanted(over))]).toEqual([field, field])
@@ -543,18 +546,59 @@ test("Look's lines read, and a run's", () => {
   })
 })
 
+describe('a node set up by hand (#509)', () => {
+  test("its own board holding the door's port is no refusal; another program there, or a node of another id, is", () => {
+    const held = { listening: [{ port: 12430, name: 'bun' }] }
+    expect(nodeRefusals(facts({ ...held, nodeConfig: { id: 'server-1', port: 12430 } }), wanted())).toEqual([])
+    for (const nodeConfig of [null, { id: 'box-2', port: 12430 }, { id: 'server-1', port: 12440 }])
+      expect(nodeRefusals(facts({ ...held, nodeConfig }), wanted()).map(r => r.key)).toEqual(['node.refuse.port'])
+  })
+
+  test("the unit's undo stops and starts herdr only when this run started it", () => {
+    const p = nodePlan(facts(), wanted())
+    if (!p.ok) throw new Error('refused')
+    const unit = p.plan.steps.find(s => s.id === 'unit')
+    expect(unit?.commands.join('\n')).toContain('touch "$W/started-herdr"; asNode systemctl --user start herdr.service')
+    expect(unit?.commands.join('\n')).not.toContain('restart')
+    for (const line of (unit?.undo ?? []).filter(l => l.includes('--now')))
+      expect(line).toContain('[ -f "$W/started-herdr" ]')
+  })
+
+  test("the plugin is stamped with the master's commit, and a plugin of another commit is not skipped", () => {
+    const p = nodePlan(facts(), wanted())
+    if (!p.ok) throw new Error('refused')
+    const plugin = p.plan.steps.find(s => s.id === 'plugin')
+    expect(plugin?.commands.join('\n')).toContain(`printf '%s\\n' '${'ef'.repeat(20)}' | putAs`)
+    expect(plugin?.skipIf.join('\n')).toContain('.archive-commit')
+  })
+})
+
 describe('without a node, nothing of this', () => {
-  test('no module of the board imports the plan or its texts yet: every other setup runs the code it ran', () => {
+  test('only "Add a server" imports the plan, and only app.ts the service, which it makes when the form first asks (#509)', () => {
     const root = join(import.meta.dir, '..', '..', 'src')
     const walk = (d: string): string[] =>
       readdirSync(d).flatMap(n => {
         const p = join(d, n)
         return statSync(p).isDirectory() ? walk(p) : [p]
       })
-    const importers = walk(root)
+    const rel = (p: string): string => p.slice(root.length + 1).replaceAll('\\', '/')
+    const files = walk(root)
+    const importers = files
       .filter(p => !/node-(plan|texts)\.ts$/.test(p))
       .filter(p => /from '[^']*node-(plan|texts)(\.ts)?'/.test(readFileSync(p, 'utf8')))
-    expect(importers).toEqual([])
+      .map(rel)
+      .sort()
+    // git.ts takes the stamp's file name only (archiveStamp), which runs nothing
+    expect(importers).toEqual(['adapters/git.ts', 'core/node-setup.ts', 'services/nodes/setup.ts'])
+    const service = files
+      .filter(p => /from '[^']*nodes\/setup(\.ts)?'/.test(readFileSync(p, 'utf8')))
+      .map(rel)
+      .sort()
+    expect(service).toEqual(['server/app.ts', 'server/routes/nodes.ts'])
+    // made inside the form's own routes' factory, not when the board starts
+    const app = readFileSync(join(root, 'server', 'app.ts'), 'utf8')
+    expect(app).toMatch(/nodeSetupRoutes\(\s*\(\) =>\s*\(nodeSetup \?\?= createNodeSetup\(/)
+    expect(app.match(/createNodeSetup\(/g)).toHaveLength(1)
   })
 
   test('its words are under node. and place. only (and the one launch error the pin has), in both languages, and no other dictionary has such a key', () => {
