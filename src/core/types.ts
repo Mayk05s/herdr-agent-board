@@ -2,6 +2,7 @@
 
 import type { CallView } from './call-agent.ts'
 import type { CompactView } from './compact.ts'
+import type { CardDecision } from './decisions.ts'
 import type { FormQuestion } from './dialogs/question-form.ts'
 import type { HelperSummary } from './helpers.ts'
 import type { FailureKind } from './launch/launcher-command.ts'
@@ -234,6 +235,8 @@ export interface Config {
   threads?: unknown
   /** Watches (#486, `true` or an object), as config.json has it: read through core/watches.ts watchesConfig. */
   watches?: unknown
+  /** Decisions (#487, `true` or `{ defaults: false }`), as config.json has it: read through core/decisions.ts decisionsConfig. */
+  decisions?: unknown
   /** Trusted local Workdesk watcher settings, read only by the board server. */
   workdesk?: unknown
   workdeskDialog?: unknown
@@ -380,6 +383,8 @@ export interface Item {
   claudeRoot?: string | null
   /** Its tasks from its card (#202), while config.json turns them on; absent when none. */
   todos?: Todo[]
+  /** Its open question's options, recommendation and default (#487), while config.json turns decisions on; absent when none. */
+  decision?: CardDecision
   /** Its auto-compact (#378, core/compact.ts compactView): absent when neither it nor Settings has a limit. */
   compact?: CompactView
   /**

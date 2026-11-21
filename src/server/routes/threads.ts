@@ -103,6 +103,20 @@ export function threadOpenState(now: () => number = Date.now): ThreadOpenState {
   }
 }
 
+/**
+ * Why an owner's action that goes out may not go now (428 with its confirmation), or null (#224).
+ * Decisions' answer on a shared thread (#487) goes through it too.
+ */
+export function confirmGate(c: ThreadsApp['confirm'], req: Request, action: OwnerAction): Response | null {
+  if (!c?.required()) return null
+  if (unlocks(action) && c.unlocked(req.headers.get('x-board-unlock'))) return null
+  if (!c.safe()) return json(503, { ok: false, error: 'loopback' })
+  // From away (#377), as routes/team.ts held(): it waits for the owner at the computer.
+  const away = c.away(req.url)
+  const id = c.pend(action, away)
+  return json(428, { ok: false, error: 'confirm', id, confirm: c.urlOf(id), ...(away && { where: 'computer' }) })
+}
+
 /** What the routes take of the board. */
 export interface ThreadsApp {
   cfg: Pick<Config, 'threads'>
@@ -114,7 +128,7 @@ export interface ThreadsApp {
    */
   tell(session: string, text: string): Promise<{ ok: true } | { ok: false; error: string }>
   /** Clears the question on the session's card, as its next prompt would, while it is still `question`. */
-  clearAsk(session: string, question: string): void | Promise<void>
+  clearAsk(session: string, question: string, answer?: string): void | Promise<void>
   /** The tests' schedule, state folder and clock. */
   schedule?: EventSchedule
   state?: string
@@ -333,17 +347,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
     return { kind: 'session', key: v.key, name: typeof v.name === 'string' ? v.name.slice(0, 80) : v.key.slice(0, 8) }
   }
 
-  /** Why an owner's action that goes out may not go now (428 with its confirmation), or null (#224). */
-  function gate(req: Request, action: OwnerAction): Response | null {
-    const c = app.confirm
-    if (!c?.required()) return null
-    if (unlocks(action) && c.unlocked(req.headers.get('x-board-unlock'))) return null
-    if (!c.safe()) return json(503, { ok: false, error: 'loopback' })
-    // From away (#377), as routes/team.ts held(): it waits for the owner at the computer.
-    const away = c.away(req.url)
-    const id = c.pend(action, away)
-    return json(428, { ok: false, error: 'confirm', id, confirm: c.urlOf(id), ...(away && { where: 'computer' }) })
-  }
+  const gate = (req: Request, action: OwnerAction): Response | null => confirmGate(app.confirm, req, action)
 
   const unlockedBy = (req: Request): boolean =>
     !app.confirm?.required() || app.confirm.unlocked(req.headers.get('x-board-unlock'))
@@ -497,7 +501,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
         error: err instanceof Error ? err.message : String(err),
       }))
       // Its card's question goes once it has the answer; one it did not get stays on show.
-      if (told.ok) await app.clearAsk(asker, answered.question)
+      if (told.ok) await app.clearAsk(asker, answered.question, answered.text)
       out.told = told.ok
       if (!told.ok) out.why = told.error
     }
