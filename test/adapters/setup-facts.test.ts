@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, win32 } from 'node:path'
 import { findCommand, gatherFacts, herdrConfigFile, readText } from '../../src/adapters/setup-facts.ts'
 import {
   wakeSessionsFile,
@@ -77,7 +77,8 @@ describe('gatherFacts', () => {
       const none = await gatherFacts({ wakeUrl: null, wake: false }, { root: ROOT_A, env, platform: 'win32', home })
       assert.equal(none.settings, null)
       assert.equal(none.settingsError, '')
-      assert.equal(none.herdrConfigFile, join(dir, 'appdata', 'herdr', 'config.toml'))
+      // Joined with Windows' rules, the platform passed in, on any host (#483).
+      assert.equal(none.herdrConfigFile, win32.join(dir, 'appdata', 'herdr', 'config.toml'))
       assert.equal(none.herdrConfig, null)
       assert.equal(none.wake, null)
       assert.deepEqual(none.commands, { board: { ps: null, sh: null }, 'spawn-agent': { ps: null, sh: null } })
@@ -112,7 +113,7 @@ describe('gatherFacts', () => {
       assert.deepEqual(command.launcher, {
         kind: 'command',
         name: 'start',
-        program: { file: join(dir, 'pwsh.exe'), found: false },
+        program: { file: win32.resolve(join(dir, 'pwsh.exe')), found: false },
         script: { file: script, found: false },
       })
     } finally {
@@ -307,6 +308,31 @@ describe('gatherFacts', () => {
     ])
   })
 
+  test('bin folder, herdr config and a launcher path joined for the platform passed in (#483)', async () => {
+    const facts = (platform: string, home: string, env: Record<string, string>, command: string) =>
+      gatherFacts(
+        { wakeUrl: null, wake: false, launch: { command: [command] } },
+        {
+          root: ROOT_A,
+          env: { PATH: '', ...env },
+          platform,
+          home,
+        },
+      )
+    // Windows on any host: \ throughout, a C:\ program taken as it is.
+    const win = await facts('win32', 'C:\\Users\\anna', {}, 'C:\\Tools\\claude.exe')
+    expect(win.binDir).toBe('C:\\Users\\anna\\.local\\bin')
+    expect(win.herdrConfigFile).toBe('C:\\Users\\anna\\.config\\herdr\\config.toml')
+    expect(win.launcher).toMatchObject({ kind: 'command', program: { file: 'C:\\Tools\\claude.exe' } })
+    const roaming = await facts('win32', 'C:\\Users\\anna', { APPDATA: 'C:\\Users\\anna\\AppData\\Roaming' }, 'claude')
+    expect(roaming.herdrConfigFile).toBe('C:\\Users\\anna\\AppData\\Roaming\\herdr\\config.toml')
+    // Linux on any host: / throughout, a /opt program with no drive put in front.
+    const linux = await facts('linux', '/home/ben', {}, '/opt/claude/bin/claude')
+    expect(linux.binDir).toBe('/home/ben/.local/bin')
+    expect(linux.herdrConfigFile).toBe('/home/ben/.config/herdr/config.toml')
+    expect(linux.launcher).toMatchObject({ kind: 'command', program: { file: '/opt/claude/bin/claude' } })
+  })
+
   // Before wake ships, wake off is herdr-wake's line at wakeUrl; once it ships the board's own wake
   // has the line whether on or off, and herdr-wake is not asked (the twin below).
   test.skipIf(WAKE_SHIPPED)(
@@ -469,6 +495,12 @@ describe('gatherFacts', () => {
       join('C:\\Users\\u\\AppData\\Roaming', 'herdr', 'config.toml'),
     )
     assert.equal(herdrConfigFile({}, '/home/u'), join('/home/u', '.config', 'herdr', 'config.toml'))
+    // The platform passed in, whatever the host (#483).
+    assert.equal(herdrConfigFile({}, '/home/u', 'linux'), '/home/u/.config/herdr/config.toml')
+    assert.equal(
+      herdrConfigFile({ APPDATA: 'C:\\Users\\u\\AppData\\Roaming' }, 'C:\\Users\\u', 'win32'),
+      'C:\\Users\\u\\AppData\\Roaming\\herdr\\config.toml',
+    )
     const dir = mkdtempSync(join(tmpdir(), 'board-setup-'))
     try {
       writeFileSync(join(dir, 'a.toml'), '\uFEFFkey = 1\n')
