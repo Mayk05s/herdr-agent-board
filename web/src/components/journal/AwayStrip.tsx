@@ -15,7 +15,7 @@ export function AwayStrip({ journal }: { journal: JournalView }) {
   const laneTitle = (id: string): string => data?.categories.find(c => c.id === id)?.title ?? id
   const entries = journalEntries(shown.list)
   return (
-    <section className="away-strip" aria-label={shown.title}>
+    <section className="away-strip" id="away-strip" aria-label={shown.title}>
       <div className="away-head">
         <h2 className="away-title">{shown.title}</h2>
         <button

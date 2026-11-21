@@ -432,7 +432,8 @@ export function Toolbar({
                   type="button"
                   className={journal.open ? 'pill-toggle journal-open on' : 'pill-toggle journal-open'}
                   id="journal-open"
-                  aria-pressed={journal.open}
+                  aria-expanded={journal.open}
+                  aria-controls="away-strip"
                   title={t('journal.buttonHint')}
                   onClick={() => journal.onToggle()}
                 >
