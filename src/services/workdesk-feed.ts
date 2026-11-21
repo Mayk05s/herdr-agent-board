@@ -134,8 +134,11 @@ export async function feedOnce(o: FeedOptions, signal: AbortSignal): Promise<voi
         const live = active.get(h.task_id)
         try {
           const assignment = live?.task.assignment
-          if (live && assignment && live.task.executor === h.executor) {
+          const executor = live?.task.executor
+          if (live && assignment && executor) {
             const { task } = live
+            // The thread stays with the task when Workdesk hands it to another executor: speak as the current one.
+            const current = { ...h, executor }
             const round = { task_id: task.id, assignment_id: assignment.id, revision: assignment.revision }
             let fed = state.tasks[h.task_id]
             if (!fed || fed.thread !== head.id || fed.assignment !== round.assignment_id) {
@@ -150,8 +153,8 @@ export async function feedOnce(o: FeedOptions, signal: AbortSignal): Promise<voi
               state.tasks[h.task_id] = fed
               save()
             }
-            await outbound(db, mcp, h, head, round, fed, save, o.log)
-            await inbound(ctx, mcp, h, round, fed, save, o.log)
+            await outbound(db, mcp, current, head, round, fed, save, o.log)
+            await inbound(ctx, mcp, current, round, fed, save, o.log)
             ownerWait(ctx, h.thread_id, live.task.status, live.summary)
           } else if (!live) await closeIfDone(ctx, mcp, h, state, save, o.log)
         } catch (err) {

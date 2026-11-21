@@ -185,3 +185,24 @@ test('chatText and cardOf', () => {
   expect(cardOf('https://h/workdesk/#tasks/26')).toEqual({ task_id: 26, source: 'workdesk' })
   expect(cardOf('https://h/workdesk/#tasks/BOARD-9')).toBeNull()
 })
+
+test('a task handed to another executor keeps its thread: the feed speaks as the new one', async () => {
+  const f = setup()
+  await f.tick()
+  f.fake.write({
+    tasks: [{ ...live(), executor: 'Board-feed' }],
+    feed: { messages: [{ id: 3, kind: 'message', text: 'Привет' }] },
+  })
+  f.post((c, h) => postEntry(c, h, { text: 'после передачи' }))
+  await f.tick()
+  const executorOf = (name: string) =>
+    f.fake.calls(name).map(c => (c.params.arguments as { executor?: string }).executor)
+  expect(executorOf('post_board_thread_message')).toEqual(['Board-feed'])
+  expect(executorOf('read_owner_messages').at(-1)).toBe('Board-feed')
+  expect(
+    f
+      .entries()
+      .filter(e => e.type === 'answer')
+      .map(e => e.text),
+  ).toEqual(['Привет'])
+})
