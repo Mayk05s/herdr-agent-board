@@ -8,7 +8,7 @@
 // The same code on a node (through its door, server/routes/node.ts) and on the master (in process).
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, relative, sep } from 'node:path'
+import { basename, dirname, isAbsolute, relative, sep } from 'node:path'
 import { writeCard } from '../adapters/cards.ts'
 import { cwdOf } from '../adapters/claude-home.ts'
 import { checkoutFacts, checkoutIdentity, gitInfo } from '../adapters/git.ts'
@@ -19,7 +19,7 @@ import { listEntries, removeEntry } from '../adapters/schedule-store.ts'
 import { itemProfile } from '../core/item-profile.ts'
 import { claudeStateFile } from '../core/move.ts'
 import { entriesToCarry, type MovePack, type MoveWhy, moveWhyText, packFolder } from '../core/move-device.ts'
-import { SESSION_ID } from '../core/resume.ts'
+import { projectFolderName, SESSION_ID } from '../core/resume.ts'
 import type { Item } from '../core/types.ts'
 import { wake } from './actions.ts'
 import type { Deps } from './deps.ts'
@@ -121,8 +121,13 @@ export function createMoveOut(o: MoveOutDeps): MoveOut {
       const known = item.transcript && existsSync(item.transcript) ? item.transcript : null
       const transcript = known || findTranscript(dir, session, item.cwd)
       if (!transcript) return no({ kind: 'no-transcript' })
-      // Claude resumes a session from the folder its conversation was recorded in.
-      const cwd = (await cwdOf(transcript)) || item.cwd
+      // Claude resumes a session from the folder whose project folder holds its conversation. A
+      // session moved here before has the source device's folder in its first lines (#621): the
+      // folder it runs in (its card's) is taken first when the transcript lies under it.
+      const recorded = await cwdOf(transcript)
+      const under = basename(dirname(transcript))
+      const cwd =
+        [item.cwd, recorded].find(c => !!c && projectFolderName(c) === under && existsSync(c)) || recorded || item.cwd
       if (!cwd) return no({ kind: 'no-checkout' })
       const folder = await folderOf(cwd)
       if (!folder.ok) return no(folder.why)
