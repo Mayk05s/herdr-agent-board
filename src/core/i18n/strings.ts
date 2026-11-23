@@ -13,6 +13,7 @@ import { CAL_STRINGS } from './cal-strings.ts'
 import { CALL_STRINGS } from './call-strings.ts'
 import { COMPACT_STRINGS } from './compact-strings.ts'
 import { DECISION_STRINGS } from './decision-strings.ts'
+import { DESIGN_STRINGS } from './design-strings.ts'
 import { FEATURE_STRINGS } from './feature-strings.ts'
 import { FORK_STRINGS } from './fork-strings.ts'
 import { HELPER_STRINGS } from './helper-strings.ts'
@@ -105,6 +106,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'limits.claudeTitle': 'Claude',
     'limits.agyTitle': 'Gemini (agy)',
     'limits.agyPill': 'Gemini',
+    'limits.agyOtherModels': 'Other models',
+    'limits.agyOtherModelsHint': 'Third-party models in Antigravity, such as Claude',
     'limits.hint': 'Claude usage of this account, {time}, as Claude Code reported it to the status line.',
     'limits.hintUsagebar':
       'Claude usage, {time}. From the usagebar cache of the default profile; the board does not check it is the account of these sessions.',
@@ -116,6 +119,26 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'limits.resetsAt': '{window}: resets {reset}.',
     'limits.forecastOut': '{window}: at this pace it runs out at {at}, before the reset ({reset}).',
     'limits.forecastLasts': '{window}: at this pace it lasts until the reset ({reset}).',
+    'set.housekeeping': 'Housekeeping…',
+    'hk.title': 'Housekeeping',
+    'hk.about': 'Memory guard and leftover browser tab sweep (off by default)',
+    'hk.memory.title': 'Memory guard',
+    'hk.memory.about':
+      'Checks available memory every minute and safely puts idle sessions to sleep below the action threshold (never kills processes or touches working sessions).',
+    'hk.memory.enable': 'Enable memory guard',
+    'hk.memory.warnMb': 'Warning (MB)',
+    'hk.memory.actionMb': 'Sleep idle below (MB)',
+    'hk.tabs.title': 'Leftover browser tabs',
+    'hk.tabs.about':
+      'Every 30 minutes, closes unleased, unpinned, idle browser tabs per profile (never the last tab or pages asking before unload).',
+    'hk.tabs.enable': 'Enable browser tab sweep',
+    'hk.tabs.idleMin': 'Idle minutes',
+    'hk.save': 'Save',
+    'hk.dryRun': 'Dry run now',
+    'hk.dryRunning': 'Checking…',
+    'hk.loading': 'Loading…',
+    'hk.invalidNumber': 'Enter a valid whole number.',
+    'hk.log': 'Recent housekeeping',
 
     'mobile.readOnly': 'No fresh data from herdr: sending and going to sessions wait until it is back',
     'attention.unseen': 'Not viewed',
@@ -807,6 +830,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'limits.claudeTitle': 'Claude',
     'limits.agyTitle': 'Gemini (agy)',
     'limits.agyPill': 'Gemini',
+    'limits.agyOtherModels': 'Другие модели',
+    'limits.agyOtherModelsHint': 'Сторонние модели в Antigravity, например Claude',
     'limits.hint': 'Расход Claude по этому аккаунту, {time}, как Claude Code сообщил в строку состояния.',
     'limits.hintUsagebar':
       'Расход Claude, {time}. Из кэша usagebar профиля по умолчанию; доска не проверяет, что это аккаунт этих сессий.',
@@ -818,6 +843,26 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'limits.resetsAt': '{window}: сброс {reset}.',
     'limits.forecastOut': '{window}: в таком темпе кончится в {at}, раньше сброса ({reset}).',
     'limits.forecastLasts': '{window}: в таком темпе хватит до сброса ({reset}).',
+    'set.housekeeping': 'Уборка узла…',
+    'hk.title': 'Уборка узла',
+    'hk.about': 'Контроль памяти и очистка старых вкладок браузера (выключено по умолчанию)',
+    'hk.memory.title': 'Контроль памяти',
+    'hk.memory.about':
+      'Раз в минуту проверяет свободную память и безопасно усыпляет простаивающие сессии ниже порога (процессы не убивает, работающие не трогает).',
+    'hk.memory.enable': 'Включить контроль памяти',
+    'hk.memory.warnMb': 'Предупреждение (МБ)',
+    'hk.memory.actionMb': 'Усыплять ниже (МБ)',
+    'hk.tabs.title': 'Старые вкладки браузера',
+    'hk.tabs.about':
+      'Раз в 30 минут закрывает старые вкладки без аренды и закрепления (никогда последнюю вкладку и страницы с подтверждением закрытия).',
+    'hk.tabs.enable': 'Включить очистку вкладок',
+    'hk.tabs.idleMin': 'Простой (минут)',
+    'hk.save': 'Сохранить',
+    'hk.dryRun': 'Проверить (dry-run)',
+    'hk.dryRunning': 'Проверяю…',
+    'hk.loading': 'Загружаю…',
+    'hk.invalidNumber': 'Введите целое число.',
+    'hk.log': 'Журнал уборки',
 
     'mobile.readOnly': 'Нет свежих данных от herdr: отправка и переход к сессиям подождут, пока они вернутся',
     'attention.unseen': 'Не просмотрено',
@@ -1500,3 +1545,5 @@ for (const code of Object.keys(NODE_STRINGS) as Lang[]) Object.assign(STRINGS[co
 for (const code of Object.keys(ONESHOT_STRINGS) as Lang[]) Object.assign(STRINGS[code], ONESHOT_STRINGS[code])
 // And auto-compact (#378).
 for (const code of Object.keys(COMPACT_STRINGS) as Lang[]) Object.assign(STRINGS[code], COMPACT_STRINGS[code])
+// And the redesigned header, rail, settings panel and provider marks (#651).
+for (const code of Object.keys(DESIGN_STRINGS) as Lang[]) Object.assign(STRINGS[code], DESIGN_STRINGS[code])

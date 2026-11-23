@@ -26,6 +26,7 @@ export type PanelKind =
   | 'decisions'
   | 'backup'
   | 'updates'
+  | 'housekeeping'
   | 'time'
   | 'timeSettings'
   | 'calendar'
@@ -33,6 +34,7 @@ export type PanelKind =
   | 'paths'
   | 'team'
   | 'devices'
+  | 'settings'
 
 /** Each panel's name for screen readers, and the session sheet's close button id. */
 const KINDS: Record<PanelKind, { label: string; closeId?: string }> = {
@@ -50,6 +52,7 @@ const KINDS: Record<PanelKind, { label: string; closeId?: string }> = {
   decisions: { label: 'dec.title' },
   backup: { label: 'backup.title' },
   updates: { label: 'selfUpdate.title' },
+  housekeeping: { label: 'hk.title' },
   time: { label: 'time.title' },
   timeSettings: { label: 'time.set.title' },
   calendar: { label: 'cal.title' },
@@ -57,6 +60,7 @@ const KINDS: Record<PanelKind, { label: string; closeId?: string }> = {
   paths: { label: 'paths.title' },
   team: { label: 'team.title' },
   devices: { label: 'node.dev.title' },
+  settings: { label: 'set.title' },
 }
 
 interface ShellProps {

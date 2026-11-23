@@ -21,11 +21,13 @@ import { CategoriesPanel, type CategoriesPanelProps } from './categories/Categor
 import { DecisionsPanel, type DecisionsPanelProps } from './decisions/DecisionsPanel.tsx'
 import { DevicesPanel, type DevicesPanelProps } from './devices/DevicesPanel.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
+import { HousekeepingPanel, type HousekeepingPanelProps } from './housekeeping/HousekeepingPanel.tsx'
 import { MokupilotPanel, type MokupilotPanelProps } from './mokupilot/MokupilotPanel.tsx'
 import { LocalPathsPanel, type LocalPathsPanelProps } from './phones/LocalPathsPanel.tsx'
 import { PhonesPanel, type PhonesPanelProps } from './phones/PhonesPanel.tsx'
 import { ProfilesPanel, type ProfilesPanelProps } from './profiles/ProfilesPanel.tsx'
 import { SchedulePanel, type SchedulePanelProps } from './schedule/SchedulePanel.tsx'
+import { SettingsPanel, type SettingsPanelProps } from './settings/SettingsPanel.tsx'
 import { Sheet, type SheetSlots } from './sheet/Sheet.tsx'
 import { TeamPanel, type TeamPanelProps } from './team/TeamPanel.tsx'
 import { ThreadsPanel, type ThreadsPanelProps } from './threads/ThreadsPanel.tsx'
@@ -64,6 +66,8 @@ export interface SidePanelsProps {
   backup?: BackupPanelProps
   /** Settings → Updates… (#617); drawn when given (once opened, on the local board only). */
   updates?: UpdatesPanelProps
+  /** Settings → Housekeeping… (#652); drawn when given (once opened, on the local board only). */
+  housekeeping?: HousekeepingPanelProps
   /** Time (#233): drawn while the board has time tracking on. */
   time?: TimePanelProps
   /** Settings → Time tracking… (#237); drawn when given (the page gives it once opened, on the local board only). */
@@ -79,6 +83,8 @@ export interface SidePanelsProps {
    * `nodes` gets Add a server alone there (#509).
    */
   devices?: DevicesPanelProps
+  /** Structured Settings panel (#651). */
+  settings?: SettingsPanelProps
 }
 
 export function SidePanels({
@@ -97,12 +103,14 @@ export function SidePanels({
   decisions,
   backup,
   updates,
+  housekeeping,
   time,
   timeSettings,
   calendar,
   calendarSettings,
   team,
   devices,
+  settings,
 }: SidePanelsProps) {
   const { data, ui, dispatch } = useBoardContext()
   return (
@@ -123,6 +131,7 @@ export function SidePanels({
       {decisions && data?.decisions && <DecisionsPanel {...decisions} />}
       {backup && <BackupPanel {...backup} />}
       {updates && <UpdatesPanel {...updates} />}
+      {housekeeping && <HousekeepingPanel {...housekeeping} />}
       {time && data?.time && <TimePanel {...time} />}
       {timeSettings && <TimeSettingsPanel {...timeSettings} />}
       {calendar && data?.calendar && <CalendarPanel {...calendar} />}
@@ -130,6 +139,7 @@ export function SidePanels({
       {localPaths && remotePage() && <LocalPathsPanel {...localPaths} />}
       {team && offersTeam(data) && <TeamPanel {...team} />}
       {devices && <DevicesPanel {...devices} />}
+      {settings && <SettingsPanel {...settings} />}
     </>
   )
 }

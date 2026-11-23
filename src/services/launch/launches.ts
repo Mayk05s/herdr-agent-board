@@ -8,6 +8,7 @@ import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { herdr, paneTab, paneTabTerminal, workspaceList } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { findCommand } from '../../adapters/setup-facts.ts'
+import { isAgyItem } from '../../core/agy.ts'
 import { CODEX_AGENT, isCodexSession } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
 import {
@@ -385,8 +386,8 @@ export function createLaunches({
                 : { profileWant: l.profile }),
             ...(l.model && { modelWant: l.model }),
           })
-          // pi's card is under its file: the one written under the board's id before pi was up goes.
-          if (isPiItem(it) && l.carded && laneOnly(l.carded)) removeCard(l.carded)
+          // pi's card is under its file and agy's under its conversation id: the start card goes once moved.
+          if ((isPiItem(it) || isAgyItem(it)) && l.carded && laneOnly(l.carded)) removeCard(l.carded)
           l.carded = it.key
         } catch {}
       }
