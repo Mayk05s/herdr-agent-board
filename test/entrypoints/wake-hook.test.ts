@@ -1,6 +1,7 @@
 import { expect, setDefaultTimeout, test } from 'bun:test'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, sep } from 'node:path'
+import { agentViewsOf, planSend, targetsOf } from '../../src/core/agent-send.ts'
 import { dayName } from '../../src/core/mokupilot-day.ts'
 import { promptOf, type ScheduleEntry } from '../../src/core/schedule-rules.ts'
 import { fakeWake } from '../support/fake-wake.ts'
@@ -993,4 +994,258 @@ test('#628 a node session running agy shows its agent kind in ListAgents while C
     '  Agent-board Master [7b8c9d0e]  ·  node server-2  ·  idle',
     '  Gemini-dev [509dfc37]  ·  agy  ·  node server-2  ·  working',
   ])
+})
+
+// #639: on a node (config.json `node`) ListAgents lists the master's sessions and SendMessage to a
+// name nothing on this computer has goes up the node's link as the master's `board send` from this
+// session. The node's board (POST /api/node/call) is a stand-in on the fake wake's port that answers
+// as the master's uplink does: its lines come from core/agent-send.ts as the master makes them.
+const SID_WORK00 = '4db8b7f6-1a2b-4c3d-8e4f-5a6b7c8d9e0f'
+const SID_AGY_NODE = '509dfc37-0a1b-4c2d-8e3f-4a5b6c7d8e9f'
+const ME_ON_NODE = `@server-2:${SID_ME}`
+
+/** A card of the master's payload: its own computer's, or server-2's. */
+const masterCard = (name: string, sid: string, more: Record<string, unknown> = {}) => ({
+  key: sid,
+  session: sid,
+  name,
+  agent: 'claude',
+  pane: `p-${sid.slice(0, 4)}`,
+  cwd: 'C:\\Work\\Проект 100%',
+  status: 'idle',
+  activity: 300,
+  ...more,
+})
+
+const MASTER_CARDS = [
+  // MokuPilot's day master: awake with no pane, a card like any other.
+  masterCard('work-00', SID_WORK00, { pane: null, day: true, status: 'working' }),
+  masterCard('Centium-master', SID_D, { status: 'done', autoName: 'centium-2a' }),
+  masterCard('Gemini Worker', SID_W, { agent: 'agy' }),
+  masterCard('Блюбениан монитор 100%', SID_O),
+  // This session and another of this node's: Claude Code and the parts above list them.
+  masterCard('Node Me', SID_ME, { key: ME_ON_NODE, device: 'server-2', pane: 'w5:pA' }),
+  masterCard('Legacy-master', SID_L, { key: `@server-2:${SID_L}`, device: 'server-2', pane: 'w5:pB' }),
+  ...Array.from({ length: 17 }, (_, i) =>
+    masterCard(`Sleeper ${i}`, `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`, {
+      sleeping: true,
+      status: 'sleeping',
+      activity: 100 - i,
+    }),
+  ),
+]
+
+/** What the master's uplink answers a node session's call (services/nodes/uplink.ts sendFrom, agentsFrom). */
+function asMaster(call: Record<string, unknown>, cards: Record<string, unknown>[] = MASTER_CARDS) {
+  const targets = targetsOf(cards).filter(t => t.device === null || t.device === 'server-2')
+  const argv = call.argv as string[]
+  if (call.cmd === 'agents') {
+    const views = agentViewsOf(targets, { selfKey: `@server-2:${String(call.session)}` }).map(v => JSON.stringify(v))
+    return {
+      state: 'answered',
+      code: 0,
+      out: ['[', ...views.map((v, i) => (i < views.length - 1 ? `${v},` : v)), ']'],
+      err: [],
+    }
+  }
+  const [to = '', ...words] = argv
+  const plan = planSend({
+    targets,
+    to,
+    message: words.join(' '),
+    from: { key: `@server-2:${String(call.session)}`, name: 'Node Me', device: 'server-2' },
+    own: 'laptop',
+    now: Date.now(),
+  })
+  return 'error' in plan
+    ? { state: 'answered', code: 1, out: [], err: [plan.error] }
+    : { state: 'answered', code: 0, out: [plan.line], err: [] }
+}
+
+type Answer = (call: Record<string, unknown>) => unknown
+
+/** A world whose config.json has `node` (or `nodes`, or neither); its board answers calls with `answer`. */
+async function nodeWorld(
+  answer: Answer = c => asMaster(c),
+  o: { role?: 'node' | 'master' | 'plain'; wakeDown?: boolean; config?: Record<string, unknown>; board?: unknown } = {},
+) {
+  const w = await world()
+  const calls: Record<string, unknown>[] = []
+  const fake = await fakeWake({
+    ...twoProfiles(w),
+    ...(o.board !== undefined && { board: o.board }),
+    nodeCall: body => {
+      calls.push(body as Record<string, unknown>)
+      return answer(body as Record<string, unknown>)
+    },
+  })
+  const role = o.role ?? 'node'
+  const where =
+    role === 'node' ? { node: { id: 'server-2', port: 12430 } } : role === 'master' ? { nodes: { id: 'laptop' } } : {}
+  // Wake down: nothing listens on its port (1), the board answers on the stand-in's.
+  writeBoardConfig(
+    w.box,
+    wakeOnConfig(o.wakeDown ? 1 : fake.port, { config: { port: fake.port, ...where, ...o.config } }),
+  )
+  liveIn(w.dflt, SID_ME, 'Node Me')
+  return { w, fake, calls }
+}
+
+const listOn = (w: World) => runHook(w, 'post-list', { ...LIST, session_id: SID_ME })
+const masterPart = (text: string | null): string[] => {
+  const at = (text ?? '').indexOf("Sessions on the board's main computer")
+  return at < 0 ? [] : (text ?? '').slice(at).split('\n')
+}
+
+test('#639 ListAgents on a node lists the master’s sessions, MokuPilot’s day among them, not this node’s', async () => {
+  const { w, calls } = await nodeWorld()
+  const text = contextOf(await listOn(w))
+  // This computer's part is as before, the master's comes last.
+  expect(sleeperRows(text)).toEqual(['  Billing  ·  workspace Home  ·  put to sleep 30 min ago'])
+  const part = masterPart(text)
+  expect(part.slice(1, 6)).toEqual([
+    '  work-00 [4db8b7f6]  ·  working',
+    '  Centium-master [0f3c9a7e]  ·  done',
+    '  Gemini Worker [6a7b8c9d]  ·  agy  ·  idle',
+    '  Блюбениан монитор 100% [2d3e4f5a]  ·  idle',
+    '  Sleeper 0 [00000000]  ·  asleep',
+  ])
+  expect(part).toHaveLength(1 + 4 + 15 + 1)
+  expect(part.at(-1)).toStartWith('  ... and 2 more asleep there')
+  expect(text).not.toContain('Legacy-master')
+  expect(text).not.toContain('Node Me [')
+  expect(calls).toEqual([{ cmd: 'agents', argv: ['--json'], session: SID_ME, lane: null, files: [] }])
+})
+
+test('#639 a master of 400 sessions is listed whole; the one-line list of an older master is read too', async () => {
+  const many = Array.from({ length: 400 }, (_, i) =>
+    masterCard(`Live ${i}`, `${String(i).padStart(8, '0')}-1111-4000-8000-000000000000`),
+  )
+  const { w } = await nodeWorld(c => asMaster(c, many))
+  expect(masterPart(contextOf(await listOn(w)))).toHaveLength(401)
+
+  const old = await nodeWorld(c => {
+    const a = asMaster(c) as { out: string[] }
+    return { ...a, out: [a.out.join('')] }
+  })
+  expect(masterPart(contextOf(await listOn(old.w)))[1]).toBe('  work-00 [4db8b7f6]  ·  working')
+})
+
+test('#639 with wake not running a node still lists and reaches the master; a plain board says nothing, as before', async () => {
+  const { w, calls } = await nodeWorld(c => asMaster(c), { wakeDown: true })
+  const text = contextOf(await listOn(w))
+  expect(text).toStartWith("Sessions on the board's main computer")
+  expect(denied(await runHook(w, 'pre-send', sendFrom('work-00', 'hi', SID_ME)))).toStartWith(
+    'Queued through the board on its main computer',
+  )
+  expect(calls.map(c => c.cmd)).toEqual(['agents', 'agents', 'send'])
+
+  const plain = await nodeWorld(c => asMaster(c), { role: 'plain', wakeDown: true })
+  expect(contextOf(await listOn(plain.w))).toBeNull()
+  passed(await runHook(plain.w, 'pre-send', sendFrom('work-00', 'hi', SID_ME)))
+  expect(plain.calls).toEqual([])
+})
+
+test('#639 SendMessage on a node to the day master’s name is the master’s board send from this session', async () => {
+  const { w, calls } = await nodeWorld()
+  const r = await runHook(w, 'pre-send', sendFrom('work-00', 'Legacy-master moved, working', SID_ME))
+  expect(denied(r)).toBe(
+    "Queued through the board on its main computer (Claude Code reaches only this computer's sessions, so it did " +
+      'not send it): queued for work-00 [4db8b7f6] on laptop: the board types it in once it is free, waking it ' +
+      'first if it sleeps; the answer comes back as a board reminder. Do not send it again.',
+  )
+  // The read first, then the send for a session it has.
+  expect(calls).toEqual([
+    { cmd: 'agents', argv: ['--json'], session: SID_ME, lane: null, files: [] },
+    { cmd: 'send', argv: ['work-00', 'Legacy-master moved, working'], session: SID_ME, lane: null, files: [] },
+  ])
+  // A name with a space, Cyrillic and %, by its ref too.
+  expect(denied(await runHook(w, 'pre-send', sendFrom('Блюбениан монитор 100% [2d3e4f5a]', 'x', SID_ME)))).toContain(
+    'queued for Блюбениан монитор 100% [2d3e4f5a] on laptop',
+  )
+  // By its automatic name too.
+  expect(denied(await runHook(w, 'pre-send', sendFrom('centium-2a', 'x', SID_ME)))).toContain(
+    'queued for Centium-master',
+  )
+  // The master queues it: nothing in this computer's schedule.
+  expect(scheduled(w)).toEqual([])
+})
+
+test('#639 on a node: no such session there, a master that does not take send, or away, stay Claude Code’s; its refusal of a session it has is said', async () => {
+  const { w, calls } = await nodeWorld()
+  passed(await runHook(w, 'pre-send', sendFrom('teammate-1', 'x', SID_ME)))
+  passed(await runHook(w, 'pre-send', sendFrom('uds:/tmp/cc-msg-1', 'x', SID_ME)))
+  passed(await runHook(w, 'pre-send', sendFrom('bridge:abc', 'x', SID_ME)))
+  // A name the master has no session for is never sent: only read.
+  expect(calls.map(c => c.cmd)).toEqual(['agents'])
+  expect(denied(await runHook(w, 'pre-send', sendFrom('work-00', 'я'.repeat(2001), SID_ME)))).toBe(
+    'Not sent: 2001 characters, the board carries 2000; send it in parts, or write it to a file and send the path',
+  )
+
+  const older = await nodeWorld(() => ({
+    state: 'answered',
+    code: 126,
+    out: [],
+    err: ['board send is not taken from a node: only board thread'],
+  }))
+  passed(await runHook(older.w, 'pre-send', sendFrom('work-00', 'x', SID_ME)))
+  const away = await nodeWorld(() => ({ state: 'unreachable' }))
+  passed(await runHook(away.w, 'pre-send', sendFrom('work-00', 'x', SID_ME)))
+  expect(contextOf(await listOn(away.w))).not.toContain('main computer')
+
+  const twins = await nodeWorld(c =>
+    asMaster(c, [masterCard('Worker', SID_D), masterCard('Worker', SID_W, { pane: 'p-other' })]),
+  )
+  expect(denied(await runHook(twins.w, 'pre-send', sendFrom('worker', 'x', SID_ME)))).toStartWith(
+    'Not sent: "worker" fits more than one session (Worker [0f3c9a7e] on laptop, Worker [6a7b8c9d] on laptop)',
+  )
+})
+
+test('#639 a master that took the send and did not answer: denied as maybe queued; one slow to list stays Claude Code’s', async () => {
+  const { w } = await nodeWorld(async c => {
+    if (c.cmd !== 'send') return asMaster(c)
+    await Bun.sleep(1_700)
+    return { state: 'unreachable' }
+  })
+  expect(denied(await runHook(w, 'pre-send', sendFrom('work-00', 'x', SID_ME)))).toBe(
+    'The board\'s main computer did not answer in time: it may have queued the message for "work-00" all the same. ' +
+      'Check before sending it again (board agents lists who is there).',
+  )
+  // A stale link: the read comes back unreachable after the node board's wait. Nothing was sent, so a
+  // teammate's message is not held up as maybe queued.
+  const stale = await nodeWorld(async () => {
+    await Bun.sleep(1_700)
+    return { state: 'unreachable' }
+  })
+  passed(await runHook(stale.w, 'pre-send', sendFrom('teammate-1', 'x', SID_ME)))
+  expect(stale.calls.map(c => c.cmd)).toEqual(['agents'])
+})
+
+test('#639 on a node this profile’s session and a local agy session of the name stay local: nothing goes up', async () => {
+  const mine = await nodeWorld()
+  liveIn(mine.w.dflt, SID_OPS, 'work-00')
+  passed(await runHook(mine.w, 'pre-send', sendFrom('work-00', 'x', SID_ME)))
+  expect(mine.calls).toEqual([])
+
+  // The node's own board lists its agy session: SendMessage goes to it there (#628), not up.
+  const agy = await nodeWorld(c => asMaster(c), {
+    config: { launch: { agy: ['agy'] } },
+    board: {
+      items: [masterCard('Gemini Worker', SID_AGY_NODE, { agent: 'agy', pane: 'w5:pG' })],
+      devices: [{ id: 'local', link: null, status: { id: 'server-2' } }],
+    },
+  })
+  expect(denied(await runHook(agy.w, 'pre-send', sendFrom('Gemini Worker', 'x', SID_ME)))).toStartWith(
+    'Queued for Gemini Worker (agy) through the board',
+  )
+  expect(agy.calls).toEqual([])
+})
+
+test('#639 without `node` in config.json nothing goes up: a plain board and a master make no node call', async () => {
+  for (const role of ['plain', 'master'] as const) {
+    const { w, calls } = await nodeWorld(c => asMaster(c), { role })
+    passed(await runHook(w, 'pre-send', sendFrom('work-00', 'x', SID_ME)))
+    expect(masterPart(contextOf(await listOn(w)))).toEqual([])
+    expect(calls).toEqual([])
+  }
 })
