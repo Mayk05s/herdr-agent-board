@@ -40,6 +40,10 @@ test.each([
         then: snapshot(workerPane, ...latest),
       },
       'agent get w1:p2': { result: { agent: original } },
+      // Codex's empty composer: a scheduled message at a Codex session looks for a draft first (#428).
+      'agent read': {
+        text: '  To get started, describe a task\n\n\x1b[1m›\x1b[22m \x1b[2mAsk Codex to do anything\x1b[0m\n \x1b[2m? for shortcuts\x1b[0m',
+      },
       'agent prompt': { error: 'synthetic lost prompt result' },
     })
     const first = await serveBoard(box, cfg)

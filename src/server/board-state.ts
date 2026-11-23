@@ -394,7 +394,8 @@ export function createBoardState({
       mokupilot: mokupilot?.() ?? false,
       // fork: whether the board can fork a session into a new tab with its launcher.
       fork: canFork(cfg),
-      codexFork: list.some(isCodexItem) && canCodexFork(),
+      // codexFork: only on a board with a Codex session that can fork, so other boards' payload stays as it was.
+      ...(list.some(isCodexItem) && canCodexFork() && { codexFork: true }),
       // aside: whether a session's sheet offers a side question (/btw typed into the session).
       aside: aside?.() ?? false,
       setup: setup?.() ?? null,
