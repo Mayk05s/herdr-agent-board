@@ -1,6 +1,7 @@
 // The board as the web page sees it: the latest items, whether they are fresh, and the payload
 // GET /api/board answers with and the event stream pushes.
 import { existsSync, statSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { localAgyLimits } from '../adapters/agy-limits.ts'
 import { readArchiveLog } from '../adapters/archive-store.ts'
 import { readUsageFile } from '../adapters/claude-home.ts'
@@ -23,7 +24,8 @@ import { lang, t } from '../core/lang.ts'
 import { claudeProgram, commandText } from '../core/launch/spawn-args.ts'
 import type { Limits } from '../core/limits.ts'
 import { familyTitle } from '../core/model-check.ts'
-import { LOCAL, parseNodeKey } from '../core/nodes.ts'
+import { LOCAL, parseNodeKey, nodesConfig } from '../core/nodes.ts'
+import { dropMovedCards } from '../core/node-items.ts'
 import type {
   BackupPayload,
   BoardLimits,
@@ -306,6 +308,11 @@ export function createBoardState({
     // does not have shows as any lane a session made up does.
     const others = nodes?.()?.part() ?? null
     const shown = others ? [...items, ...others.items] : items
+    // A source card left awake by a move to another device (#642): dropped by its `movedTo` mark
+    // once the session has a card on the device it moved to. Only where device cards are merged:
+    // a board that is not a master shows its items as before. This computer as the payload names
+    // it: the master's own device id, its cards carrying no `device` (#616 names a move back by it).
+    const masterId = others ? (nodesConfig(cfg.nodes, hostname())?.id ?? '') : ''
     const ids = [...new Set([...cfg.categories.map(c => c.id), ...shown.map(i => i.category)])]
     const workdeskLine = workdesk?.()
     const dialogLine = workdeskDialog?.()
@@ -379,7 +386,8 @@ export function createBoardState({
       stale,
       limits: own?.limits ?? null,
       ...(agyLimits !== undefined && { agyLimits }),
-      items: combined,
+      // #642: a card whose `movedTo` device has the session's card now leaves the payload.
+      items: others ? dropMovedCards(combined, masterId) : combined,
       launches: others ? [...launches.list(), ...others.launches] : launches.list(),
       categories,
       swatches: SWATCHES,

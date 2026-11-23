@@ -238,3 +238,21 @@ test('#639 the moved card is weighed against targets only; one device’s cards 
     keys([card(A, 'L', { activity: 5 }), card(`@server-2:${A}`, 'L', { device: 'server-2', activity: 5 })]),
   ).toHaveLength(2)
 })
+
+test('#642 the card a move marked is dropped by its mark, not by weighing two machines\' clocks', () => {
+  const keys = (items: unknown[]) => targetsOf(items).map(t => t.key)
+  const laptop = (more: Record<string, unknown>) => card(A, 'Legacy-master', more)
+  const node = (more: Record<string, unknown>) =>
+    card(`@server-2:${A}`, 'Legacy-master', { device: 'server-2', ...more })
+  // The issue's shape: the laptop's card stayed awake with an ahead clock after the move. #641
+  // weighed activity, so on skewed clocks the stale card could win; the mark decides now.
+  expect(keys([laptop({ status: 'done', activity: 9_999, movedTo: 'server-2' }), node({ activity: 1 })])).toEqual([
+    `@server-2:${A}`,
+  ])
+  // A mark pointing where no card of the session runs (the node offline, a move that did not
+  // land): the card stays targetable — the send gets its honest "the agent is sleeping" error.
+  expect(keys([laptop({ activity: 9_999, movedTo: 'server-2' })])).toEqual([A])
+  // Moved back: the laptop's card, unmarked, answers by name again even while server-2's lingers.
+  expect(keys([laptop({ activity: 1 }), node({ activity: 9_999, sleeping: true })])).toEqual([`@server-2:${A}`])
+  expect(keys([laptop({ activity: 9_999 }), node({ activity: 1, sleeping: true, movedTo: 'laptop' })])).toEqual([A])
+})

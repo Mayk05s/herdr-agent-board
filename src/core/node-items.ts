@@ -307,6 +307,9 @@ const launch = shape(LAUNCH, LAUNCH_REQUIRED)
 /** The optional fields of an item (core/types.ts Item). Server-only ones (transcript, pipe, ...) are not among them. */
 const ITEM: Record<string, Check> = {
   sleeping: bool,
+  // a move away this node did not finish showing: the mark travels too (#642), so the master's
+  // merge can drop the source card of a chain move by it, not only by clock weight.
+  movedTo: str(LEN.id),
   formerPanes: list(str(LEN.id), 20),
   fromFile: yes,
   agent: str(32),
@@ -414,6 +417,25 @@ const ENTRY: Record<string, Check> = {
   retryAt: num,
   failed: str(LEN.text),
   tasksSince: num,
+}
+
+/**
+ * Cards of a merged payload left after a move (#642): a card its own board marked `movedTo` goes
+ * when the session has another card running on that device — `masterId` naming this computer, whose
+ * own cards carry no `device` (a move back from a node marks the master's id, #616). Only the mark
+ * drops, never the clocks: a chain move (laptop → server-2 → server-3) leaves no duplicate, while a
+ * card of a session with no card yet on the device it moved to stays (an offline node, a move that
+ * did not land). Items without a session id are never compared. Order is kept.
+ */
+export function dropMovedCards(items: readonly Item[], masterId = ''): Item[] {
+  const same = new Map<string, Item[]>()
+  for (const i of items)
+    if (i.session) same.set(i.session, [...(same.get(i.session) ?? []), i])
+  const here = (j: Item): string => j.device ?? masterId
+  return items.filter(i => {
+    if (!i.movedTo || !i.session) return true
+    return !(same.get(i.session) ?? []).some(j => j !== i && here(j) === i.movedTo)
+  })
 }
 
 /**

@@ -34,6 +34,8 @@ export interface Target {
   status: string
   day: boolean
   activity: number
+  /** The device its own board marked it moved to (#642, card `moved.to`); null when no mark. */
+  movedTo: string | null
 }
 
 /** Who sends: the session's key (a node's session's carries the device's prefix) and its name on the board. */
@@ -85,10 +87,20 @@ function replaced(t: Target, by: Target): boolean {
 /**
  * One whose session runs on another device now (#639): a move (`board move --device`, #616) can leave
  * the card it had where it was, under the session's id, beside the new one under the other device's.
- * The more recent activity is where it runs; an awake card beats a sleeping one of the same moment.
+ * The mark the source card carries (`movedTo`, core/types.ts) says so outright (#642): where it points
+ * to the other card's device — or anywhere off here while the other card is this computer's own, since
+ * a move back marks the master's id (#616) — this one is no target. No such match, or no mark at all
+ * (a board too old to write one): the more recent activity is where it runs, as #641 weighed it; an
+ * awake card beats a sleeping one of the same moment.
  */
 function movedAway(t: Target, by: Target): boolean {
   if (by === t || by.device === t.device || !t.session || by.session !== t.session) return false
+  const marksThis = !!t.movedTo && (t.movedTo === by.device || (!by.device && t.device))
+  const marksOther = !!by.movedTo && (by.movedTo === t.device || (!t.device && by.device))
+  // A mark decides the pair outright: a marked-away card goes and the card it marks stays even when
+  // the stale one's clock runs ahead, which is the whole point of the mark (#642, #641's weigh could
+  // drop both when each side was judged against the other). No mark either way: the #641 weigh, as is.
+  if (marksThis || marksOther) return marksThis
   if (by.activity !== t.activity) return by.activity > t.activity
   return t.sleeping && !by.sleeping
 }
@@ -116,6 +128,7 @@ export function targetsOf(items: unknown): Target[] {
       status: str(i.status),
       day: i.day === true,
       activity: Math.max(num(i.activity), num(i.lastAt)),
+      movedTo: str(i.movedTo) || null,
     })
   }
   const kept = all.filter(t => t.sleeping || ((t.pane || t.day) && !all.some(o => replaced(t, o))))

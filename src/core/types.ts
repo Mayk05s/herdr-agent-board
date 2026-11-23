@@ -402,5 +402,11 @@ export interface Item {
    * carries the device's prefix. Absent for this computer's own, and always without `nodes`.
    */
   device?: string
+  /**
+   * The device its card says it moved to (#616, services/move-out.ts finish): set on this computer's
+   * item while that mark stands, so the master's merge can drop it when the session has a card on
+   * that device (#642), whatever the two machines' clocks say.
+   */
+  movedTo?: string
   [extra: string]: unknown
 }
