@@ -7,6 +7,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createOutbox } from '../../src/adapters/node-outbox.ts'
 import { createDeviceStore } from '../../src/adapters/node-store.ts'
+import { listEntries } from '../../src/adapters/schedule-store.ts'
 import type { UplinkResult } from '../../src/core/node-uplink.ts'
 import type { LinkStatus } from '../../src/core/nodes.ts'
 import type { Item } from '../../src/core/types.ts'
@@ -32,6 +33,7 @@ afterEach(() => {
   }
 })
 
+const N1 = '7b8c9d0e-1f2a-4b3c-8d4e-5f6a7b8c9d0e'
 const sha = (b: Buffer | string): string => createHash('sha256').update(b).digest('hex')
 
 /** The events a node's stream sends, read until `n` calls came. */
@@ -59,6 +61,12 @@ describe("the node's side", () => {
       body: { state: 'unreachable' },
     })
     expect(Date.now() - started).toBeLessThan(100)
+    expect(outbox.list()).toEqual([])
+    // board send (#619) is never kept, whatever it is sent to: a card named like a thread write too.
+    expect(await up.call({ cmd: 'send', argv: ['post', 'x'], session: 's-1', lane: null })).toEqual({
+      status: 200,
+      body: { state: 'unreachable' },
+    })
     expect(outbox.list()).toEqual([])
 
     const file = join(dir, 'r.md')
@@ -411,8 +419,8 @@ describe("the master's side", () => {
     await runner.close()
     expect(ran).toBe(0)
     expect(Object.fromEntries(posted)).toEqual({
-      'r-1': { code: 126, out: [], err: ['board time is not taken from a node: only board thread'] },
-      'r-2': { code: 126, out: [], err: ["only a session's board thread is taken from a node"] },
+      'r-1': { code: 126, out: [], err: ['board time is not taken from a node: only board thread and board send'] },
+      'r-2': { code: 126, out: [], err: ["only a session's board thread or board send is taken from a node"] },
       'r-3': { code: 126, out: [], err: ['board thread share is for the owner to confirm: not from a node'] },
       'r-4': { code: 126, out: [], err: ['board thread open opens the board on its own computer: not from a node'] },
       'r-5': { code: 126, out: [], err: ['a call the board does not take'] },
@@ -423,6 +431,101 @@ describe("the master's side", () => {
     // The file too large is never asked for.
     expect(fetched).toEqual(['/api/node/uplink/r-6/file/0'])
     expect(existsSync(join(dir, 'nodes', 'server-1', 'uplink'))).toBe(false)
+  })
+
+  test("#619 a node session's board send is queued here once for the card it names, signed with its prefixed key; another node is out of its reach", async () => {
+    const dir = isolatedHome()
+    const store = createDeviceStore({ dir: join(dir, 'nodes') })
+    const sent = [
+      { id: 's-1', cmd: 'send', argv: ['Monitor', 'done: case 42'], session: 'n-1', lane: null },
+      { id: 's-2', cmd: 'send', argv: ['nobody', 'x'], session: 'n-1', lane: null },
+      { id: 's-3', cmd: 'send', argv: ['@server-1:n-1', 'to myself'], session: 'n-1', lane: null },
+      { id: 's-4', cmd: 'send', argv: ['Monitor', 'from the twin'], session: N1, lane: null },
+      // Sent again on a new stream while its command waited: queued once, the result as it was.
+      { id: 's-1', cmd: 'send', argv: ['Monitor', 'done: case 42'], session: 'n-1', lane: null },
+      // A card named like a thread write: not kept, and no thread command runs.
+      { id: 's-5', cmd: 'send', argv: ['post', 'to post'], session: 'n-1', lane: null },
+      // Another node's session: not reached, not even named.
+      { id: 's-6', cmd: 'send', argv: ['Elsewhere', 'x'], session: 'n-1', lane: null },
+    ]
+    const posted: [string, UplinkResult][] = []
+    const link = standIn((path, init) => {
+      if (path === '/api/node/uplink') return streamOf(sent, init.signal)
+      posted.push([path.split('/').pop() as string, JSON.parse(String(init.body))])
+      return new Response('{}')
+    })
+    const mine = { key: '@server-1:n-1', session: 'n-1', name: 'worker', device: 'server-1', pane: 'w1:p1' } as Item
+    const twin = { ...mine, key: `@server-1:${N1}`, session: N1, pane: 'w1:p2' } as Item
+    const monitor = {
+      key: '3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b',
+      session: '3e4f5a6b-7c8d-4e9f-8a0b-1c2d3e4f5a6b',
+      name: 'Monitor',
+      pane: 'w2:p3',
+      cwd: 'C:\\Work',
+    } as Item
+    const post = {
+      key: 'a1b2c3d4-0000-4000-8000-000000000001',
+      session: 'a1b2c3d4-0000-4000-8000-000000000001',
+      name: 'post',
+      pane: 'w2:p4',
+    } as Item
+    const elsewhere = {
+      key: `@server-2:${N1}`,
+      session: N1,
+      name: 'Elsewhere',
+      device: 'server-2',
+      pane: 'w5:p1',
+    } as Item
+    const cards = [mine, twin, monitor, post, elsewhere]
+    const runner = createUplinkRunner({
+      links: link.links,
+      find: key => cards.find(i => i.key === key),
+      items: () => cards,
+      cfg: { threads: true, nodes: { id: 'laptop' } } as never,
+      log: () => {},
+      store,
+      run: async () => {
+        throw new Error('not a thread command')
+      },
+    })
+    link.changed('online')
+    await until(() => posted.length === sent.length, 5000)
+    await runner.close()
+    const queued = {
+      code: 0,
+      out: [
+        'ok · queued for Monitor [3e4f5a6b] on laptop: the board types it in once it is free, waking it first if it sleeps; the answer comes back as a board reminder',
+      ],
+      err: [],
+    }
+    const answers = (id: string) => posted.filter(([p]) => p === id).map(([, r]) => r)
+    expect(answers('s-1')).toEqual([queued, queued])
+    expect(answers('s-2')).toEqual([{ code: 1, out: [], err: ['no session "nobody" on the board'] }])
+    expect(answers('s-3')).toEqual([{ code: 1, out: [], err: ['that is this session: nothing was sent'] }])
+    expect(answers('s-4')).toMatchObject([{ code: 0 }])
+    expect(answers('s-5')).toMatchObject([
+      { code: 0, out: [expect.stringMatching(/^ok · queued for post \[a1b2c3d4\]/)] },
+    ])
+    expect(answers('s-6')).toEqual([{ code: 1, out: [], err: ['no session "Elsewhere" on the board'] }])
+    // Two sessions' calls run side by side: the entries in the order of their texts.
+    expect(listEntries().sort((a, b) => a.text.localeCompare(b.text))).toMatchObject([
+      {
+        key: monitor.key,
+        name: 'Monitor',
+        pane: 'w2:p3',
+        cwd: 'C:\\Work',
+        text: 'done: case 42',
+        idle: true,
+        from: { key: '@server-1:n-1', name: 'worker' },
+        // A session id that is no hex has no ref to give: the whole key finds it again.
+        replyTo: '@server-1:n-1',
+        replyBy: 'board',
+        fromDevice: 'server-1',
+      },
+      { key: monitor.key, text: 'from the twin', from: { key: `@server-1:${N1}` }, replyTo: 'worker [7b8c9d0e]' },
+      { key: post.key, text: 'to post' },
+    ])
+    expect(store.seenCall('server-1', 's-1')).toEqual(queued)
   })
 
   test('the stream is held only while the link is online', async () => {
