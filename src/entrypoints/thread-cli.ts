@@ -304,8 +304,8 @@ export interface ThreadCmdContext {
 export interface NodeCall {
   /** A write that can wait carries an id of its own: the same call tried again is one call. */
   id?: string
-  /** `send`: `board send` (#619, entrypoints/cli.ts), never kept. */
-  cmd: 'thread' | 'send'
+  /** `send`: `board send` (#619); `agents`: `board agents` (#628); neither is kept. */
+  cmd: 'thread' | 'send' | 'agents'
   argv: string[]
   session: string
   lane: string | null
@@ -322,6 +322,8 @@ export type NodeCallAnswer =
 
 /** How long the command waits for its board: the board's own wait (20 s, 10 s for a read) and room. */
 const CALL_WAIT_MS = 40_000
+/** `board agents` is a read the caller waits on (ListAgents): a hanging board falls back to the local list soon. */
+const AGENTS_WAIT_MS = 5_000
 
 /**
  * Where the files of `board thread <sub> <rest>` are among `rest`: the value of each `--file`
@@ -510,7 +512,7 @@ export const callBoard =
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-board': '1' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(CALL_WAIT_MS),
+        signal: AbortSignal.timeout(body.cmd === 'agents' ? AGENTS_WAIT_MS : CALL_WAIT_MS),
       })
       if (!res.ok) {
         await res.body?.cancel()
