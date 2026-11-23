@@ -1,11 +1,12 @@
 // The agents a new session from the board may start as (the launch request's `agent`): Claude Code
 // always, pi when config.json says how to start it (`launch.pi`) or `pi` is on the board's PATH,
-// and Antigravity (`agy`) when `launch.agy` is set or `agy` is on PATH. Only the board's own
-// launcher (spawn-agent) picks one: `launch.command` and `launch.agent` start what they start, so
-// with either set nothing is offered. A start that names no agent is the board's default:
-// `launch.default` when the board offers that agent, else Claude Code, as it was before there was
-// a choice.
+// Antigravity (`agy`) when `launch.agy` is set or `agy` is on PATH, and Codex CLI when `codex` is
+// on PATH. Only the board's own launcher (spawn-agent) picks one: `launch.command` and
+// `launch.agent` start what they start, so with either set nothing is offered. A start that names
+// no agent is the board's default: `launch.default` when the board offers that agent, else Claude
+// Code, as it was before there was a choice.
 import { AGY_AGENT } from '../agy.ts'
+import { CODEX_AGENT } from '../codex.ts'
 import { t } from '../lang.ts'
 import { PI_AGENT } from '../pi.ts'
 import type { LaunchSpec } from '../types.ts'
@@ -15,7 +16,7 @@ export { AGY_AGENT }
 export const CLAUDE_AGENT = 'claude'
 
 /** The agents a start can name: herdr's kind for it. */
-export type LaunchAgentId = typeof CLAUDE_AGENT | typeof PI_AGENT | typeof AGY_AGENT
+export type LaunchAgentId = typeof CLAUDE_AGENT | typeof PI_AGENT | typeof AGY_AGENT | typeof CODEX_AGENT
 
 /** An agent the new-session window offers: its id for the request, and its name. */
 export interface LaunchAgent {
@@ -26,6 +27,7 @@ export interface LaunchAgent {
 const CLAUDE_CODE: LaunchAgent = { id: CLAUDE_AGENT, title: 'Claude Code' }
 const PI: LaunchAgent = { id: PI_AGENT, title: 'pi' }
 const AGY: LaunchAgent = { id: AGY_AGENT, title: 'Antigravity' }
+const CODEX: LaunchAgent = { id: CODEX_AGENT, title: 'Codex CLI' }
 
 /** Whether config.json says how to start pi (`launch.pi` set to anything but blank). */
 export const piConfigured = (spec: LaunchSpec | undefined): boolean => {
@@ -41,18 +43,20 @@ export const agyConfigured = (spec: LaunchSpec | undefined): boolean => {
 
 /**
  * The agents a start may pick, Claude Code first; none when the config's own launcher
- * (`launch.command`, `launch.agent`) starts sessions. `piFound` / `agyFound`: on the board's PATH;
- * asked only when the config does not say how to start that agent.
+ * (`launch.command`, `launch.agent`) starts sessions. `piFound` / `agyFound` / `codexFound`:
+ * on the board's PATH; asked only when the config does not say how to start that agent.
  */
 export function launchAgents(
   spec: LaunchSpec | undefined,
   piFound: () => boolean,
   agyFound: () => boolean = () => false,
+  codexFound: () => boolean = () => false,
 ): LaunchAgent[] {
   if (spec?.command || spec?.agent) return []
   const offered: LaunchAgent[] = [CLAUDE_CODE]
   if (piConfigured(spec) || piFound()) offered.push(PI)
   if (agyConfigured(spec) || agyFound()) offered.push(AGY)
+  if (codexFound()) offered.push(CODEX)
   return offered
 }
 
@@ -66,6 +70,26 @@ export function defaultAgent(spec: LaunchSpec | undefined, offered: () => readon
   const wanted = typeof spec?.default === 'string' ? spec.default.trim().toLowerCase() : ''
   if (!wanted || wanted === CLAUDE_AGENT) return CLAUDE_AGENT
   return offered().find(a => a.id === wanted)?.id ?? CLAUDE_AGENT
+}
+
+/**
+ * `launch.codex` from config.json as a list, as piCommand reads `launch.pi`: `codex` when it is
+ * unset. spawn-agent --agent codex types it, with the options it was given after it.
+ */
+export function codexCommand(setting: unknown, win: boolean = process.platform === 'win32'): string[] {
+  if (setting === undefined || setting === null || (typeof setting === 'string' && !setting.trim()))
+    return [CODEX_AGENT]
+  const list: unknown = typeof setting === 'string' ? [setting] : setting
+  if (
+    !Array.isArray(list) ||
+    !list.length ||
+    !list.every((s): s is string => typeof s === 'string') ||
+    !String(list[0]).trim()
+  )
+    throw new Error(t('launch.err.codexCommand'))
+  const problem = typingProblem(list, win)
+  if (problem) throw new Error(t('launch.err.codexTyping', { word: problem.word }))
+  return [...list]
 }
 
 /**

@@ -3,9 +3,11 @@
 // Claude profile it starts in, refused when the board cannot be sure of it, and the agent it
 // starts as (core/launch/agents.ts), one the board offers, and the model it starts on, if one is
 // asked for (core/launch/model.ts): empty is the profile's default.
+import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { resolvePath } from '../../adapters/files.ts'
 import { SLOW, statOf } from '../../adapters/folders.ts'
 import { isRecord } from '../../adapters/json-store.ts'
+import { CODEX_AGENT } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
 import {
   AGY_AGENT,
@@ -42,6 +44,8 @@ const given = (v: unknown): string | undefined => (v === undefined || v === null
 
 /** What a checked request asks for. `newWorkspace`: make the workspace `workspaceLabel` first. */
 export interface LaunchRequest {
+  /** A Codex fork selected by the server, independently of the new-session agent picker. */
+  codexFork?: true
   name: string
   label: string
   cwd: string
@@ -73,6 +77,8 @@ export interface LaunchRequest {
    * which this computer does not have. Absent for a folder of this computer.
    */
   remote?: string
+  /** Codex's reasoning effort (`-c model_reasoning_effort=…`), one its model supports. */
+  effort?: string
 }
 
 /** "Where" in a launch request (#504): a device of `nodes` (`local` for this computer), or a tag. */
@@ -121,9 +127,9 @@ export async function checkRequest(
     pi,
     agy,
     pins = false,
+    codexFork,
   }: {
     categories?: Set<string> | null
-    profiles: ProfileSet
     items?: Item[]
     typesCommand?: boolean
     parent?: ParentFacts
@@ -132,7 +138,7 @@ export async function checkRequest(
     pi?: unknown
     agy?: unknown
     pins?: boolean
-  },
+  } & ({ codexFork: true; profiles?: never } | { codexFork?: never; profiles: ProfileSet }),
 ): Promise<CheckResult> {
   const fail = (field: string, key: string, vars?: Vars): CheckResult => ({ ok: false, field, error: t(key, vars) })
   const b = isRecord(body) ? body : {}
@@ -192,6 +198,47 @@ export async function checkRequest(
   const parent = heldTo?.key ?? given(b.parent) ?? null
   const from = heldTo ?? (parent === null ? undefined : items.find(i => i.key === parent))
   const parentName = from?.name || parent || ''
+  const common = {
+    name,
+    // A spawn-agent start's tab label (#505), read only while the board places; else the name, as before.
+    label: (pins && labelOf(b.label)) || name,
+    cwd,
+    category,
+    workspaceId,
+    workspaceLabel,
+    newWorkspace: !workspaceId,
+    message,
+    worktree,
+    parent,
+  }
+  const none = { profile: '', profileDir: '', configDir: null, profileArgs: [], profileCommand: null }
+  if (codexFork) return { ok: true, launch: { ...common, codexFork, agent: CODEX_AGENT, model: null, ...none } }
+  // The agent: the one the request names, which the board must offer; else the board's default.
+  // Picked here, but refused only after the profile, as before Codex: Codex has no Claude profile.
+  const asked = given(b.agent)
+  const offered = asked === undefined ? null : agents()
+  const agent: LaunchAgentId | undefined = offered === null ? standard(agents) : offered.find(a => a.id === asked)?.id
+  if (agent === CODEX_AGENT) {
+    // An effort only with a model whose effort levels Codex's cache lists.
+    const effort = given(b.effort)
+    if (effort) {
+      const models = await cachedCodexModels()
+      if (!model || !Object.hasOwn(models, model) || !models[model]?.includes(effort))
+        return fail('model', 'launch.err.codexEffort')
+    }
+    return {
+      ok: true,
+      launch: {
+        ...common,
+        agent,
+        model,
+        ...(effort && { effort }),
+        ...none,
+        ...(pin && { pin }),
+        ...(remote && { remote }),
+      },
+    }
+  }
   const target = launchTarget(
     given(b.profile),
     parent === null ? null : (from ?? { name: parentName, profile: null }),
@@ -224,16 +271,9 @@ export async function checkRequest(
       return { ok: false, field: 'profile', error: err instanceof Error ? err.message : String(err) }
     }
   }
-  // The agent: the one the request names, which the board must offer; else the board's default.
-  // pi's command must be one the tab's shell can type.
-  let agent: LaunchAgentId
-  const asked = given(b.agent)
-  if (asked !== undefined) {
-    const offered = agents()
-    const pick = offered.find(a => a.id === asked)
-    if (!pick) return fail('agent', offered.length ? 'launch.err.agent' : 'launch.err.agentLauncher', { id: asked })
-    agent = pick.id
-  } else agent = standard(agents)
+  // An agent the board does not offer; pi's command must be one the tab's shell can type.
+  if (!agent)
+    return fail('agent', offered?.length ? 'launch.err.agent' : 'launch.err.agentLauncher', { id: asked ?? '' })
   if (agent === PI_AGENT)
     try {
       piCommand(pi)
@@ -249,20 +289,10 @@ export async function checkRequest(
   return {
     ok: true,
     launch: {
-      name,
-      // A spawn-agent start's tab label (#505), read only while the board places; else the name, as before.
-      label: (pins && labelOf(b.label)) || name,
-      cwd,
-      category,
-      workspaceId,
-      workspaceLabel,
-      newWorkspace: !workspaceId,
-      message,
-      worktree,
+      ...common,
       profile: profile.id,
       profileDir: profile.dir,
       configDir,
-      parent,
       profileArgs: (profile.args ?? []).filter((a): a is string => typeof a === 'string'),
       profileCommand: profileCommandWords,
       agent,

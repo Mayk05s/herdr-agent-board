@@ -123,3 +123,4 @@
 @media (forced-colors: active) {
   .card .ask:not(.qa-card) { border-block-color: Canvas; }
 }
+.card-meter { margin-top: 2px; font-size: 12px; color: var(--label-2); overflow-wrap: anywhere; }

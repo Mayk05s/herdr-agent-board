@@ -4,9 +4,11 @@
 // it to the session it started, the card's buttons (dismiss, go to it, trust, close its tab) and
 // what the new-session window offers, the agents a start may pick among it (core/launch/agents.ts).
 import { readCard, removeCard, writeCard } from '../../adapters/cards.ts'
+import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { herdr, paneTab, paneTabTerminal, workspaceList } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { findCommand } from '../../adapters/setup-facts.ts'
+import { CODEX_AGENT, isCodexSession } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
 import {
   CLAUDE_AGENT,
@@ -17,6 +19,7 @@ import {
 } from '../../core/launch/agents.ts'
 import { failureKind } from '../../core/launch/launcher-command.ts'
 import { sameDir } from '../../core/launch/names.ts'
+import { forkCard } from '../../core/links.ts'
 import { isPiItem, piSessionId } from '../../core/pi.ts'
 import { shownProfiles } from '../../core/profiles.ts'
 import type { Item, LaunchView } from '../../core/types.ts'
@@ -30,6 +33,7 @@ export interface LaunchOptions {
   launcher: LauncherInfo
   /** The agents a start may name (its `agent`), the default first; none when the config's launcher picks it. */
   agents: LaunchAgent[]
+  codexModels?: Record<string, string[]>
   /** The one a start that names none starts as: `launch.default` when offered, else Claude Code. */
   agent: LaunchAgentId
   workspaces: { id: string; label: string | undefined }[]
@@ -54,6 +58,7 @@ export type StartResult = { ok: true; id: string; session?: string } | { ok: fal
  * keeps when that card is not on the board (checkRequest).
  */
 export interface StartOptions {
+  codexFork?: true
   resume?: string | null
   fork?: string | null
   parent?: ParentFacts | null
@@ -176,6 +181,12 @@ export function agyOnPath(): boolean {
   return !!(found.ps ?? found.sh)
 }
 
+/** Whether `codex` is a command on the board's PATH (a .ps1 or .cmd on Windows too). */
+export function codexOnPath(): boolean {
+  const found = findCommand('codex')
+  return !!(found.ps ?? found.sh)
+}
+
 /** The launches of this board process; `onChange` publishes the board again. */
 export function createLaunches({
   deps,
@@ -201,18 +212,26 @@ export function createLaunches({
   async function start(
     body: unknown,
     items: Item[] = [],
-    { resume = null, fork = null, parent = null, node = null, byHand = true, sessionId = null }: StartOptions = {},
+    {
+      resume = null,
+      fork = null,
+      parent = null,
+      node = null,
+      byHand = true,
+      sessionId = null,
+      codexFork,
+    }: StartOptions = {},
   ): Promise<StartResult> {
     const categories = new Set([...deps.cfg.categories.map(c => c.id), ...items.map(i => i.category)])
     // Resume, fork, a node's own start from its master and a verifier (#492) are never placed: they run
     // where they are, a verifier in the worker's folder on this computer.
     const placing = resume || fork || node || sessionId ? null : placer()
     // Only the board's own spawn-agent types a profile's start command: the others never read it.
-    const launcher = launcherFor(deps.cfg.launch, { resume: !!resume, fork: !!fork })
+    const launcher = launcherFor(deps.cfg.launch, { resume: !!resume, fork: !!fork, ...(codexFork && { codexFork }) })
     const r = await checkRequest(body, {
       // A node's start runs in its master's lane, which the bundle (T10) may not have brought yet.
       categories: node ? null : categories,
-      profiles: deps.profiles(),
+      ...(codexFork ? { codexFork } : { profiles: deps.profiles() }),
       items,
       typesCommand: launcher.kind === 'builtin',
       ...(parent && { parent }),
@@ -223,7 +242,7 @@ export function createLaunches({
           ? []
           : resume
             ? launchAgents(deps.cfg.launch, () => false, agyOnPath)
-            : launchAgents(deps.cfg.launch, piOnPath, agyOnPath),
+            : launchAgents(deps.cfg.launch, piOnPath, agyOnPath, codexOnPath),
       standard: offered => (resume ? CLAUDE_AGENT : defaultAgent(deps.cfg.launch, offered)),
       pi: deps.cfg.launch?.pi,
       agy: deps.cfg.launch?.agy,
@@ -234,11 +253,18 @@ export function createLaunches({
     // launch.agent whose arguments pick the session cannot resume one: refused before anything runs.
     if (resume && launcher.kind === 'herdr' && herdrCannotResume(deps.cfg.launch ?? {}, r.launch.profileArgs))
       return { ok: false, field: 'launcher', error: t('archive.err.cannotResume') }
-    if (fork && launcher.kind === 'herdr' && herdrCannotResume(deps.cfg.launch ?? {}, r.launch.profileArgs))
+    if (
+      fork &&
+      !codexFork &&
+      launcher.kind === 'herdr' &&
+      herdrCannotResume(deps.cfg.launch ?? {}, r.launch.profileArgs)
+    )
       return { ok: false, field: 'launcher', error: t('fork.err.launcher') }
     // A model it cannot pass on is refused, not left out: the session would run on another one.
-    if (r.launch.model && !launcher.takesModel)
-      return { ok: false, field: 'model', error: t('launch.err.modelLauncher') }
+    // A new Codex session starts through herdr's launcher whatever the config's (run.ts).
+    const starts =
+      r.launch.agent === CODEX_AGENT && !codexFork ? launcherFor(deps.cfg.launch, { codex: true }) : launcher
+    if (r.launch.model && !starts.takesModel) return { ok: false, field: 'model', error: t('launch.err.modelLauncher') }
     // A resumed session keeps its conversation: no first message goes into it. A fork starts with
     // a copy of its source's in the source's folder: no worktree.
     const request = resume ? { ...r.launch, message: '' } : fork ? { ...r.launch, worktree: null } : r.launch
@@ -334,6 +360,14 @@ export function createLaunches({
         )
       }
       if (!it) continue
+      if (
+        l.codexFork &&
+        (it.agent !== 'codex' ||
+          !l.sessionId ||
+          !isCodexSession(it.session ?? '') ||
+          it.session?.toLowerCase() !== l.sessionId.toLowerCase())
+      )
+        continue
       claimed.add(it.key)
       l.key = it.key
       l.pane ??= it.pane
@@ -341,7 +375,16 @@ export function createLaunches({
       // in a moment, so only other agents get a card by their pane.
       if (l.carded !== it.key && (it.session || it.agent !== 'claude')) {
         try {
-          writeCard(it.key, { category: l.category, profileWant: l.profile, ...(l.model && { modelWant: l.model }) })
+          writeCard(it.key, {
+            category: l.category,
+            // Codex has no Claude profile: a fork keeps its name and source, a new one its model.
+            ...(l.codexFork
+              ? { name: l.name, ...(l.fork && forkCard(l.fork)) }
+              : l.agent === CODEX_AGENT
+                ? {}
+                : { profileWant: l.profile }),
+            ...(l.model && { modelWant: l.model }),
+          })
           // pi's card is under its file: the one written under the board's id before pi was up goes.
           if (isPiItem(it) && l.carded && laneOnly(l.carded)) removeCard(l.carded)
           l.carded = it.key
@@ -419,11 +462,12 @@ export function createLaunches({
       error = messageOf(err)
     }
     const cfg = deps.cfg
-    const agents = launchAgents(cfg.launch, piOnPath, agyOnPath)
+    const agents = launchAgents(cfg.launch, piOnPath, agyOnPath, codexOnPath)
     const launcher = launcherFor(cfg.launch)
     return {
       launcher: launcher.describe(),
       agents,
+      ...(agents.some(agent => agent.id === CODEX_AGENT) && { codexModels: await cachedCodexModels() }),
       agent: defaultAgent(cfg.launch, () => agents),
       workspaces,
       focused,

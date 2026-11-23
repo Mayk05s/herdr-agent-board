@@ -119,6 +119,8 @@ export interface LaunchSpec {
   pi?: string | string[]
   /** What it types for a start that asks for Antigravity (core/launch/agents.ts): as `claude`; `agy` when unset. */
   agy?: string | string[]
+  /** What spawn-agent --agent codex types: as `claude`; `codex` when unset. */
+  codex?: string | string[]
   /** The agent a start that names none starts as (core/launch/agents.ts): `claude`, `pi` or `agy`; Claude Code when unset. */
   default?: string
   /**
