@@ -173,8 +173,7 @@ export function createMoveIn(d: MoveInDeps): MoveIn {
 
   /** The session's folder here at its branch, as the source left it; or why not. */
   function folderFor(p: MovePack): Promise<{ ok: true; cwd: string } | MoveInRefusal> {
-    const key = `${p.folder.address}\u0000${d.node() ? '' : p.session}`
-    return oneAtATime(key, async () => {
+    return oneAtATime(p.folder.address, async () => {
       const got = await checkoutRoot(p)
       if (!got.ok) return got
       const root = got.root
@@ -198,6 +197,10 @@ export function createMoveIn(d: MoveInDeps): MoveIn {
       if (there.state.head !== there.state.target) {
         const ff = await repo.fastForward(at, branch)
         if (!ff.ok) return refuse('repo', `${at} has commits of its own on ${branch}: ${ff.why}`)
+        // A branch ahead of the remote "fast-forwards" to itself: it has commits the source never had.
+        const now = await repo.state(at, branch)
+        if (!now.ok || now.state.head !== now.state.target)
+          return refuse('repo', `${at} has commits of its own on ${branch}`)
       }
       const cwd = p.folder.subdir ? join(at, ...p.folder.subdir.split('/')) : at
       if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory())
@@ -259,12 +262,6 @@ export function createMoveIn(d: MoveInDeps): MoveIn {
           notes.push(`folder trust not given (${messageOf(err)}): Claude will ask once`)
         }
       }
-      // Its name and lane, and no mark of a move away from here before (a move back).
-      writeCard(p.session, {
-        ...(p.name && { name: p.name }),
-        ...(p.category && { category: d.lanes().has(p.category) ? p.category : 'other' }),
-        moved: '',
-      })
       // As the archive's Return names it: what herdr and a tab take.
       const name =
         p.name
@@ -290,6 +287,13 @@ export function createMoveIn(d: MoveInDeps): MoveIn {
         started = { ok: false, field: 'launch', error: messageOf(err) }
       }
       if (!started.ok) return refuse('launch', `its resume did not start: ${started.error}`)
+      // Its name and lane, and no mark of a move away from here before (a move back), once its resume
+      // is on its way: a start that failed leaves the mark, and the folder it names, for the next try.
+      writeCard(p.session, {
+        ...(p.name && { name: p.name }),
+        ...(p.category && { category: d.lanes().has(p.category) ? p.category : 'other' }),
+        moved: '',
+      })
       d.log(`move: ${p.name || p.session} from ${p.from} resumed in ${cwd}`)
       return { ok: true, cwd, launch: started.id, notes }
     },

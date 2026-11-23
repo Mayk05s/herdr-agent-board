@@ -62,6 +62,12 @@ interface Packed {
   at: number
 }
 
+/** herdr's `pane process-info` answer, as far as a close reads it. */
+interface ProcessInfo {
+  shell_pid?: number
+  foreground_processes?: { pid?: number }[]
+}
+
 /** A pack is kept this long for the master to fetch its files. */
 const PACK_KEPT_MS = 60 * 60_000
 
@@ -105,6 +111,8 @@ export function createMoveOut(o: MoveOutDeps): MoveOut {
       if (!item) return { ok: false, why: 'no such session on the board', kind: 'gone' }
       if (item.agent !== 'claude' || !item.session || !SESSION_ID.test(item.session)) return no({ kind: 'not-claude' })
       const session = item.session
+      // One move of a session at a time: a second would take the first's pack, and its call-off.
+      if (packs.has(session)) return { ok: false, why: 'a move of it is on its way already', kind: 'busy' }
       const list = deps.profiles().list
       const profile = itemProfile(item, list)
       const dir = profile?.dir ?? item.profileFolder
@@ -126,9 +134,18 @@ export function createMoveOut(o: MoveOutDeps): MoveOut {
           return { ok: false, why: 'it is not free: try again when it is', kind: 'busy', ...(s && { sleep: s }) }
         wasAwake = s.result === 'asleep'
       }
+      const wakeBack = async (): Promise<void> => {
+        if (wasAwake) await wake(deps, { ...item, pane: null, sleeping: true }).catch(() => {})
+      }
+      // Its last turn may have written in the folder: what travels is checked again once it is asleep.
+      const after = wasAwake ? await folderOf(cwd) : folder
+      if (!after.ok) {
+        await wakeBack()
+        return no(after.why)
+      }
       const listed = await listSessionFiles(dir, session, cwd)
       if (!listed.ok) {
-        if (wasAwake) await wake(deps, { ...item, pane: null, sleeping: true }).catch(() => {})
+        await wakeBack()
         return listed.error === 'no-transcript' ? no({ kind: 'no-transcript' }) : { ok: false, why: listed.error }
       }
       const carried = entriesToCarry(listEntries(), key)
@@ -152,7 +169,7 @@ export function createMoveOut(o: MoveOutDeps): MoveOut {
         profile: profile.id,
         workspace: item.workspace ?? '',
         cwd,
-        folder: folder.folder,
+        folder: after.folder,
         files: listed.files.map(({ abs: _abs, ...f }) => f),
         entries: carried,
         trusted,
@@ -187,7 +204,13 @@ export function createMoveOut(o: MoveOutDeps): MoveOut {
       if (pane) {
         try {
           const agent = await agentGet(pane, 10_000)
-          if (!agent) {
+          // Only a shell nobody uses: a program started in it since (a server, the owner's own) keeps it.
+          const info = agent
+            ? null
+            : await herdr<{ process_info?: ProcessInfo }>(['pane', 'process-info', pane], 10_000)
+          const shell = info?.process_info?.shell_pid
+          const others = (info?.process_info?.foreground_processes ?? []).filter(p => p.pid !== shell)
+          if (!agent && info && !others.length) {
             await herdr(['pane', 'close', pane])
             notes.push('its pane closed')
           }

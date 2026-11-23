@@ -125,8 +125,9 @@ export function blobStore(dir: string): BlobStore {
       const tmp = `${path(sha)}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
       const h = createHash('sha256')
       let size = 0
-      const fh = await open(tmp, 'w', 0o600)
+      let fh: Awaited<ReturnType<typeof open>> | null = null
       try {
+        fh = await open(tmp, 'w', 0o600)
         if (body)
           for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
             size += chunk.length
@@ -139,7 +140,7 @@ export function blobStore(dir: string): BlobStore {
         renameSync(tmp, path(sha))
         return { ok: true }
       } catch (err) {
-        await fh.close().catch(() => {})
+        await fh?.close().catch(() => {})
         try {
           unlinkSync(tmp)
         } catch {}

@@ -66,6 +66,9 @@ export interface DeviceMoveOptions {
   startWaitMs?: number
 }
 
+/** A launch's state that could not be asked: the wait goes on. */
+const UNKNOWN = 'unknown'
+
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /** This board's own halves as a side. */
@@ -97,11 +100,16 @@ export function localSide(o: Pick<DeviceMoveOptions, 'out' | 'in'>): MoveSide {
 export function nodeSide(id: string, link: Pick<Link, 'fetch'>): MoveSide {
   const older = `${id} runs a board without device moves: update it first`
   async function call(path: string, body: unknown): Promise<Record<string, unknown>> {
-    const res = await link.fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    })
+    let res: Response
+    try {
+      res = await link.fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    } catch (err) {
+      return { ok: false, why: `${id} did not answer (${messageOf(err)})`, error: 'offline' }
+    }
     if (res.status === 404) {
       await res.body?.cancel()
       return { ok: false, why: older, error: 'older' }
@@ -124,7 +132,12 @@ export function nodeSide(id: string, link: Pick<Link, 'fetch'>): MoveSide {
         : { ok: false, why: why(r), ...(typeof r.kind === 'string' && { kind: r.kind as never }) }
     },
     async file(session, n) {
-      const res = await link.fetch(`/api/node/move/out/${enc(session)}/file/${n}`, { method: 'GET' })
+      let res: Response
+      try {
+        res = await link.fetch(`/api/node/move/out/${enc(session)}/file/${n}`, { method: 'GET' })
+      } catch (err) {
+        return { ok: false, why: `${id} did not answer (${messageOf(err)})` }
+      }
       if (!res.ok || !res.body) {
         await res.body?.cancel()
         return { ok: false, why: res.status === 404 ? 'the file is no longer offered' : `${id} answered ${res.status}` }
@@ -147,13 +160,18 @@ export function nodeSide(id: string, link: Pick<Link, 'fetch'>): MoveSide {
         : { ok: false, error: 'repo', why: why(r) }
     },
     async put(sha, body) {
-      const res = await link.fetch(`/api/node/move/in/blob/${sha}`, {
-        method: 'PUT',
-        headers: { 'content-type': 'application/octet-stream' },
-        body,
-        // A stream as the body: Bun sends it as it comes.
-        duplex: 'half',
-      } as RequestInit)
+      let res: Response
+      try {
+        res = await link.fetch(`/api/node/move/in/blob/${sha}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/octet-stream' },
+          body,
+          // A stream as the body: Bun sends it as it comes.
+          duplex: 'half',
+        } as RequestInit)
+      } catch (err) {
+        return { ok: false, why: `${id} did not answer (${messageOf(err)})` }
+      }
       const r: unknown = await res.json().catch(() => null)
       return isRecord(r) && r.ok === true
         ? { ok: true }
@@ -175,9 +193,13 @@ export function nodeSide(id: string, link: Pick<Link, 'fetch'>): MoveSide {
       return r.ok === true ? { ok: true, entries: Number(r.entries) || 0 } : { ok: false, why: why(r) }
     },
     async launchState(launch) {
-      const res = await link.fetch(`/api/node/move/in/launch/${enc(launch)}`, { method: 'GET' })
-      const r: unknown = await res.json().catch(() => null)
-      return isRecord(r) && typeof r.state === 'string' ? r.state : null
+      // Only the node's own answer says its launch is gone (null); no answer is not knowing.
+      try {
+        const res = await link.fetch(`/api/node/move/in/launch/${enc(launch)}`, { method: 'GET' })
+        const r: unknown = res.ok ? await res.json().catch(() => undefined) : await res.body?.cancel()
+        if (isRecord(r) && (typeof r.state === 'string' || r.state === null)) return r.state as string | null
+      } catch {}
+      return UNKNOWN
     },
   }
 }
@@ -262,6 +284,31 @@ async function moveOne(
   const packed = await source.pack(key, source.id === LOCAL ? cfg.id : source.id)
   if (!packed.ok) return fail(packed.why)
   const session = packed.pack.session
+  // Whatever throws before the target's start was asked for calls the move off at the source.
+  let committed = false
+  try {
+    return await carry(o, cfg, source, target, key, packed.pack, () => {
+      committed = true
+    })
+  } catch (err) {
+    if (committed) throw err
+    await source.abort(session).catch(() => {})
+    return fail(messageOf(err))
+  }
+}
+
+async function carry(
+  o: DeviceMoveOptions,
+  cfg: NodesConfig,
+  source: MoveSide,
+  target: MoveSide,
+  key: string,
+  given: MovePack,
+  started: () => void,
+): Promise<DeviceMoveOutcome> {
+  const fail = (why: string): DeviceMoveOutcome => ({ target: key, result: 'refused', why })
+  const session = given.session
+  const packed = { pack: given }
   const pack: MovePack = {
     ...packed.pack,
     profile: profileOn(cfg.devices, source.id, target.id, packed.pack.profile),
@@ -281,7 +328,12 @@ async function moveOne(
     const put = await target.put(sha, got.body)
     if (!put.ok) return callOff(`a file did not go to ${target.id}: ${put.why}`)
   }
-  const committed = await target.commit(pack)
+  started()
+  const committed = await target
+    .commit(pack)
+    .catch(
+      (err: unknown): Awaited<ReturnType<MoveSide['commit']>> => ({ ok: false, error: 'launch', why: messageOf(err) }),
+    )
   if (!committed.ok) return callOff(committed.why)
   const notes = [...committed.notes]
   // The old card goes once the new start is on its way: done, or still starting when the wait ends.
@@ -289,10 +341,13 @@ async function moveOne(
   if (state === 'failed') return callOff(`its resume on ${target.id} failed: its card there says why`)
   if (state !== 'done')
     notes.push(state === null ? 'its start there is no longer shown' : `its start there is ${state}`)
-  const settled = await target.settle(pack)
+  // From here on the session runs there: what fails is a note, and the source is finished all the same.
+  const settled = await target.settle(pack).catch((err: unknown) => ({ ok: false as const, why: messageOf(err) }))
   if (!settled.ok) notes.push(`its schedule entries stayed behind (${settled.why})`)
   else if (settled.entries) notes.push(`${settled.entries} schedule entr${settled.entries === 1 ? 'y' : 'ies'} moved`)
-  const finished = await source.finish(session, target.id === LOCAL ? cfg.id : target.id)
+  const finished = await source
+    .finish(session, target.id === LOCAL ? cfg.id : target.id)
+    .catch((err: unknown) => ({ ok: false as const, why: messageOf(err) }))
   if (!finished.ok) notes.push(`the old card stays on ${source.id} (${finished.why})`)
   else notes.push(...finished.notes)
   const oldKey = source.id === LOCAL ? session : nodeKey(source.id, session)
@@ -312,7 +367,7 @@ async function waitStart(target: MoveSide, launch: string, ms: number): Promise<
   const until = Date.now() + ms
   let state: string | null = 'starting'
   for (;;) {
-    state = await target.launchState(launch).catch(() => state)
+    state = await target.launchState(launch).catch(() => UNKNOWN)
     if (state === 'done' || state === 'failed' || state === null) return state
     if (Date.now() > until) return state
     await pause(500)
