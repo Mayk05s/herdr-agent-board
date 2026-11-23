@@ -1,6 +1,12 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { isCodexItem, isCodexSession, parseCodexConversation, parseCodexTail } from '../../src/core/codex.ts'
+import {
+  isCodexItem,
+  isCodexSession,
+  parseCodexConversation,
+  parseCodexTail,
+  resumedCodexSession,
+} from '../../src/core/codex.ts'
 
 const row = (type: string, payload: Record<string, unknown>) =>
   JSON.stringify({ timestamp: '2026-10-20T08:00:00Z', type, payload })
@@ -144,4 +150,43 @@ test('the sheet has every message whole; the card keeps its short preview (#174)
   const lines = [message('user', prompt), message('assistant', answer)]
   expect(parseCodexConversation(lines).map(t => ('text' in t ? t.text : t.role))).toEqual([prompt, answer])
   expect(parseCodexTail(lines).lastText).toBe(`${answer.slice(0, 699)}…`)
+})
+
+test('the card’s model and effort are the last turn’s, from its turn_context (#426); none before a turn', () => {
+  const turn = (model: string, effort?: string, mode?: string) =>
+    row('turn_context', {
+      model,
+      ...(effort && { effort }),
+      ...(mode && { collaboration_mode: { mode: 'default', settings: { model, reasoning_effort: mode } } }),
+    })
+  const first = [turn('gpt-6.1-sol', 'low'), message('user', 'fix it'), message('assistant', 'Done.')]
+  expect(parseCodexTail(first)).toMatchObject({ model: 'gpt-6.1-sol', effort: 'low' })
+  // /model between turns: the newer turn wins.
+  expect(parseCodexTail([...first, turn('gpt-6-luna', 'high'), message('user', 'again')])).toMatchObject({
+    model: 'gpt-6-luna',
+    effort: 'high',
+  })
+  // An older Codex wrote the effort only in its collaboration mode.
+  expect(parseCodexTail([turn('gpt-5.6-sol', undefined, 'medium')])).toMatchObject({ effort: 'medium' })
+  const none = parseCodexTail([message('user', 'fix it')])
+  expect('model' in none || 'effort' in none).toBe(false)
+})
+
+test('the session a codex command line resumes: only `codex resume <id>`, nothing else', () => {
+  const id = '01a1ea39-cccb-70e0-a8f8-aff0a74459c6'
+  expect(resumedCodexSession(['codex', 'resume', id, '--no-daemon', '-m', 'gpt-6.1-sol'])).toBe(id)
+  expect(resumedCodexSession(['/opt/bin/codex', '-c', 'x=1', 'resume', '--no-daemon', id.toUpperCase()])).toBe(id)
+  expect(resumedCodexSession(['C:\\Tools\\codex.exe', 'resume', id])).toBe(id)
+  for (const argv of [
+    ['codex'],
+    ['codex', '--no-daemon'],
+    ['codex', 'resume'],
+    ['codex', 'resume', '--last'],
+    ['codex', 'resume', 'не id'],
+    ['codex', id],
+    ['claude', 'resume', id],
+    ['claude', '--resume', id],
+    [],
+  ])
+    expect(resumedCodexSession(argv)).toBeNull()
 })

@@ -15,6 +15,7 @@ import { type BoardAgyLimits, pickAgyLimits } from '../core/agy-limits.ts'
 import { COLUMNS } from '../core/board.ts'
 import { besideParents } from '../core/call-agent.ts'
 import { categoryInfo, colorHex, laneRank, PALETTE } from '../core/categories.ts'
+import { isCodexItem } from '../core/codex.ts'
 import { compactDefaultText } from '../core/compact.ts'
 import type { DecisionsPayload } from '../core/decisions.ts'
 import { foldModeOf } from '../core/fold-mode.ts'
@@ -48,7 +49,7 @@ import type { DialogStatus } from '../core/workdesk-dialog.ts'
 import type { BoardObservation } from '../core/workdesk-topology.ts'
 import { collect } from '../services/board.ts'
 import type { Deps } from '../services/deps.ts'
-import { canFork } from '../services/launch/fork.ts'
+import { canCodexFork, canFork } from '../services/launch/fork.ts'
 import type { Launches } from '../services/launch/launches.ts'
 import type { NodeAggregate } from '../services/nodes/aggregate.ts'
 import { hooksInPlace } from '../services/profiles.ts'
@@ -393,6 +394,8 @@ export function createBoardState({
       mokupilot: mokupilot?.() ?? false,
       // fork: whether the board can fork a session into a new tab with its launcher.
       fork: canFork(cfg),
+      // codexFork: only on a board with a Codex session that can fork, so other boards' payload stays as it was.
+      ...(list.some(isCodexItem) && canCodexFork() && { codexFork: true }),
       // aside: whether a session's sheet offers a side question (/btw typed into the session).
       aside: aside?.() ?? false,
       setup: setup?.() ?? null,

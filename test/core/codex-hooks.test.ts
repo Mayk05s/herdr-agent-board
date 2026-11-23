@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { brief, herdrLine } from '../../src/core/brief.ts'
 import { categoryFor, normalizeConfig } from '../../src/core/categories.ts'
-import { planCodexHooks } from '../../src/core/codex-hooks.ts'
+import { labelHerdrHook, planCodexHooks } from '../../src/core/codex-hooks.ts'
 import { languageName } from '../../src/core/lang.ts'
 import { oldSource } from '../web/support/old-app.ts'
 
@@ -139,4 +139,41 @@ test('the shared brief stays byte-identical for Claude and pi bridge sessions', 
   expect(codex).toContain('every Codex session')
   expect(codex).not.toContain('CronCreate')
   expect(codex).not.toContain('Claude process')
+})
+
+test('labels name the board hooks in /hooks (statusMessage); without them the entries are as before', () => {
+  const herdr = { type: 'command', command: "bash '/x/herdr-agent-state.sh' session", timeout: 10 }
+  const input = { hooks: { SessionStart: [{ hooks: [herdr] }] } }
+  const plain = planCodexHooks(input, script)
+  expect(JSON.stringify(plain)).not.toContain('statusMessage')
+  const labels = { SessionStart: 'Борда: карточка сессии', UserPromptSubmit: 'Борда: обновление карточки' }
+  const named = planCodexHooks(plain, script, labels)
+  const hooks = named.hooks as Record<string, { hooks: { command: string; statusMessage?: string }[] }[]>
+  const ours = (event: string) => hooks[event]?.flatMap(g => g.hooks).filter(h => h.command.includes('codex-hook.ts'))
+  expect(ours('SessionStart')).toMatchObject([{ statusMessage: 'Борда: карточка сессии' }])
+  expect(ours('UserPromptSubmit')).toMatchObject([{ statusMessage: 'Борда: обновление карточки' }])
+  // herdr's entry is not the board's to name here, and a second run changes nothing.
+  expect(hooks.SessionStart?.flatMap(g => g.hooks).find(h => h.command.includes('herdr-agent-state'))).toEqual(herdr)
+  expect(planCodexHooks(named, script, labels)).toEqual(named)
+})
+
+test("herdr's Codex hook gets its label once; nothing to change is null", () => {
+  const input = {
+    hooks: {
+      SessionStart: [
+        { hooks: [{ type: 'command', command: "bash '/x/herdr-agent-state.sh' session" }] },
+        { hooks: [{ type: 'command', command: 'keep-me' }] },
+      ],
+    },
+  }
+  const next = labelHerdrHook(input, 'herdr: статус агента')
+  expect(next).toMatchObject({
+    hooks: {
+      SessionStart: [{ hooks: [{ statusMessage: 'herdr: статус агента' }] }, { hooks: [{ command: 'keep-me' }] }],
+    },
+  })
+  expect(JSON.stringify(next?.hooks).match(/statusMessage/g)).toHaveLength(1)
+  expect(labelHerdrHook(next, 'herdr: статус агента')).toBeNull()
+  expect(labelHerdrHook({ hooks: {} }, 'x')).toBeNull()
+  expect(labelHerdrHook('nope', 'x')).toBeNull()
 })

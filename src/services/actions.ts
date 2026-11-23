@@ -20,7 +20,9 @@ import { boardOnPath } from '../adapters/resume-report.ts'
 import { peekAgySleepers, peekPiSleepers, peekWakeSessions } from '../adapters/wake-files.ts'
 import { cliWakeHerdr } from '../adapters/wake-herdr.ts'
 import { AGY_AGENT, isAgyItem } from '../core/agy.ts'
+import { CODEX_AGENT } from '../core/codex.ts'
 import { agyDraft } from '../core/dialogs/agy-dialogs.ts'
+import { codexDraft } from '../core/dialogs/codex-input.ts'
 import { inputDraft } from '../core/dialogs/input-box.ts'
 import { piDraft } from '../core/dialogs/pi-dialogs.ts'
 import { parseDialog } from '../core/dialogs/questions.ts'
@@ -774,6 +776,15 @@ export async function send(
       const blocked = refused(asAgent({ agent: target }))
       if (blocked) return blocked
       if (target.agent_status !== 'idle' && target.agent_status !== 'done') return changed()
+    }
+    // Codex has the same trouble with a draft: Enter sends it together with the text. Only a scheduled
+    // message looks, and only at a Codex session, so every other session makes the calls it made.
+    if (guardDraft && (agent?.kind === CODEX_AGENT || item.agent === CODEX_AGENT)) {
+      const draft = codexDraft(await herdrText(['agent', 'read', pane, '--source', 'visible', '--ansi'], 10_000))
+      if (draft) return { ok: false, busy: true, draft: true, error: t('err.draft', { name: item.name }) }
+      const fresh = await agentGet(pane)
+      const after = refused(fresh)
+      if (after) return after
     }
     if (probe) return { ok: true }
     // This read and prompt are separate CLI calls, not an atomic identity check and send.

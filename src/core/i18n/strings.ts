@@ -311,6 +311,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.qa.same':
       'The keys went to {name}, and its screen still shows the same dialog: it may be asking again, or the keys did not take. Check it in herdr',
     'qa.stopped': 'Stopped midway',
+    'qa.codexAllow': 'Allow once',
+    'qa.codexDeny': 'Deny',
     'qa.perm.more': ['{n} more line: see the terminal screen', '{n} more lines: see the terminal screen'],
     'qa.step.start': 'the start',
     'qa.step.back': 'going back to the first question',
@@ -1029,6 +1031,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.qa.same':
       'Клавиши ушли в {name}, а на экране всё тот же диалог: либо сессия спрашивает снова, либо клавиши не дошли. Проверь в herdr',
     'qa.stopped': 'Остановлено на полпути',
+    'qa.codexAllow': 'Разрешить один раз',
+    'qa.codexDeny': 'Отклонить',
     'qa.perm.more': [
       'Ещё {n} строка: смотри экран терминала',
       'Ещё {n} строки: смотри экран терминала',
