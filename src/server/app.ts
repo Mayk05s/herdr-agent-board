@@ -56,6 +56,7 @@ import {
   sshVersion,
   writePidRecord,
 } from '../adapters/ssh.ts'
+import { rekeySession } from '../adapters/work-thread-store.ts'
 import { connectWorkdeskEvents } from '../adapters/workdesk-events.ts'
 import { NODE_PROGRAMS } from '../core/bundle.ts'
 import { answerText, decisionsConfig } from '../core/decisions.ts'
@@ -93,6 +94,8 @@ import type { Deps } from '../services/deps.ts'
 import { createJournal } from '../services/journal.ts'
 import { createLaunches } from '../services/launch/launches.ts'
 import { mokupilotCheck } from '../services/mokupilot.ts'
+import { createMoveIn, type MoveIn } from '../services/move-in.ts'
+import { createMoveOut, type MoveOut } from '../services/move-out.ts'
 import { createNodeBundle, nodeBundleDeps } from '../services/node/bundle.ts'
 import { createNodeGit } from '../services/node/git-access.ts'
 import { createNodeLaunch } from '../services/node/launch.ts'
@@ -103,6 +106,7 @@ import { createNodeUplink, type NodeUplink } from '../services/node/uplink.ts'
 import { createNodeAggregate, type NodeAggregate } from '../services/nodes/aggregate.ts'
 import { type BundleSync, createBundleSync } from '../services/nodes/bundle-sync.ts'
 import { createNodeLinks, linkTimes, type NodeLinks } from '../services/nodes/links.ts'
+import { moveToDevice } from '../services/nodes/move-device.ts'
 import { createPlacer, type Placer } from '../services/nodes/placer.ts'
 import { createRevoker, type Revoker } from '../services/nodes/revoke.ts'
 import { createNodeSetup, type NodeSetup } from '../services/nodes/setup.ts'
@@ -826,6 +830,22 @@ export async function startServer({
   // The master's devices in the payload (#500): made with the links below, the first time
   // config.json has `nodes`; until then the board's payload is what it was without them.
   let nodeAggregate: NodeAggregate | null = null
+  // A session moved to or from another device (#616): this board's two halves, made the first time a
+  // move needs them (on a master's move, or a node's door); a board that never moves one runs none of it.
+  let moveHalves: { out: MoveOut; in: MoveIn } | null = null
+  const movers = (): { out: MoveOut; in: MoveIn } =>
+    (moveHalves ??= {
+      out: createMoveOut({ deps, items: board.items, log }),
+      in: createMoveIn({
+        node: () => nodeConfig(cfg.node),
+        profiles: () => deps.profiles(),
+        start: (body, session) => launches.start(body, board.items(), { resume: session }),
+        launch: id => launches.list().find(l => l.id === id),
+        workspaces: () => workspaceList(8000),
+        lanes: () => new Set([...cfg.categories.map(c => c.id), ...board.items().map(i => i.category)]),
+        log,
+      }),
+    })
   const board = createBoardState({
     deps,
     launches,
@@ -1050,8 +1070,31 @@ export async function startServer({
     scheduleRoute(refresh),
     // Several sessions put to sleep at once, for agents (services/sleep.ts).
     sleepRoute({ deps, items: board.items, refresh }),
-    // Sessions to another Claude profile, from the card and lane menus (services/move.ts, #256).
-    moveRoute({ deps, items: board.items, refresh }),
+    // Sessions to another Claude profile, from the card and lane menus (services/move.ts, #256), and
+    // to another device while this board is a master (#616, services/nodes/move-device.ts).
+    moveRoute({
+      deps,
+      items: board.items,
+      refresh,
+      toDevice: (targets, device) =>
+        nodeLinks && nodesConfig(cfg.nodes)
+          ? moveToDevice(
+              {
+                nodes: () => nodesConfig(cfg.nodes),
+                link: id => nodeLinks?.link(id) ?? null,
+                ...movers(),
+                items: () => [...board.items(), ...(nodeAggregate?.part()?.items ?? [])],
+                rekeyThreads: (from, to) => {
+                  withThreadsDb(false, db => db?.write('board', tx => rekeySession(tx, from, to)))
+                },
+                log,
+                startWaitMs: knobMs('BOARD_MOVE_START_WAIT_MS', 120_000),
+              },
+              targets,
+              device,
+            )
+          : null,
+    }),
     // Settings → Sleep and wake… (services/wake/control.ts), for this computer only.
     ...wakeRoutes(wake),
     // The archive: its list, and archiving, bringing back or removing sessions (services/archive.ts).
@@ -1292,6 +1335,7 @@ export async function startServer({
           }
         },
         update: nodeUpdate,
+        move: movers(),
       }),
       log,
     })

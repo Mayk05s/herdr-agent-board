@@ -98,6 +98,11 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     'move.sum.refused': ['{n} refused', '{n} refused'],
     'move.sum.usual': 'new sessions start in {profile}',
     'move.err.usual': '{lane}’s usual profile stays as it was: {why}',
+    // a session moved to another device from its card's menu (#616, web/src/models/device-move.ts)
+    'moveDevice.menu': 'Device',
+    'moveDevice.busy': 'Moving to {device}…',
+    'moveDevice.done': '{name} moved to {device}',
+    'moveDevice.working': 'It is working: move it once it is free',
     // the Profiles panel, from Settings with more than one profile folder (web/src/components/profiles)
     'set.profiles': 'Profiles…',
     'prof.title': 'Profiles',
@@ -228,6 +233,10 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     'move.sum.refused': ['{n} не перенесена', '{n} не перенесены', '{n} не перенесено'],
     'move.sum.usual': 'новые сессии начнутся в {profile}',
     'move.err.usual': 'Обычный профиль «{lane}» не изменился: {why}',
+    'moveDevice.menu': 'Устройство',
+    'moveDevice.busy': 'Переношу на {device}…',
+    'moveDevice.done': '{name}: теперь на {device}',
+    'moveDevice.working': 'Сессия работает: перенести можно, когда освободится',
     // the Profiles panel, from Settings with more than one profile folder (web/src/components/profiles)
     'set.profiles': 'Профили…',
     'prof.title': 'Профили',

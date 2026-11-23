@@ -651,6 +651,40 @@ lane's usual profile too (as Categories does), so new sessions there start in it
 it as `POST /api/move` with `{ "targets": ["<key>", ...], "profile": "<id>", "whenFree": true }`,
 which answers `{ ok, results }` as `board move` has them (`src/server/routes/move.ts`).
 
+**Moving a session to another device** (a board that is a master, with `nodes` in config.json and
+the device's link up; docs/design/nodes), with its session id and conversation:
+
+```sh
+board move Atlas --device server-1   # to a node, by its device id
+board move Atlas --device local      # back to this computer
+```
+
+The folder travels by git only: the session's folder must be in a checkout with a remote the device
+can clone, on a branch, with nothing uncommitted (untracked files count) and the branch pushed.
+Anything else is refused with the reason (commit, push, a detached HEAD, no remote) before anything
+happens, so ignored files such as `node_modules`, a venv, build output, caches and `.env` never
+travel. A session at work is refused too ("try again when it is free"): its conversation must be
+whole before it is copied, and `--when-free` stays a profile move's. A free one is put to sleep
+first, as `board sleep` does. On a node the repository is the clone under `node.workRoot` by its
+address, as a placed start has it, cloned when missing; back on this computer it is the checkout the
+session left. Either is fetched, and the branch found: the checkout itself when it is on it, else
+the worktree that has it, else a new worktree beside it. It is only fast-forwarded: a checkout
+there with changes, or with commits of its own on the branch, is refused. The transcript, the
+session's own folder and its file history go into the device's profile (a device's `profiles` map
+names it) under the project folder of the new path, the source profile's trust in the folder with
+them, and the session is resumed there with its name and lane, as Return from the archive resumes
+one. Its reminders go with it; the threads here follow its new key. Once its start there is on its
+way, the old card is marked moved and leaves the board, and its pane closes. Anything that fails
+before that leaves the session where it was (woken again when it was awake). Per-project memory is
+not carried: it is keyed by the folder's path. The master carries the files between the two boards
+(up to 120 MB a file), so a move between two nodes works the same.
+
+On a master, a Claude card's menu has **Device ▸** with each device, the one it runs on checked and
+one not reachable grayed; another one moves it there, the card says "Moving to …" meanwhile and a
+toast says how it went. The page sends it as `POST /api/move` with `{ "targets": ["<key>"],
+"device": "<id>" }` (`local` for this computer), which answers `{ ok, results }` as `board move`
+has them; a board without devices answers 409.
+
 While the separate herdr-wake plugin does the waking (installed, and not switched over yet), it
 resumes a session with the env of its pane's shell, as before, and the board keeps its old rule:
 it wakes only a session in its own profile, or one in a pane the board opened with that session's

@@ -259,6 +259,13 @@ export interface MenuProfile {
   color: string
 }
 
+/** A device a session can be moved to (#616): `why` grays it out (not reachable now). */
+export interface MenuDevice {
+  id: string
+  title: string
+  why?: string | undefined
+}
+
 export interface CardMenuContext extends MenuContext {
   categories?: readonly MenuCategory[] | undefined
   /** The column the card shows in now. */
@@ -285,6 +292,12 @@ export interface CardMenuContext extends MenuContext {
    * its items gray out with ("server-1 is not reachable"). Absent for this computer's cards.
    */
   device?: { title: string; why: string } | undefined
+  /**
+   * A master's devices, this computer among them (#616): the card's Device, which moves it to
+   * another; `deviceAt` the one it runs on. Absent on a board without devices.
+   */
+  devices?: readonly MenuDevice[] | undefined
+  deviceAt?: string | undefined
 }
 
 /** What a card's menu reads of the board item. */
@@ -335,6 +348,22 @@ export function categoryChoices({
     checked: c.id === category,
     swatch: c.color,
   }))
+}
+
+/**
+ * The devices a session can be moved to (`device:<id>`, #616), the one it runs on checked. One not
+ * reachable is grayed with why; a session at work moves nowhere until it is free.
+ */
+export function deviceChoices(devices: readonly MenuDevice[], current: string, working: string): MenuItem[] {
+  return devices.map(d => {
+    const why = d.id === current ? '' : working || d.why || ''
+    return {
+      id: `device:${d.id}`,
+      label: d.title,
+      checked: d.id === current,
+      ...(why && { disabled: true, reason: why }),
+    }
+  })
 }
 
 /** The profiles a session can be moved to (`profile:<id>`), the one it runs in checked. */
@@ -439,6 +468,18 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
         label: t('move.menu'),
         ...herdr(),
         submenu: ctx.canMutate ? profileChoices(ctx.profiles, ctx.profile ?? '') : null,
+      },
+    // The device it runs on (#616): another one moves it there, its folder by git, resumed there.
+    claude &&
+      it.agent === 'claude' &&
+      ctx.devices &&
+      ctx.devices.length >= 2 && {
+        id: 'device',
+        label: t('moveDevice.menu'),
+        ...herdr(),
+        submenu: ctx.canMutate
+          ? deviceChoices(ctx.devices, ctx.deviceAt ?? 'local', it.status === 'working' ? t('moveDevice.working') : '')
+          : null,
       },
     dismissable && { id: 'dismiss', label: t(it.attention === 'later' ? 'asked.seen' : 'card.noReply'), ...edit() },
     SEP,

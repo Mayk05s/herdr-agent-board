@@ -11,6 +11,8 @@
 import { MAX_BLOB_BYTES } from '../../adapters/bundle-files.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { t } from '../../core/lang.ts'
+import type { MoveIn } from '../../services/move-in.ts'
+import type { MoveOut } from '../../services/move-out.ts'
 import type { Answer, NodeBundle } from '../../services/node/bundle.ts'
 import type { NodeLaunchAnswer } from '../../services/node/launch.ts'
 import type { NodeSecrets } from '../../services/node/secrets.ts'
@@ -46,6 +48,8 @@ export interface NodeDoorSources {
   }>
   /** `PUT /api/node/update/blob` and `POST /api/node/update` (#590, services/node/update.ts). */
   update?: Pick<NodeUpdate, 'blob' | 'update'>
+  /** `/api/node/move/...` (#616): this board's halves of a session moved to or from another device. */
+  move?: { out: MoveOut; in: MoveIn }
 }
 
 /** The secrets of one profile's bundle, at most this many bytes of JSON. */
@@ -86,6 +90,7 @@ export function nodeDoorRoutes(o: NodeDoorSources): Route[] {
   const leave = o.leave
   const update = o.update
   return [
+    ...(o.move ? moveRoutes(o.move) : []),
     {
       method: 'GET',
       path: '/api/node/status',
@@ -264,6 +269,95 @@ export function nodeCallRoutes(uplink: Pick<NodeUplink, 'call'>): Route[] {
         const r = await uplink.call(await ctx.rawBody())
         return json(r.status, r.body)
       },
+    },
+  ]
+}
+
+/** A JSON body of at most MAX_MANIFEST_BYTES (a move's pack lists every file of a session), or undefined. */
+async function bigJson(req: Request): Promise<unknown> {
+  const bytes = await bytesUpTo(req, MAX_MANIFEST_BYTES)
+  if (!bytes) return undefined
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes))
+  } catch {
+    return undefined
+  }
+}
+
+const SESSION = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+
+/**
+ * A session moved to or from another device (#616, services/move-out.ts, services/move-in.ts): the
+ * source's pack, a file of it, the call-off and the finish; the target's check, a blob by its hash,
+ * the commit, the settle and its start's state. The master carries the files between them.
+ */
+function moveRoutes(m: { out: MoveOut; in: MoveIn }): Route[] {
+  const text = (v: unknown): string => (typeof v === 'string' ? v : '')
+  return [
+    {
+      method: 'POST',
+      path: '/api/node/move/out',
+      async handle(_req, ctx) {
+        const body = await ctx.rawBody().catch(() => null)
+        if (!isRecord(body)) return json(400, { ok: false, why: 'body' })
+        return json(200, await m.out.pack(text(body.key), text(body.from)))
+      },
+    },
+    {
+      method: 'GET',
+      path: new RegExp(`^/api/node/move/out/${SESSION}/file/(\\d{1,5})$`),
+      async handle(_req, ctx) {
+        const abs = m.out.file(ctx.params[0] ?? '', Number(ctx.params[1]))
+        if (!abs) return json(404, { ok: false, why: 'file' })
+        return new Response(Bun.file(abs).stream(), { headers: { 'content-type': 'application/octet-stream' } })
+      },
+    },
+    {
+      method: 'POST',
+      path: new RegExp(`^/api/node/move/out/${SESSION}/abort$`),
+      handle: async (_req, ctx) => json(200, await m.out.abort(ctx.params[0] ?? '')),
+    },
+    {
+      method: 'POST',
+      path: new RegExp(`^/api/node/move/out/${SESSION}/finish$`),
+      async handle(_req, ctx) {
+        const body = await ctx.rawBody().catch(() => null)
+        return json(200, await m.out.finish(ctx.params[0] ?? '', isRecord(body) ? text(body.to) : ''))
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/node/move/in/check',
+      async handle(req) {
+        const body = await bigJson(req)
+        return json(200, await m.in.check(isRecord(body) ? body.pack : undefined))
+      },
+    },
+    {
+      method: 'PUT',
+      path: /^\/api\/node\/move\/in\/blob\/([0-9a-f]{64})$/,
+      handle: async (req, ctx) => json(200, await m.in.put(ctx.params[0] ?? '', req.body)),
+    },
+    {
+      method: 'POST',
+      path: '/api/node/move/in/commit',
+      async handle(req) {
+        const body = await bigJson(req)
+        return json(200, await m.in.commit(isRecord(body) ? body.pack : undefined))
+      },
+    },
+    {
+      method: 'POST',
+      path: '/api/node/move/in/settle',
+      async handle(req) {
+        const body = await bigJson(req)
+        return json(200, m.in.settle(isRecord(body) ? body.pack : undefined))
+      },
+    },
+    {
+      method: 'GET',
+      path: /^\/api\/node\/move\/in\/launch\/([\w-]{1,64})$/,
+      handle: (_req, ctx) => json(200, { state: m.in.launchState(ctx.params[0] ?? '') }),
     },
   ]
 }

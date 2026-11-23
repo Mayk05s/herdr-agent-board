@@ -4,6 +4,8 @@
 import { describe, expect, test } from 'bun:test'
 import { DOOR_ROUTES, doorRefusal, doorRoute, loopbackHost, NODE_API } from '../../src/core/node-door.ts'
 
+const MOVE_SESSION = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
 /** The door's answer to a request as it came: null, or its refusal. */
 const refusal = (method: string, raw: string) => doorRefusal(method, raw, decodeURIComponent(raw))
 const NOT_FOUND = { status: 404, error: 'not found' } as const
@@ -89,9 +91,37 @@ describe('the door takes what 6.2 lists', () => {
       ['POST', String(/^\/api\/node\/uplink\/[A-Za-z0-9_-]{1,64}$/)],
       ['POST', String(/^\/api\/node\/sink\/[a-z0-9][a-z0-9_-]{0,39}$/)],
       ['POST', '/api/node/leave'],
+      ['POST', '/api/node/move/out'],
+      ['GET', String(new RegExp(`^/api/node/move/out/${MOVE_SESSION}/file/\\d{1,5}$`))],
+      ['POST', String(new RegExp(`^/api/node/move/out/${MOVE_SESSION}/(abort|finish)$`))],
+      ['POST', '/api/node/move/in/check'],
+      ['PUT', String(/^\/api\/node\/move\/in\/blob\/[0-9a-f]{64}$/)],
+      ['POST', '/api/node/move/in/commit'],
+      ['POST', '/api/node/move/in/settle'],
+      ['GET', String(/^\/api\/node\/move\/in\/launch\/[\w-]{1,64}$/)],
       ['PUT', '/api/node/update/blob'],
       ['POST', '/api/node/update'],
     ])
+    // A move to or from another device (#616): a session id, a file's number, a hash; nothing else.
+    const sid = '0f8fad5b-d9cb-469f-a165-70867728950e'
+    for (const [method, raw] of [
+      ['POST', '/api/node/move/out'],
+      ['GET', `/api/node/move/out/${sid}/file/3`],
+      ['POST', `/api/node/move/out/${sid}/abort`],
+      ['POST', `/api/node/move/out/${sid}/finish`],
+      ['PUT', `/api/node/move/in/blob/${'a'.repeat(64)}`],
+      ['GET', '/api/node/move/in/launch/5d0c6a1e-77'],
+    ] as const)
+      expect(refusal(method, raw)).toBeNull()
+    for (const [method, raw] of [
+      ['GET', '/api/node/move/out'],
+      ['GET', `/api/node/move/out/${sid}/file/..%2F..%2Fconfig.json`],
+      ['GET', '/api/node/move/out/..%2Fx/file/0'],
+      ['POST', `/api/node/move/out/${sid}/wake`],
+      ['PUT', '/api/node/move/in/blob/..%2Fx'],
+      ['POST', `/api/node/move/in/blob/${'a'.repeat(64)}`],
+    ] as const)
+      expect(refusal(method, raw)).toEqual(NOT_FOUND)
     // The update (#590): its archive by PUT, then the update by POST, those paths alone.
     expect(refusal('PUT', '/api/node/update/blob')).toBeNull()
     expect(refusal('POST', '/api/node/update')).toBeNull()

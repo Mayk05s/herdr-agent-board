@@ -30,6 +30,7 @@ import {
   typingIn,
 } from '../models/board-menus.ts'
 import { catOf, colOf } from '../models/board-view.ts'
+import { moveCardToDevice } from '../models/device-move.ts'
 import { categoryChoices, type MenuCategory, type Point, statusChoices } from '../models/menu-model.ts'
 import { type MoveDeps, moveCard, moveLane } from '../models/profile-move.ts'
 import { REVEAL_SETTLE_MS, revealSheetDetails } from '../models/sheet-reveal.ts'
@@ -283,6 +284,10 @@ export function boardActions(deps: ActionDeps): BoardMenuActions {
     profile: (key, id) => {
       const m = moves()
       return m && moveCard(m, key, id)
+    },
+    device: (key, id, title) => {
+      const m = moves()
+      return m && moveCardToDevice(m, key, id, title)
     },
     laneProfile: (lane, id, keys, usual) => {
       const m = moves()
