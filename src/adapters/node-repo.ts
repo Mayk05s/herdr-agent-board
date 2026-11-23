@@ -134,6 +134,36 @@ export async function setRepoIdentity(dir: string, id: GitIdentity): Promise<Rep
   return { ok: false, why: email.why }
 }
 
+/**
+ * The folder of the worktree of the checkout at `dir` (its main one too) that has `branch` checked
+ * out, or null when none has (#616): a moved session goes on in its branch wherever that is.
+ */
+export async function worktreeWith(dir: string, branch: string): Promise<string | null> {
+  const r = await git(dir, ['worktree', 'list', '--porcelain'])
+  if (!r.ok) return null
+  let at = ''
+  for (const line of r.out.split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) at = line.slice('worktree '.length)
+    else if (line === `branch refs/heads/${branch}` && at) return at
+  }
+  return null
+}
+
+/**
+ * A new worktree of the checkout at `dir` in `path` on `branch` (#616): the local branch when there
+ * is one, else one made from `origin/<branch>` and tracking it, as `git worktree add <path> <branch>` does.
+ */
+export async function addWorktree(dir: string, path: string, branch: string): Promise<RepoDone> {
+  const r = await git(dir, ['worktree', 'add', '--quiet', '--', path, branch], FETCH_MS)
+  return r.ok ? { ok: true } : { ok: false, why: r.why }
+}
+
+/** The checkout's branch fast-forwarded to `origin/<branch>`; refused when it has commits of its own (#616). */
+export async function fastForward(dir: string, branch: string): Promise<RepoDone> {
+  const r = await git(dir, ['merge', '--ff-only', '--quiet', `refs/remotes/origin/${branch}`])
+  return r.ok ? { ok: true } : { ok: false, why: r.why }
+}
+
 /** A clean checkout moved to `ref` (a local branch tracking `origin/<ref>` when it has none) and fast-forwarded to it. */
 export async function moveTo(dir: string, state: RepoState): Promise<RepoDone> {
   if (state.branch !== state.ref) {

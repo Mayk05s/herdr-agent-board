@@ -45,6 +45,8 @@
 //                            too, with the board's own wake (#178). `board sleep <pane>
 //                            --pi-session <file>`: a pane where pi was stopped by hand, a shell
 //                            now, taken as that pi session asleep there
+//   board move <id|name|pane>... --device <id|local>   moves those sessions to another device
+//                            through the running master board (#616, services/nodes/move-device.ts)
 //   board move <id|name|pane>... --profile <id> [--when-free]   moves those sessions to another
 //                            Claude profile, keeping their conversation (#250, services/move.ts): put
 //                            to sleep first when free (--when-free: the busy ones once they are),
@@ -176,7 +178,7 @@ import { DECISION_FLAGS, decisionsConfig } from '../core/decisions.ts'
 import { switchedOff } from '../core/feature-switch.ts'
 import { translator } from '../core/i18n/translator.ts'
 import { t, useLanguage } from '../core/lang.ts'
-import { parseMove } from '../core/move.ts'
+import { parseMoveAny } from '../core/move-device.ts'
 import { isPiSessionFile, piSessionId } from '../core/pi.ts'
 import { isPresenceState, type PresenceState, presenceConfig, presenceLine } from '../core/presence.ts'
 import { type ProfileSet, profileSet, resolveProfileDir, sessionProfile } from '../core/profiles.ts'
@@ -213,7 +215,7 @@ import { currentWakeMode } from '../services/wake/mode.ts'
 import { compactCli } from './compact-cli.ts'
 import type { ThreadCmdContext } from './thread-cli.ts'
 
-const USAGE = `board [cat <id> ["<Title>"] | doing <text> | wait <text> | ask <question> [--option "<label>"]... [--recommend <n>] [--default-after <30m|2h>] | decisions [--done] [--json] | done [text] | clear | favorite [off] | list | cats | remind <when> "<text>" [--idle] | send <name|key> "<text>" | every "<cron>" "<text>" [--idle] | restart ["<note for after>"] | archive --session <id|name|pane> | sleep <id|name|pane>... [--when-free] [--self] | move <id|name|pane>... --profile <id> [--when-free] | fork [--name "<Name>"] ["<note>"] | schedule [--all | --move <id>] | unschedule <id|all> | call-report --session <id> --file <report.md> [--report-id <stable-id>] | remote [on | off | pwa on|off | approve <id> | deny <id> | revoke <id> | desk <id> [off]] | tunnel [on | off | test] | node [token [--name <master>] | forget <id> | leave [<master id>]] | nodes [token <id> | key <id> | sync <id> [<profile>] | update <id> | secret <id> <sink> | revoke <id> [--keep-running] [--forget]] | doctor | update | presence [here | away | call] | journal [--since <when> | --away] [--json] | team join <invite> --hub <ws://host:7443> --name <name> | team roster | team draft <name|peer-id> "<text>" | team post <name|peer-id|team> [--new "<title>"] [--link <url>] "<text>" | team reply <thread> "<text>" | team thread <thread> | team assign <thread> <session> | team release <thread> | team listen [off] | team loop <name|peer-id|team> [<1-100>|default] | todo add [--mine] [--ref <r>] [--why "<w>"] "<text>" | todo done <key> [--why "<w>"] | todo list | compact [--at <300k|60%|never>] [--note "<what to keep>" | --note none] [--clear] | away [on | off] | resume <session id> [--profile <id>] | resume --pi <pi session id> | secret request --title "<what for>" --sink <id> [--field <name>[:shown][:once]]... [--param <name>=<value>]... [--expires 30m] [--no-wait] | secret status <id> [--wait] | secret cancel <id> | secret list | secret sinks | cal list [--day <d> | --from <t> --to <t>] [--json] | cal add|edit|rm|sources|sync|push (board cal --help) | thread new|post|done|ask|set|show|list|changes|watch|unwatch|link|open|import|share (board thread --help) | workdesk workers link|unlink|complete|incomplete | mcp | backup now|status|list|passphrase|folder <path>|test <target> | db restore [--target <t>] [--snapshot <name>] [--file <path>]] [--session <id|name|pane>]`
+const USAGE = `board [cat <id> ["<Title>"] | doing <text> | wait <text> | ask <question> [--option "<label>"]... [--recommend <n>] [--default-after <30m|2h>] | decisions [--done] [--json] | done [text] | clear | favorite [off] | list | cats | remind <when> "<text>" [--idle] | send <name|key> "<text>" | every "<cron>" "<text>" [--idle] | restart ["<note for after>"] | archive --session <id|name|pane> | sleep <id|name|pane>... [--when-free] [--self] | move <id|name|pane>... --profile <id> [--when-free] | move <id|name|pane>... --device <id|local> | fork [--name "<Name>"] ["<note>"] | schedule [--all | --move <id>] | unschedule <id|all> | call-report --session <id> --file <report.md> [--report-id <stable-id>] | remote [on | off | pwa on|off | approve <id> | deny <id> | revoke <id> | desk <id> [off]] | tunnel [on | off | test] | node [token [--name <master>] | forget <id> | leave [<master id>]] | nodes [token <id> | key <id> | sync <id> [<profile>] | update <id> | secret <id> <sink> | revoke <id> [--keep-running] [--forget]] | doctor | update | presence [here | away | call] | journal [--since <when> | --away] [--json] | team join <invite> --hub <ws://host:7443> --name <name> | team roster | team draft <name|peer-id> "<text>" | team post <name|peer-id|team> [--new "<title>"] [--link <url>] "<text>" | team reply <thread> "<text>" | team thread <thread> | team assign <thread> <session> | team release <thread> | team listen [off] | team loop <name|peer-id|team> [<1-100>|default] | todo add [--mine] [--ref <r>] [--why "<w>"] "<text>" | todo done <key> [--why "<w>"] | todo list | compact [--at <300k|60%|never>] [--note "<what to keep>" | --note none] [--clear] | away [on | off] | resume <session id> [--profile <id>] | resume --pi <pi session id> | secret request --title "<what for>" --sink <id> [--field <name>[:shown][:once]]... [--param <name>=<value>]... [--expires 30m] [--no-wait] | secret status <id> [--wait] | secret cancel <id> | secret list | secret sinks | cal list [--day <d> | --from <t> --to <t>] [--json] | cal add|edit|rm|sources|sync|push (board cal --help) | thread new|post|done|ask|set|show|list|changes|watch|unwatch|link|open|import|share (board thread --help) | workdesk workers link|unlink|complete|incomplete | mcp | backup now|status|list|passphrase|folder <path>|test <target> | db restore [--target <t>] [--snapshot <name>] [--file <path>]] [--session <id|name|pane>]`
 const MIN_REPEAT_MS = 5 * 60_000
 /** The commands that print a help of their own for `--help` (#305). */
 const OWN_HELP: ReadonlySet<string> = new Set(['thread', 'time', 'cal'])
@@ -1674,12 +1676,54 @@ function moveLine(o: MoveOutcome, profile: string): string {
 }
 
 /**
+ * `board move <id|name|pane>... --device <id|local>` (#616): the sessions moved to another device by
+ * the running board, which must be the master (services/nodes/move-device.ts); a line for each. A
+ * session at work is refused, never waited for: its conversation must be whole before it is copied.
+ */
+async function moveDevice(targets: string[], device: string): Promise<void> {
+  if (whenFree)
+    throw new Error(
+      '--when-free is for a move to another profile; a move to another device takes a session that is free',
+    )
+  const webPort = Number(cfg.port) || 12422
+  let res: Response
+  try {
+    res = await fetch(`http://127.0.0.1:${webPort}/api/move`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-board': '1' },
+      body: JSON.stringify({ targets, device }),
+      // Each session's files cross the link and its start is waited for: minutes, not seconds.
+      signal: AbortSignal.timeout(30 * 60_000),
+    })
+  } catch {
+    throw new Error(NO_BOARD)
+  }
+  const r: unknown = await res.json().catch(() => null)
+  if (!res.ok || !isRecord(r) || !Array.isArray(r.results))
+    throw new Error(`the board said ${res.status}${isRecord(r) && r.error ? `: ${String(r.error)}` : ''}`)
+  const results = r.results.filter(isRecord)
+  const moved = results.filter(o => o.result === 'moved').length
+  const where = device === 'local' ? 'this computer' : device
+  const lines = results.map(o => {
+    const who = typeof o.name === 'string' && o.name ? o.name : `"${String(o.target)}"`
+    const notes = Array.isArray(o.notes) && o.notes.length ? ` · ${o.notes.map(String).join(' · ')}` : ''
+    return o.result === 'moved'
+      ? `${who}: moved to ${where}${o.newKey ? ` (${String(o.newKey)})` : ''}${notes}`
+      : `${who}: refused, ${String(o.why ?? '')}`
+  })
+  const refused = results.length - moved
+  console.log([`ok · ${moved} moved to ${where}${refused ? `, ${refused} refused` : ''}`, ...lines].join('\n'))
+}
+
+/**
  * `board move <id|name|pane>... --profile <id> [--when-free]` (#250): the sessions moved to another
  * Claude profile, keeping their conversation (services/move.ts); a line for each. In English for
  * agents, whatever language the board speaks.
  */
 async function move(): Promise<void> {
-  const { targets, profile } = parseMove([...rest, ...(target ? [target] : [])])
+  const asked = parseMoveAny([...rest, ...(target ? [target] : [])])
+  if (asked.device !== undefined) return moveDevice(asked.targets, asked.device)
+  const { targets, profile } = asked
   const from = await ownSession()
   const items = await collect(deps)
   const results = await moveMany(deps, items, targets, { profile, whenFree, by: 'agent', ...(from && { from }) })

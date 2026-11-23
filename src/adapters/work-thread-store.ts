@@ -961,6 +961,27 @@ export function setCursor(tx: Tx, session: string, to: Cursor | null): void {
     .run(session, to.seq, to.at, to.asked)
 }
 
+/**
+ * A session known by another key from now on (#616: moved to another device, `<id>` to
+ * `@<device>:<id>` and back): the threads it created or is assigned, its watches and its cursor
+ * follow it. A watch or a cursor the new key has already stays as it is. How many rows changed.
+ */
+export function rekeySession(tx: Tx, from: string, to: string): number {
+  if (!from || !to || from === to) return 0
+  let n = 0
+  for (const col of ['created_by', 'assignee'] as const)
+    n += tx.db
+      .query(
+        `UPDATE threads SET ${col} = json_set(${col}, '$.key', ?2) WHERE json_extract(${col}, '$.kind') = 'session' AND json_extract(${col}, '$.key') = ?1`,
+      )
+      .run(from, to).changes
+  n += tx.db.query('UPDATE OR IGNORE thread_watch SET session = ?2 WHERE session = ?1').run(from, to).changes
+  tx.db.query('DELETE FROM thread_watch WHERE session = ?1').run(from)
+  n += tx.db.query('UPDATE OR IGNORE thread_cursor SET session = ?2 WHERE session = ?1').run(from, to).changes
+  tx.db.query('DELETE FROM thread_cursor WHERE session = ?1').run(from)
+  return n
+}
+
 /** The threads a session counts as its own: those it created or is assigned. */
 export function mineIds(db: BoardDb, session: string): string[] {
   return (

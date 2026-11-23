@@ -346,6 +346,9 @@ export async function collect(
       }
     }
     const saved = cards.get(base.key) ?? {}
+    // Moved to another device (#616, services/move-out.ts): its card there is the one; this one,
+    // asleep here, is left out until it comes back (a move back clears the mark) or runs here again.
+    if (base.sleeping && movedAway(saved)) return
     const pin = pinOf(base.key, base.status, saved)
     const hit = base.session ? live.get(base.session) : undefined
     // A MokuPilot day session (#331) has no hook to report its profile either: the folder whose
@@ -617,4 +620,10 @@ export async function collect(
   panesSeen(paneTerminals(snap))
   observed?.(snap, items)
   return items
+}
+
+/** A card marked moved to another device (#616, services/move-out.ts finish). */
+function movedAway(card: Card): boolean {
+  const m = card.moved
+  return typeof m === 'object' && m !== null && typeof (m as { to?: unknown }).to === 'string'
 }

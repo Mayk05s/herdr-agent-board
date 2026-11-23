@@ -1,0 +1,210 @@
+// The source's half of a session moved to another device (#616, core/move-device.ts): the board the
+// session runs on checks that its folder travels (git only), puts it to sleep as a profile move
+// does (services/move.ts: one at work is refused with the reason, never waited for), and packs it:
+// its files with their hashes, its name, lane, profile and schedule entries. The master carries the
+// pack to the target; once the target's start is on its way it finishes here: the card is marked
+// moved, which hides it while it sleeps (services/board.ts), the entries that went are removed and
+// its pane closes. A move that fails after the sleep is called off: one that was awake is woken again.
+// The same code on a node (through its door, server/routes/node.ts) and on the master (in process).
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, relative, sep } from 'node:path'
+import { writeCard } from '../adapters/cards.ts'
+import { cwdOf } from '../adapters/claude-home.ts'
+import { checkoutFacts, checkoutIdentity, gitInfo } from '../adapters/git.ts'
+import { agentGet, herdr } from '../adapters/herdr.ts'
+import { findTranscript, trustsFolder } from '../adapters/move-files.ts'
+import { type ListedFile, listSessionFiles } from '../adapters/move-pack.ts'
+import { listEntries, removeEntry } from '../adapters/schedule-store.ts'
+import { itemProfile } from '../core/item-profile.ts'
+import { claudeStateFile } from '../core/move.ts'
+import { entriesToCarry, type MovePack, type MoveWhy, moveWhyText, packFolder } from '../core/move-device.ts'
+import { SESSION_ID } from '../core/resume.ts'
+import type { Item } from '../core/types.ts'
+import { wake } from './actions.ts'
+import type { Deps } from './deps.ts'
+import { type SleepOutcome, sleepMany } from './sleep.ts'
+
+export type PackResult =
+  | { ok: true; pack: MovePack; key: string; wasAwake: boolean }
+  | { ok: false; why: string; kind?: MoveWhy['kind'] | 'gone' | 'busy'; sleep?: SleepOutcome }
+
+export interface MoveOut {
+  /** The session `key` checked, put to sleep and packed for `to` (the device, for the notes); `from`: this board's id as the master names it. */
+  pack(key: string, from: string): Promise<PackResult>
+  /** The file `n` of the pack of `session` on this computer, while its move is on its way; null when none. */
+  file(session: string, n: number): string | null
+  /** The move called off: the session woken again when it was awake before. */
+  abort(session: string): Promise<{ ok: true; woken: boolean }>
+  /** The move done: marked moved, its entries that went removed, its pane closed. */
+  finish(session: string, to: string): Promise<{ ok: true; notes: string[] } | { ok: false; why: string }>
+}
+
+export interface MoveOutDeps {
+  deps: Deps
+  items(): Item[]
+  log(text: string): void
+  home?: string
+  /** git's facts of a folder (adapters/git.ts), handed in so tests can stand in. */
+  git?: {
+    checkout: typeof checkoutFacts
+    info: typeof gitInfo
+    identity: typeof checkoutIdentity
+  }
+}
+
+interface Packed {
+  item: Item
+  files: ListedFile[]
+  entries: string[]
+  wasAwake: boolean
+  cwd: string
+  at: number
+}
+
+/** A pack is kept this long for the master to fetch its files. */
+const PACK_KEPT_MS = 60 * 60_000
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+export function createMoveOut(o: MoveOutDeps): MoveOut {
+  const { deps } = o
+  const home = o.home ?? homedir()
+  const git = o.git ?? { checkout: checkoutFacts, info: gitInfo, identity: checkoutIdentity }
+  const packs = new Map<string, Packed>()
+  const drop = (): void => {
+    const now = Date.now()
+    for (const [s, p] of packs) if (now - p.at > PACK_KEPT_MS) packs.delete(s)
+  }
+
+  const no = (why: MoveWhy): PackResult => ({ ok: false, why: moveWhyText(why), kind: why.kind })
+
+  /** The folder's facts as core/move-device.ts packFolder reads them. */
+  async function folderOf(cwd: string) {
+    const [facts, info, identity] = await Promise.all([git.checkout(cwd), git.info(cwd), git.identity(cwd)])
+    const branch = info && info.branch !== 'HEAD' ? info.branch : ''
+    const rel = facts ? relativeSub(facts.root, cwd) : null
+    return packFolder({
+      checkout: facts && {
+        root: facts.root,
+        url: facts.remote?.address ? facts.remote.url : null,
+        clean: facts.clean,
+        branch,
+        pushed: facts.headPushed && !!branch,
+      },
+      subdir: rel,
+      identity,
+    })
+  }
+
+  return {
+    async pack(key, from) {
+      drop()
+      const items = o.items()
+      const item = items.find(i => i.key === key)
+      if (!item) return { ok: false, why: 'no such session on the board', kind: 'gone' }
+      if (item.agent !== 'claude' || !item.session || !SESSION_ID.test(item.session)) return no({ kind: 'not-claude' })
+      const session = item.session
+      const list = deps.profiles().list
+      const profile = itemProfile(item, list)
+      const dir = profile?.dir ?? item.profileFolder
+      if (!profile || !dir) return no({ kind: 'profile' })
+      // The card's path may be from a read before the file moved: the one on disk now.
+      const known = item.transcript && existsSync(item.transcript) ? item.transcript : null
+      const transcript = known || findTranscript(dir, session, item.cwd)
+      if (!transcript) return no({ kind: 'no-transcript' })
+      // Claude resumes a session from the folder its conversation was recorded in.
+      const cwd = (await cwdOf(transcript)) || item.cwd
+      if (!cwd) return no({ kind: 'no-checkout' })
+      const folder = await folderOf(cwd)
+      if (!folder.ok) return no(folder.why)
+      // Asleep first, as a profile move: its transcript is final before it is copied.
+      let wasAwake = false
+      if (!item.sleeping) {
+        const [s] = await sleepMany(deps, items, [key], { by: 'user' })
+        if (!s || (s.result !== 'asleep' && s.result !== 'already'))
+          return { ok: false, why: 'it is not free: try again when it is', kind: 'busy', ...(s && { sleep: s }) }
+        wasAwake = s.result === 'asleep'
+      }
+      const listed = await listSessionFiles(dir, session, cwd)
+      if (!listed.ok) {
+        if (wasAwake) await wake(deps, { ...item, pane: null, sleeping: true }).catch(() => {})
+        return listed.error === 'no-transcript' ? no({ kind: 'no-transcript' }) : { ok: false, why: listed.error }
+      }
+      const carried = entriesToCarry(listEntries(), key)
+      let trusted = false
+      try {
+        trusted = trustsFolder(claudeStateFile(dir, home), cwd)
+      } catch {}
+      packs.set(session, {
+        item,
+        files: listed.files,
+        entries: carried.map(e => e.id),
+        wasAwake,
+        cwd,
+        at: Date.now(),
+      })
+      const pack: MovePack = {
+        v: 1,
+        session,
+        name: item.name,
+        category: item.category,
+        profile: profile.id,
+        workspace: item.workspace ?? '',
+        cwd,
+        folder: folder.folder,
+        files: listed.files.map(({ abs: _abs, ...f }) => f),
+        entries: carried,
+        trusted,
+        from,
+      }
+      o.log(`move: ${item.name} packed, ${pack.files.length} file(s)`)
+      return { ok: true, pack, key, wasAwake }
+    },
+
+    file(session, n) {
+      return packs.get(session)?.files[n]?.abs ?? null
+    },
+
+    async abort(session) {
+      const p = packs.get(session)
+      packs.delete(session)
+      if (!p?.wasAwake) return { ok: true, woken: false }
+      const r = await wake(deps, { ...p.item, pane: null, sleeping: true }).catch(() => ({ ok: false }))
+      deps.wake.forget()
+      return { ok: true, woken: r.ok }
+    },
+
+    async finish(session, to) {
+      const p = packs.get(session)
+      if (!p) return { ok: false, why: 'no move of it is on its way here' }
+      packs.delete(session)
+      const notes: string[] = []
+      writeCard(p.item.key, { moved: { to, cwd: p.cwd, at: Date.now() } })
+      for (const id of p.entries) removeEntry(id, 'cancelled')
+      // Its pane, when wake left it as a shell: nobody is in it now.
+      const pane = p.item.pane
+      if (pane) {
+        try {
+          const agent = await agentGet(pane, 10_000)
+          if (!agent) {
+            await herdr(['pane', 'close', pane])
+            notes.push('its pane closed')
+          }
+        } catch (err) {
+          notes.push(`its pane was left (${messageOf(err)})`)
+        }
+      }
+      deps.wake.forget()
+      return { ok: true, notes }
+    },
+  }
+}
+
+/** The folder below a checkout's root with '/' between, '' for the root; null when it is not below (as the placer reads it). */
+function relativeSub(root: string, cwd: string): string | null {
+  const below = relative(root, cwd)
+  if (!below) return ''
+  if (below === '..' || below.startsWith(`..${sep}`) || isAbsolute(below)) return null
+  return below.split(sep).join('/')
+}

@@ -23,6 +23,8 @@ export interface DoorRoute {
 
 /** A session's key in the path as it came: one segment, percent-encoded. */
 const KEY = '[^/]+'
+/** A Claude session id in a move's path (#616). */
+const MOVE_SESSION = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 const session = (rest: string): RegExp => new RegExp(`^/api/session/${KEY}${rest}$`)
 
 /** What the master may call (6.2). Not `shell/focus`, `/api/fs/open`, `/api/reveal` or `/api/open-url`: they act on this computer's screen. */
@@ -80,6 +82,16 @@ export const DOOR_ROUTES: readonly DoorRoute[] = [
   { method: 'POST', path: /^\/api\/node\/sink\/[a-z0-9][a-z0-9_-]{0,39}$/, door: true },
   // The master revokes this node (#510, 11.4): its sessions to sleep when asked, then it is forgotten.
   { method: 'POST', path: '/api/node/leave', door: true },
+  // A session moved to or from another device (#616): the source's pack, a file of it, the call-off
+  // and the finish; the target's check, a blob by its hash, the commit, the settle, its start's state.
+  { method: 'POST', path: '/api/node/move/out', door: true },
+  { method: 'GET', path: new RegExp(`^/api/node/move/out/${MOVE_SESSION}/file/\\d{1,5}$`), door: true },
+  { method: 'POST', path: new RegExp(`^/api/node/move/out/${MOVE_SESSION}/(abort|finish)$`), door: true },
+  { method: 'POST', path: '/api/node/move/in/check', door: true },
+  { method: 'PUT', path: /^\/api\/node\/move\/in\/blob\/[0-9a-f]{64}$/, door: true },
+  { method: 'POST', path: '/api/node/move/in/commit', door: true },
+  { method: 'POST', path: '/api/node/move/in/settle', door: true },
+  { method: 'GET', path: /^\/api\/node\/move\/in\/launch\/[\w-]{1,64}$/, door: true },
   // The plugin at the master's commit (#590, 6.2): its archive, then `{ commit, sha256 }`.
   { method: 'PUT', path: '/api/node/update/blob', door: true },
   { method: 'POST', path: '/api/node/update', door: true },

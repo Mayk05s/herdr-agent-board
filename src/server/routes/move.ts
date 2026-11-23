@@ -2,15 +2,20 @@
 // `board move` moves them (services/move.ts): POST /api/move { targets: [<key>, ...], profile,
 // whenFree?: true } answers { ok, results }, one outcome per target. It puts sessions to sleep and
 // wakes them, so a browser must also say the request comes from this page (origin), on fresh data.
+// With `device` instead of `profile` (#616): to another device, on a master only
+// (services/nodes/move-device.ts); its targets may be any device's keys, so no node takes it.
 import type { Item } from '../../core/types.ts'
 import type { Deps } from '../../services/deps.ts'
 import { moveMany } from '../../services/move.ts'
+import type { DeviceMoveOutcome } from '../../services/nodes/move-device.ts'
 import { json, type Route } from '../http.ts'
 
 export interface MoveApp {
   deps: Deps
   items(): Item[]
   refresh(): void
+  /** A move to another device (#616), while this board is a master; absent: refused. */
+  toDevice?: (targets: string[], device: string) => Promise<DeviceMoveOutcome[]> | null
 }
 
 // More than a lane shows; a request cannot keep herdr busy for long.
@@ -27,6 +32,20 @@ export function moveRoute(app: MoveApp): Route {
         .filter((v): v is string => typeof v === 'string')
         .slice(0, MAX_TARGETS)
       const profile = typeof body.profile === 'string' ? body.profile : ''
+      const device = typeof body.device === 'string' ? body.device : ''
+      if (device && !profile && targets.some(v => v.trim())) {
+        const moving = app.toDevice?.(targets, device) ?? null
+        if (!moving)
+          return json(409, {
+            ok: false,
+            error: 'a move to another device is made from the master: this board has no devices',
+          })
+        const results = await moving
+        const moved = results.filter(o => o.result === 'moved').length
+        app.deps.log(`move: ${moved} of ${results.length} moved to ${device}`)
+        app.refresh()
+        return json(200, { ok: true, results })
+      }
       if (!targets.some(v => v.trim()) || !profile)
         return json(400, { ok: false, error: 'targets and profile: the sessions to move, and the profile id' })
       const results = await moveMany(app.deps, app.items(), targets, {

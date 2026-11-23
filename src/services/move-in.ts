@@ -1,0 +1,315 @@
+// The target's half of a session moved to another device (#616, core/move-device.ts): the board the
+// session goes to makes its folder from git, takes its files by hash, writes them into the profile
+// and resumes it there by the archive's Return path (launches.start with `resume`), with its name,
+// lane and profile; once the master saw the start on its way it settles the schedule entries.
+// The same code on a node (through its door, server/routes/node.ts) and on the master (in process).
+//
+// The folder: on a node the clone under `node.workRoot` by the repository's address, as a placed
+// start has it (services/node/launch.ts); on the master, which has no work folder of its own, the
+// folder the session had here before it left (its card's `moved`), when it is a checkout of the
+// same repository. Then fetched, and the branch found: the checkout itself when it is on it, else
+// the worktree that has it, else a new worktree beside the checkout. Only fast-forwarded: a checkout
+// there with changes, or with commits of its own on the branch, is refused, nothing of it lost.
+import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, join, relative } from 'node:path'
+import { readCard, writeCard } from '../adapters/cards.ts'
+import { checkoutFacts } from '../adapters/git.ts'
+import { grantTrust } from '../adapters/move-files.ts'
+import { type BlobStore, blobStore, installBlock, installSessionFiles } from '../adapters/move-pack.ts'
+import {
+  addWorktree,
+  cloneRepo,
+  fastForward,
+  fetchRepo,
+  type RepoDone,
+  repoIdentity,
+  repoState,
+  setRepoIdentity,
+  worktreeWith,
+} from '../adapters/node-repo.ts'
+import { stateDir } from '../adapters/paths.ts'
+import { restoreEntry } from '../adapters/schedule-store.ts'
+import { sameIdentity } from '../core/git-access.ts'
+import { UNSAFE_CHARS, worktreePath } from '../core/launch/names.ts'
+import { claudeStateFile } from '../core/move.ts'
+import { MAX_PACK_FILE_BYTES, type MovePack, movePackOf } from '../core/move-device.ts'
+import type { NodeConfig } from '../core/nodes.ts'
+import type { ProfileSet } from '../core/profiles.ts'
+import type { Card, LaunchView } from '../core/types.ts'
+import type { StartResult } from './launch/launches.ts'
+import { cloneUrl } from './node/launch.ts'
+import { expandHome, loggedIn } from './node/status.ts'
+
+/** The git a move-in needs (adapters/node-repo.ts, adapters/git.ts), handed in so tests can stand in. */
+export interface MoveRepoOps {
+  clone(url: string, dir: string): Promise<RepoDone>
+  fetch(dir: string): Promise<RepoDone>
+  state: typeof repoState
+  worktreeWith(dir: string, branch: string): Promise<string | null>
+  addWorktree(dir: string, path: string, branch: string): Promise<RepoDone>
+  fastForward(dir: string, branch: string): Promise<RepoDone>
+  identity: typeof repoIdentity
+  setIdentity: typeof setRepoIdentity
+  /** The checkout a folder of this computer is in: its root and its remote's address. */
+  checkout(dir: string): Promise<{ root: string; address: string | null } | null>
+}
+
+export interface MoveInDeps {
+  /** This board as a node: its work folder. null on the master. */
+  node(): NodeConfig | null
+  profiles(): ProfileSet
+  /** The board's own launches.start for a resume of `session` (the archive's Return path). */
+  start(body: unknown, session: string): Promise<StartResult>
+  launch(id: string): LaunchView | undefined
+  workspaces(): Promise<{ id: string; label: string | undefined }[]>
+  /** The lanes this board has: a session of a lane it lacks comes in as `other`, as from the archive. */
+  lanes(): ReadonlySet<string>
+  log(text: string): void
+  repo?: MoveRepoOps
+  blobs?: BlobStore
+  home?: string
+  platform?: string
+  exists?: (file: string) => boolean
+}
+
+/** A refusal: `why` is one line for the owner. */
+export type MoveInRefusal = { ok: false; error: 'pack' | 'profile' | 'repo' | 'files' | 'launch'; why: string }
+
+export type MoveInCheck = { ok: true; cwd: string; missing: string[] } | MoveInRefusal
+export type MoveInCommit = { ok: true; cwd: string; launch: string; notes: string[] } | MoveInRefusal
+
+export interface MoveIn {
+  /** Whether the session can come here, its folder made ready, and the blobs still missing. */
+  check(raw: unknown): Promise<MoveInCheck>
+  /** One file's bytes, kept by their hash until the commit. */
+  put(sha: string, body: ReadableStream<Uint8Array> | null): Promise<{ ok: true } | { ok: false; why: string }>
+  /** The files written and the session resumed: its launch's id. */
+  commit(raw: unknown): Promise<MoveInCommit>
+  /** The start is on its way: the schedule entries put in, the blobs dropped. */
+  settle(raw: unknown): { ok: true; entries: number } | MoveInRefusal
+  /** A launch's state by its id, for the master's wait; null once the board forgot it. */
+  launchState(id: string): string | null
+}
+
+/** Blobs of a move that never committed go after a day. */
+const BLOBS_KEPT_MS = 24 * 3600_000
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+export function createMoveIn(d: MoveInDeps): MoveIn {
+  const repo: MoveRepoOps = d.repo ?? {
+    clone: cloneRepo,
+    fetch: fetchRepo,
+    state: repoState,
+    worktreeWith,
+    addWorktree,
+    fastForward,
+    identity: repoIdentity,
+    setIdentity: setRepoIdentity,
+    checkout: async dir => {
+      const f = await checkoutFacts(dir)
+      return f && { root: f.root, address: f.remote?.address ?? null }
+    },
+  }
+  const blobs = d.blobs ?? blobStore(join(stateDir(), 'move-in'))
+  const home = d.home ?? homedir()
+  const platform = d.platform ?? process.platform
+  const exists = d.exists ?? existsSync
+  /** One move at a time in a checkout: two clones or worktrees in one folder would fail each other. */
+  const chains = new Map<string, Promise<unknown>>()
+  function oneAtATime<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const next = (chains.get(key) ?? Promise.resolve()).then(fn, fn)
+    const tail = next.catch(() => {})
+    chains.set(key, tail)
+    void tail.then(() => {
+      if (chains.get(key) === tail) chains.delete(key)
+    })
+    return next
+  }
+
+  const refuse = (error: MoveInRefusal['error'], why: string): MoveInRefusal => ({ ok: false, error, why })
+
+  function packOf(raw: unknown): MovePack | MoveInRefusal {
+    const p = movePackOf(raw)
+    return 'field' in p ? refuse('pack', `the move's description does not check out (${p.field})`) : p
+  }
+
+  function profileOf(p: MovePack): { dir: string } | MoveInRefusal {
+    const profile = d.profiles().list.find(x => x.id === p.profile)
+    if (!profile) return refuse('profile', `no profile "${p.profile}" here`)
+    // On a node, as for a start from the master (services/node/launch.ts); on the master, as Return does: not asked.
+    if (d.node() && loggedIn(profile.dir, platform, exists) === false)
+      return refuse('profile', `the profile "${p.profile}" is not logged in here`)
+    return { dir: profile.dir }
+  }
+
+  /** The checkout the session's repository has here, cloned on a node when missing; or why none. */
+  async function checkoutRoot(p: MovePack): Promise<{ ok: true; root: string } | MoveInRefusal> {
+    const node = d.node()
+    if (node) {
+      const root = expandHome(node.workRoot, home)
+      const checkout = join(root, ...p.folder.address.split('/'))
+      // The address rule keeps it below the work folder; checked here too, as the folder is made from it.
+      const below = relative(root, checkout)
+      if (!below || below.startsWith('..') || isAbsolute(below)) return refuse('repo', 'the address')
+      if (!statSync(checkout, { throwIfNoEntry: false })?.isDirectory()) {
+        mkdirSync(join(checkout, '..'), { recursive: true })
+        const cloned = await repo.clone(cloneUrl(p.folder.address, p.folder.url), checkout)
+        if (!cloned.ok) return refuse('repo', `cloning ${p.folder.address} failed: ${cloned.why}`)
+      }
+      return { ok: true, root: checkout }
+    }
+    // The master: the folder the session had here before it left.
+    const card = readCard(p.session) as (Card & { moved?: { cwd?: unknown } }) | null
+    const before = typeof card?.moved?.cwd === 'string' ? card.moved.cwd : ''
+    if (!before || !statSync(before, { throwIfNoEntry: false })?.isDirectory())
+      return refuse('repo', `no checkout of ${p.folder.address} on this computer is known for it`)
+    const c = await repo.checkout(before)
+    if (!c || c.address !== p.folder.address)
+      return refuse('repo', `${before} is no longer a checkout of ${p.folder.address}`)
+    return { ok: true, root: c.root }
+  }
+
+  /** The session's folder here at its branch, as the source left it; or why not. */
+  function folderFor(p: MovePack): Promise<{ ok: true; cwd: string } | MoveInRefusal> {
+    const key = `${p.folder.address}\u0000${d.node() ? '' : p.session}`
+    return oneAtATime(key, async () => {
+      const got = await checkoutRoot(p)
+      if (!got.ok) return got
+      const root = got.root
+      const fetched = await repo.fetch(root)
+      if (!fetched.ok) return refuse('repo', `fetching ${p.folder.address} failed: ${fetched.why}`)
+      const branch = p.folder.branch
+      const st = await repo.state(root, branch)
+      if (!st.ok) return refuse('repo', `${root}: ${st.why}`)
+      if (!st.state.target) return refuse('repo', `the remote has no branch ${branch}`)
+      let at = st.state.branch === branch ? root : await repo.worktreeWith(root, branch)
+      if (!at) {
+        const path = worktreePath(root, branch)
+        if (exists(path)) return refuse('repo', `${path} is there already and is not on ${branch}`)
+        const made = await repo.addWorktree(root, path, branch)
+        if (!made.ok) return refuse('repo', `a worktree for ${branch} could not be made: ${made.why}`)
+        at = path
+      }
+      const there = await repo.state(at, branch)
+      if (!there.ok) return refuse('repo', `${at}: ${there.why}`)
+      if (!there.state.clean) return refuse('repo', `${at} has changes of its own`)
+      if (there.state.head !== there.state.target) {
+        const ff = await repo.fastForward(at, branch)
+        if (!ff.ok) return refuse('repo', `${at} has commits of its own on ${branch}: ${ff.why}`)
+      }
+      const cwd = p.folder.subdir ? join(at, ...p.folder.subdir.split('/')) : at
+      if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory())
+        return refuse('repo', `no folder ${p.folder.subdir} in ${at}`)
+      // On a node the author the source gives goes into the clone's own config, as for a placed start (#611).
+      const given = p.folder.identity
+      if (d.node() && given && !sameIdentity(await repo.identity(at), given)) {
+        const set = await repo.setIdentity(at, given)
+        if (!set.ok) return refuse('repo', `the git identity could not be set: ${set.why}`)
+      }
+      return { ok: true, cwd }
+    })
+  }
+
+  async function workspaceFor(label: string): Promise<{ id: string; label: string } | { create: string }> {
+    try {
+      const found = (await d.workspaces()).find(w => w.label === label)
+      if (found) return { id: found.id, label }
+    } catch {}
+    return { create: label }
+  }
+
+  return {
+    async check(raw) {
+      const p = packOf(raw)
+      if ('ok' in p) return p
+      const profile = profileOf(p)
+      if ('ok' in profile) return profile
+      const folder = await folderFor(p)
+      if (!folder.ok) return folder
+      blobs.sweep(BLOBS_KEPT_MS)
+      const missing = [...new Set(p.files.map(f => f.sha256))].filter(sha => !blobs.has(sha))
+      return { ok: true, cwd: folder.cwd, missing }
+    },
+
+    put: (sha, body) => blobs.put(sha, body, MAX_PACK_FILE_BYTES),
+
+    async commit(raw) {
+      const p = packOf(raw)
+      if ('ok' in p) return p
+      const profile = profileOf(p)
+      if ('ok' in profile) return profile
+      const missing = p.files.filter(f => !blobs.has(f.sha256))
+      if (missing.length) return refuse('files', `${missing.length} of its files did not arrive`)
+      const folder = await folderFor(p)
+      if (!folder.ok) return folder
+      const cwd = folder.cwd
+      const t = p.files.find(f => f.kind === 'transcript')
+      const block = t ? installBlock(profile.dir, cwd, p.session, blobs.path(t.sha256)) : 'no transcript'
+      if (block) return refuse('files', block)
+      const put = installSessionFiles(profile.dir, cwd, p.session, p.files, sha => blobs.path(sha))
+      if (!put.ok) return refuse('files', put.error)
+      const notes: string[] = []
+      if (p.trusted) {
+        try {
+          const r = grantTrust(claudeStateFile(profile.dir, home, platform), cwd, platform)
+          if (r === 'copied') notes.push('folder trust given')
+        } catch (err) {
+          notes.push(`folder trust not given (${messageOf(err)}): Claude will ask once`)
+        }
+      }
+      // Its name and lane, and no mark of a move away from here before (a move back).
+      writeCard(p.session, {
+        ...(p.name && { name: p.name }),
+        ...(p.category && { category: d.lanes().has(p.category) ? p.category : 'other' }),
+        moved: '',
+      })
+      // As the archive's Return names it: what herdr and a tab take.
+      const name =
+        p.name
+          .replace(new RegExp(UNSAFE_CHARS.source, 'g'), '')
+          .replace(/^[\s/-]+/, '')
+          .trim()
+          .slice(0, 60) || p.session.slice(0, 8)
+      const category = d.lanes().has(p.category) ? p.category : 'other'
+      let started: StartResult
+      try {
+        started = await d.start(
+          {
+            name,
+            cwd,
+            category,
+            workspace: await workspaceFor((p.workspace || p.category || p.name).slice(0, 40)),
+            message: '',
+            profile: p.profile,
+          },
+          p.session,
+        )
+      } catch (err) {
+        started = { ok: false, field: 'launch', error: messageOf(err) }
+      }
+      if (!started.ok) return refuse('launch', `its resume did not start: ${started.error}`)
+      d.log(`move: ${p.name || p.session} from ${p.from} resumed in ${cwd}`)
+      return { ok: true, cwd, launch: started.id, notes }
+    },
+
+    settle(raw) {
+      const p = packOf(raw)
+      if ('ok' in p) return p
+      let n = 0
+      for (const e of p.entries) {
+        try {
+          restoreEntry({ ...e, key: p.session, ...(p.name && { name: p.name }) })
+          n++
+        } catch (err) {
+          d.log(`move: an entry of ${p.session} was not put back: ${messageOf(err)}`)
+        }
+      }
+      for (const f of p.files) blobs.drop(f.sha256)
+      return { ok: true, entries: n }
+    },
+
+    launchState: id => d.launch(id)?.state ?? null,
+  }
+}

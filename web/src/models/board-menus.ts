@@ -11,7 +11,7 @@ import { itemProfile, shownProfiles } from '../../../src/core/item-profile.ts'
 import type { BoardDevice } from '../../../src/core/payload.ts'
 import type { ScheduleEntry } from '../../../src/core/schedule-rules.ts'
 import type { Item, LaunchView, Translator } from '../../../src/core/types.ts'
-import { nodeLook } from './devices.ts'
+import { deviceTitle, nodeLook, reachable } from './devices.ts'
 import type { LanePicks } from './lane-picks.ts'
 import {
   boardMenu,
@@ -90,6 +90,8 @@ export interface BoardMenuActions {
   archive(key: string, from: MenuOrigin): unknown
   /** To the Claude profile `id`, keeping its conversation (#256, models/profile-move.ts). */
   profile(key: string, id: string): unknown
+  /** To the device `id` (titled `title`), keeping its conversation (#616, models/device-move.ts). */
+  device?(key: string, id: string, title: string): unknown
   /** The lane's sessions `keys` to the profile `id`; `usual`: it becomes the lane's usual profile too. */
   laneProfile(lane: MenuCategory, id: string, keys: readonly string[], usual: boolean): unknown
   /** The sleeping sessions in "Idle" asleep `days` days or more to the archive: in lane `lane`, or in the lanes on show. */
@@ -273,6 +275,13 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
   const profiles = movable(board)
   // A card of another device (#502); none for this computer's.
   const node = nodeLook(it, state.data.devices, Date.now(), t)
+  // A master's devices, for the card's Device (#616): a revoked one is none to move to.
+  const devices = (state.data.devices ?? [])
+    .filter(d => !d.revoked)
+    .map(d => {
+      const title = deviceTitle(d, t)
+      return { id: d.id, title, why: reachable(d) ? '' : t('node.offline', { name: title }) }
+    })
   return {
     label: it.name,
     items: cardMenu(it, {
@@ -287,6 +296,7 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
       archiveWhy: archiveBlock(it, state.data.schedules ?? []),
       ...(profiles && { profiles, profile: itemProfile(it, state.data.profiles ?? [])?.id ?? '' }),
       ...(node && { device: { title: node.title, why: node.why } }),
+      ...(devices.length >= 2 && { devices, deviceAt: it.device ?? 'local' }),
     }),
     pick: id => {
       const [what, arg = ''] = id.split(/:(.*)/s)
@@ -294,6 +304,10 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
       if (what === 'cat') return void board.do.move(key, { cat: arg })
       if (what === 'profile')
         return void (arg !== itemProfile(it, state.data.profiles ?? [])?.id && board.do.profile(key, arg))
+      if (what === 'device')
+        return void (
+          arg !== (it.device ?? 'local') && board.do.device?.(key, arg, devices.find(d => d.id === arg)?.title ?? arg)
+        )
       if (what === 'col') return void board.do.move(key, { column: arg })
       if (what === 'copy') {
         const values: Record<string, string | null | undefined> = {
