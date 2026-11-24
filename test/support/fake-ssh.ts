@@ -64,7 +64,7 @@
 // `wrong`) and exit 1 (spec, "Checked by the spike").
 // `hang` stays up silent.
 import { createHmac } from 'node:crypto'
-import { appendFileSync, existsSync, readFileSync, writeFileSync, writeSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { connect, createServer } from 'node:net'
 import { dirname, join } from 'node:path'
 import { nodeKind, prepScript, relayKind, unpackNodeRun } from './fake-root-prep.ts'
@@ -84,7 +84,7 @@ type Admin = {
 }
 type State = {
   keygen?: 'unprotected' | 'passphrase'
-  ssh?: { mode?: Mode; seq?: Mode[]; exitAfterMs?: number; proxyPort?: number; domain?: string }
+  ssh?: { mode?: Mode; seq?: Mode[]; exitAfterMs?: number; proxyPort?: number; domain?: string; unixForward?: boolean }
   admin?: Admin
   sshVersion?: string
 }
@@ -290,6 +290,33 @@ async function ssh(): Promise<void> {
   }
   const proxyPort = state.ssh?.proxyPort
   if (proxyPort) await proxy(proxyPort, state.ssh?.domain ?? '', target, port)
+  if (state.ssh?.unixForward && socket.startsWith('/')) {
+    mkdirSync(dirname(socket), { recursive: true })
+    rmSync(socket, { force: true })
+    const unixSrv = createServer(client => {
+      const peer = connect(Number(port), target)
+      client.pipe(peer)
+      peer.pipe(client)
+      client.on('error', () => peer.destroy())
+      peer.on('error', () => client.destroy())
+    })
+    const ok = await new Promise<boolean>(resolve => {
+      unixSrv.once('error', () => resolve(false))
+      unixSrv.listen(socket, () => resolve(true))
+    })
+    if (!ok) {
+      if (verbose) say(`debug1: remote forward failure for: listen ${socket}:-2, connect ${target}:${port}`)
+      say(`Error: remote port forwarding failed for listen path ${socket}`)
+      end(255)
+    }
+    const clean = () => {
+      try {
+        unixSrv.close()
+      } catch {}
+    }
+    process.once('SIGTERM', clean)
+    process.once('SIGINT', clean)
+  }
   if (verbose)
     say(
       `debug1: remote forward success for: listen ${socket}:-2, connect ${target}:${port}`,
@@ -307,11 +334,18 @@ function otherHostKey(): boolean {
     .some(l => l.startsWith(`${HOST} `) && l !== HOST_LINE)
 }
 
-/** A node link's ssh: a local forward, its connections passed on to the port on this computer. */
+/** A node link's ssh: a local forward (TCP or unix socket), its connections passed on to the target. */
 async function localForward(): Promise<void> {
   const verbose = args.includes('-v')
-  // -L 127.0.0.1:<local>:127.0.0.1:<port>
-  const [, lhost = '', lport = '', rhost = '', rport = ''] = /^(.*):(\d+):(.*):(\d+)$/.exec(argAfter('-L') ?? '') ?? []
+  const fwd = argAfter('-L') ?? ''
+  // -L 127.0.0.1:<local>:127.0.0.1:<port> OR -L 127.0.0.1:<local>:<unixSocket>
+  const tcp = /^([^:]+):(\d+):([^:]+):(\d+)$/.exec(fwd)
+  const unix = tcp ? null : /^([^:]+):(\d+):(\/.+)$/.exec(fwd)
+  const lhost = tcp?.[1] ?? unix?.[1] ?? ''
+  const lport = tcp?.[2] ?? unix?.[2] ?? ''
+  const rhost = tcp?.[3] ?? ''
+  const rport = tcp?.[4] ?? ''
+  const unixSocket = unix?.[3] ?? ''
   const now = mode()
   if (now === 'hang') {
     setInterval(() => {}, 1 << 30)
@@ -331,7 +365,8 @@ async function localForward(): Promise<void> {
   }
   if (verbose) {
     say(`Authenticated to ${HOST} ([203.0.113.5]:22) using "publickey".`)
-    say(`debug1: Local connections to ${lhost}:${lport} forwarded to remote address ${rhost}:${rport}`)
+    if (unixSocket) say(`debug1: Local connections to ${lhost}:${lport} forwarded to remote socket ${unixSocket}`)
+    else say(`debug1: Local connections to ${lhost}:${lport} forwarded to remote address ${rhost}:${rport}`)
   }
   const server = createServer(socket => {
     if (now === 'refuse') {
@@ -339,7 +374,7 @@ async function localForward(): Promise<void> {
       socket.destroy()
       return
     }
-    const peer = connect(Number(rport), rhost)
+    const peer = unixSocket ? connect(unixSocket) : connect(Number(rport), rhost)
     socket.pipe(peer)
     peer.pipe(socket)
     socket.on('error', () => peer.destroy())

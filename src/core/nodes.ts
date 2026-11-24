@@ -450,6 +450,7 @@ function readNode(raw: unknown): { config: NodeConfig | null; problems: NodesPro
   const relay = given(raw.relay)
     ? (relayOf(raw.relay, [...RELAY_KEYS, 'socket'], problems) as NodeConfig['relay'])
     : null
+  if (relay && (!given(raw.tls) || raw.tls === false)) flag('tls', 'required')
   if (problems.length) return { config: null, problems }
   return {
     config: {
@@ -662,10 +663,11 @@ export type LinkState = 'connecting' | 'online' | 'offline' | 'refused'
 /**
  * Why a link is refused: `token` (none stored, or the node does not take it), `api` (the door's
  * `node.api` is not this board's), `device` (the door is another device's), `host-key` (the
- * node's ssh host key is not the pinned one), `ssh` (another lasting ssh error: the key refused,
- * its rights, a passphrase), `key` (no link key yet), `not-built` (a link kind not built yet).
+ * node's ssh host key is not the pinned one), `cert` (the door answered with another TLS
+ * certificate, or none is pinned), `ssh` (another lasting ssh error: the key refused, its rights,
+ * a passphrase), `key` (no link or relay key yet), `not-built` (a link kind not built yet).
  */
-export type LinkReason = 'token' | 'api' | 'device' | 'host-key' | 'ssh' | 'key' | 'not-built'
+export type LinkReason = 'token' | 'api' | 'device' | 'host-key' | 'cert' | 'ssh' | 'key' | 'not-built'
 
 export interface LinkStatus {
   state: LinkState
