@@ -7,8 +7,8 @@
 // it cannot type into a session.
 
 import { randomBytes, randomUUID } from 'node:crypto'
-import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs'
-import { hostname } from 'node:os'
+import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, readFileSync, rmSync, watch } from 'node:fs'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { localAgyLimits } from '../adapters/agy-limits.ts'
 import { allCards } from '../adapters/cards.ts'
@@ -19,11 +19,13 @@ import { archiveCommit, headCommit } from '../adapters/git.ts'
 import { gitTools, masterGit } from '../adapters/git-access.ts'
 import { workspaceList } from '../adapters/herdr.ts'
 import { isRecord } from '../adapters/json-store.ts'
+import { activateNodeRelayKey, createNodeJoinStore, stageNodeRelayKey } from '../adapters/node-join-store.ts'
 import {
   createDeviceStore,
   createNodeStore,
   dropRelayCredentials,
   nodeDir,
+  nodesDir,
   readLanesSeen,
   relayKeyPath,
   writeLanesSeen,
@@ -73,6 +75,7 @@ import { journalConfig } from '../core/journal.ts'
 import { t } from '../core/lang.ts'
 import { messageGate } from '../core/message-gate.ts'
 import { dropMovedCards } from '../core/node-items.ts'
+import { JOIN_TTL_MS } from '../core/node-join.ts'
 import { deviceIdFromHost, fillThresholds, markRevoked, nodeConfig, nodesConfig, parseNodeKey } from '../core/nodes.ts'
 import { pageWithLook } from '../core/omarchy-theme.ts'
 import type { BackupPayload, CalendarPayload, TimePayload } from '../core/payload.ts'
@@ -120,10 +123,19 @@ import { createNodeUpdate, type NodeUpdate } from '../services/node/update.ts'
 import { createNodeUplink, type NodeUplink } from '../services/node/uplink.ts'
 import { createNodeAggregate, type NodeAggregate } from '../services/nodes/aggregate.ts'
 import { type BundleSync, createBundleSync } from '../services/nodes/bundle-sync.ts'
+import { type ComputerSetup, createComputerSetup } from '../services/nodes/computer-setup.ts'
+import {
+  activateComputerRelayKey,
+  claimComputerDoor,
+  createRelayForwardPool,
+  probeComputerDoor,
+  readRelayHostKey,
+} from '../services/nodes/computer-setup-io.ts'
 import { createNodeLinks, linkTimes, type NodeLinks } from '../services/nodes/links.ts'
 import { moveToDevice } from '../services/nodes/move-device.ts'
 import { createNodePilotCalls, type NodePilotCalls } from '../services/nodes/pilot-call.ts'
 import { createPlacer, type Placer } from '../services/nodes/placer.ts'
+import { relayEnrolFor } from '../services/nodes/relay.ts'
 import { createRelaySetup, type RelaySetup } from '../services/nodes/relay-setup.ts'
 import { createRevoker, type Revoker } from '../services/nodes/revoke.ts'
 import { createNodeSetup, type NodeSetup } from '../services/nodes/setup.ts'
@@ -182,7 +194,7 @@ import { mokupilotRoutes } from './routes/mokupilot.ts'
 import { moveRoute } from './routes/move.ts'
 import { nodeCallRoutes, nodeDoorRoutes } from './routes/node.ts'
 import { createNodeProxy, type NodeProxy } from './routes/node-proxy.ts'
-import { nodeSetupRoutes, nodesRoutes, relaySetupRoutes } from './routes/nodes.ts'
+import { computerSetupRoutes, nodeSetupRoutes, nodesRoutes, relaySetupRoutes } from './routes/nodes.ts'
 import { pageLogRoute } from './routes/page-log.ts'
 import { pilotCallRoutes } from './routes/pilot-call.ts'
 import { presenceRoutes } from './routes/presence.ts'
@@ -1238,7 +1250,9 @@ export async function startServer({
                   ? localSetupRoutes
                   : path === '/api/nodes/relay/setup'
                     ? localRelaySetupRoutes
-                    : routes
+                    : path === '/api/nodes/computer/setup'
+                      ? localComputerSetupRoutes
+                      : routes
       return await dispatch(selected, req, url, path, guards, () => peerOf(srv, req))
     } catch (err) {
       // The path only: a query can carry the page's token.
@@ -1400,6 +1414,7 @@ export async function startServer({
       workspaces: () => workspaceList(8000),
     })
     const nodeStore = createNodeStore()
+    const nodeJoin = createNodeJoinStore()
     door = createNodeListener({
       cfg,
       routes: ownRoutes,
@@ -1409,6 +1424,8 @@ export async function startServer({
       guards: { ...guards, ownFiles: ownFileCheck(cfg) },
       hello: () => listener.hello(),
       store: nodeStore,
+      join: nodeJoin,
+      stageRelayKey: () => stageNodeRelayKey(nodeDir()),
       // Its status, a start from the master (#504) through this board's own launch pipeline, the
       // profile bundle its master sends (#506) and a secret given to one of its sinks (#507).
       doorRoutes: nodeDoorRoutes({
@@ -1452,6 +1469,12 @@ export async function startServer({
         update,
         move: movers(),
         pilotCall: nodePilotCall,
+        relayKey: async publicKey => {
+          const r = activateNodeRelayKey(publicKey, nodeDir())
+          if (!r.ok) return { status: r.status, body: { ok: false, error: r.error } }
+          if (r.rotated) setTimeout(() => void relayDial?.restart(), 50)
+          return { status: 200, body: { ok: true, rotated: r.rotated } }
+        },
       }),
       log,
       onChange: () => void relayDial?.sync(),
@@ -1534,6 +1557,57 @@ export async function startServer({
         newId: setupId,
       })),
   )
+  let computerSetup: ComputerSetup | null = null
+  const relayPool = createRelayForwardPool()
+  const pendingEnrolsFile = (): string => join(nodesDir(), 'relay', 'pending-enrols.json')
+  const computerSetupInstance = (): ComputerSetup =>
+    (computerSetup ??= createComputerSetup({
+      cfg,
+      relayHostKey: readRelayHostKey,
+      generateDialKey: async socket => {
+        const dir = mkdtempSync(join(tmpdir(), 'ab-dial-'))
+        try {
+          const keyPath = join(dir, 'dial')
+          const made = await generateKey(`agent-board relay node ${socket}`, keyPath)
+          if (!made.ok) return made
+          return { ok: true, publicKey: made.publicKey, privateKey: readFileSync(keyPath, 'utf8') }
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      enrol: {
+        add: (relay, socket, publicKey) => relayEnrolFor(relay, { store: createDeviceStore() }).add(socket, publicKey),
+        remove: (relay, socket) => relayEnrolFor(relay, { store: createDeviceStore() }).remove(socket),
+      },
+      probe: (relay, socket) => probeComputerDoor(relay, socket, { pool: relayPool }),
+      claim: (relay, socket, req) => claimComputerDoor(relay, socket, req, { pool: relayPool }),
+      activateRelayKey: (relay, socket, req) => activateComputerRelayKey(relay, socket, req, { pool: relayPool }),
+      releaseProbe: socket => {
+        void relayPool.drop(socket)
+      },
+      pinCert: (deviceId, certPem) => {
+        createDeviceStore().setCert(deviceId, certPem)
+      },
+      store: createDeviceStore(),
+      editNodes: editNodesAdding,
+      follow: linksFollow,
+      links: () => nodeLinks,
+      bundles: () => bundleSync,
+      commit: runningCommit,
+      hostName: () => hostname(),
+      pendingFile: pendingEnrolsFile,
+      onChange: () => {},
+      log,
+      now: () => Date.now(),
+      newId: setupId,
+      joinTtlMs: knobMs('BOARD_NODE_JOIN_TTL_MS', JOIN_TTL_MS),
+      pollMs: knobMs('BOARD_NODE_JOIN_POLL_MS', 5000),
+      linkWaitMs: knobMs('BOARD_NODE_SETUP_LINK_MS', 120_000),
+      retryBaseMs: knobMs('BOARD_NODE_ENROL_RETRY_MS', 5000),
+      retryMaxMs: knobMs('BOARD_NODE_ENROL_RETRY_MAX_MS', 60_000),
+      pause,
+    }))
+  const localComputerSetupRoutes = computerSetupRoutes(computerSetupInstance)
   let nodeUpdater: NodeUpdater | null = null
   let scheduler: ReturnType<typeof startScheduler> | null = null
   function linksFollow(): void {
@@ -1543,6 +1617,9 @@ export async function startServer({
       return
     }
     if (nodesConfig(cfg.nodes) === null) return
+    if (nodesConfig(cfg.nodes)?.relay && existsSync(pendingEnrolsFile())) {
+      void computerSetupInstance().sweepExpired()
+    }
     nodeLinks = createNodeLinks({ cfg, log, commit: runningCommit })
     nodeLinks.onChange(id => scheduler?.wakeDevice(id))
     // Where a new session runs (#504), and the Devices row of this computer (#500): this computer's
@@ -1968,6 +2045,8 @@ export async function startServer({
       nodePlacer?.close()
       nodeUpdater?.close()
       nodeRevoker?.close()
+      computerSetup?.close()
+      await relayPool.closeAll()
       bundleSync?.close()
       if (nodeLinks) {
         await nodeLinks.close()
