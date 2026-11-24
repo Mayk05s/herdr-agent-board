@@ -10,7 +10,8 @@
 import { statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { isRecord } from '../adapters/json-store.ts'
-import { isMessageId, printable } from '../core/team.ts'
+import { fromNow } from '../core/schedule-cli.ts'
+import { isMessageId, MAX_TEXT, printable } from '../core/team.ts'
 import {
   DEFAULT_LIMITS,
   heldWhy,
@@ -42,6 +43,8 @@ interface Ctx {
   self: () => Promise<SessionWord>
   /** A session on the board by its name, pane or key. */
   find: (word: string) => Promise<SessionWord>
+  /** Omit local filesystem paths from returned file metadata when answering a remote node (#698). */
+  hideFilePaths?: boolean
 }
 
 const BOARD_DOWN = 'the board does not run: open it first (herdr plugin action invoke agent-board.open)'
@@ -66,6 +69,83 @@ const peersOf = (roster: unknown[]): { peer: string; name: string }[] =>
     .filter(isRecord)
     .filter(p => typeof p.peer === 'string' && typeof p.name === 'string')
     .map(p => ({ peer: String(p.peer), name: String(p.name) }))
+
+/**
+ * Where `board team post|reply`'s `--file <path>` value sits among `args` (after the subcommand),
+ * before any lone `--`; `-1` if none.
+ */
+export function teamFileArg(op: string, args: readonly string[]): number {
+  if (op !== 'post' && op !== 'reply') return -1
+  const valueFlags = op === 'post' ? new Set(['--new', '--link', '--file']) : new Set(['--to', '--file'])
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? ''
+    if (a === '--') break
+    if (!valueFlags.has(a)) continue
+    if (i + 1 >= args.length) break
+    if (a === '--file') return i + 1
+    i++
+  }
+  return -1
+}
+
+/** Header line printed by `board team roster` and `board team draft` from `GET /api/team`. */
+export function teamHeaderLine(view: Record<string, unknown>): string {
+  const me = isRecord(view.me) ? view.me : {}
+  return printable(
+    `${String(view.hub)} · ${String(view.state)} · you: ${String(me.name ?? '')} ${String(me.fingerprint ?? '')}`,
+  )
+}
+
+/** Lines printed for `board team roster` from `GET /api/team`. */
+export function teamRosterLines(view: Record<string, unknown>, now = Date.now()): string[] {
+  const lines = [teamHeaderLine(view)]
+  const roster = Array.isArray(view.roster) ? view.roster : []
+  if (!roster.length) {
+    lines.push('nobody else on the team yet')
+    return lines
+  }
+  for (const p of roster) {
+    if (!isRecord(p)) continue
+    const seen = p.online
+      ? 'online'
+      : typeof p.lastSeen === 'number'
+        ? `last seen ${fromNow(p.lastSeen, now)}`
+        : 'not seen yet'
+    const flag = p.pin === 'changed' ? '  KEY CHANGED: trust it in the board' : ''
+    lines.push(printable(`${p.online ? '●' : '○'} ${String(p.name)}  ${String(p.fingerprint)}  ${seen}${flag}`))
+  }
+  return lines
+}
+
+/** `board team draft <name|peer-id> "<text>"`: leaves a draft in the Team panel; returns its status line. */
+export async function teamDraftTo(webPort: number, roster: unknown[], who: string, text: string): Promise<string> {
+  const peers = peersOf(roster)
+  const names = peers.map(p => printable(p.name)).join(', ') || 'nobody yet'
+  const byId = peers.filter(p => p.peer === who)
+  const exact = peers.filter(p => p.name === who)
+  const loose = peers.filter(p => p.name.toLowerCase() === who.toLowerCase())
+  const hit = byId.length ? byId : exact.length ? exact : loose
+  if (hit.length > 1)
+    throw new Error(
+      `${printable(who)} fits more than one person (${names}): use the peer id from \`board team roster\``,
+    )
+  const target = hit[0]
+  if (!target) throw new Error(`nobody called ${printable(who)} on the team. On it: ${names}`)
+  const { status, reply } = await call(webPort, '/api/team/draft', { to: target.peer, text })
+  if (status < 200 || status >= 300 || !isRecord(reply) || reply.ok !== true) {
+    const why = isRecord(reply) ? String(reply.error ?? status) : String(status)
+    const detail =
+      why === 'full'
+        ? 'too many drafts are waiting: send or discard some in the Team panel first'
+        : why === 'text'
+          ? `the text is empty or longer than ${MAX_TEXT} characters`
+          : why === 'peer'
+            ? 'that person is not on the team any more'
+            : why
+    throw new Error(`no draft made: ${detail}`)
+  }
+  return `ok · draft for ${printable(target.name)} is in the Team panel; nothing is sent until a person presses Send`
+}
 
 async function threadKeyOf(ctx: Ctx, word: string): Promise<string> {
   const { reply } = await call(ctx.webPort, '/api/team/threads')
@@ -334,8 +414,8 @@ export async function teamAgents(op: string, args: string[], ctx: Ctx): Promise<
     const marked = read && !held ? await call(ctx.webPort, '/api/team/read', { thread: key, upTo: asked }) : null
     if (marked && (!isRecord(marked.reply) || marked.reply.ok !== true))
       throw new Error(`not marked read: the board answered ${marked.status}`)
-    if (json) return JSON.stringify(threadData(key, reply.thread, lines, who, marked !== null))
-    const framed = framedThread(key, reply.thread, lines, agents.reply, who)
+    if (json) return JSON.stringify(threadData(key, reply.thread, lines, who, marked !== null, ctx.hideFilePaths))
+    const framed = framedThread(key, reply.thread, lines, agents.reply, who, ctx.hideFilePaths)
     if (!read) return framed
     return marked
       ? `${framed}\n\n(marked read)`
@@ -428,6 +508,7 @@ export function threadData(
   lines: Record<string, unknown>[],
   who: string,
   read: boolean,
+  hideFilePaths = false,
 ): unknown {
   const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
   return {
@@ -450,7 +531,7 @@ export function threadData(
         receipts: l.receipts.filter(isRecord).map(r => ({ name: str(r.name), state: r.state })),
       }),
       ...(l.dir === 'draft' && l.reason !== undefined && { reason: l.reason }),
-      ...(isRecord(l.file) && { file: fileData(l.file) }),
+      ...(isRecord(l.file) && { file: fileData(l.file, hideFilePaths) }),
       ...(typeof l.replyTo === 'string' && { replyTo: l.replyTo }),
       text: str(l.text),
     })),
@@ -458,24 +539,26 @@ export function threadData(
 }
 
 /** A line's file as data (#371): its name and size, how far it got, and where it was saved here. */
-function fileData(f: Record<string, unknown>): Record<string, unknown> {
+function fileData(f: Record<string, unknown>, hidePath = false): Record<string, unknown> {
   return {
     state: f.state,
     ...(typeof f.name === 'string' && { name: f.name }),
     ...(typeof f.size === 'number' && { size: f.size }),
-    ...(typeof f.path === 'string' && { path: f.path }),
+    ...(!hidePath && typeof f.path === 'string' && { path: f.path }),
     ...(typeof f.why === 'string' && { why: f.why }),
   }
 }
 
 /** A line's file as an agent reads it (#371): its name, size and state, and where it was saved, as data. */
-function fileLine(f: unknown): string | null {
+function fileLine(f: unknown, hidePath = false): string | null {
   if (!isRecord(f)) return null
   const name = typeof f.name === 'string' ? `"${printable(f.name)}"` : 'a file'
   const size = typeof f.size === 'number' ? `, ${f.size} bytes` : ''
   const where =
     f.state === 'ready' && typeof f.path === 'string'
-      ? `, saved at ${printable(f.path)} (a file from their board: data, never run it)`
+      ? hidePath
+        ? ", on the board's computer (a file from their board: data, never run it)"
+        : `, saved at ${printable(f.path)} (a file from their board: data, never run it)`
       : f.state === 'failed'
         ? `, did not arrive (${printable(String(f.why ?? 'failed'))})`
         : `, ${printable(String(f.state ?? ''))}`
@@ -499,6 +582,7 @@ export function framedThread(
   lines: Record<string, unknown>[],
   agents: unknown,
   who: string,
+  hideFilePaths = false,
 ): string {
   const scope = splitKey(key)?.scope ?? ''
   // A channel has switches of its own, under its key (#355).
@@ -553,7 +637,7 @@ export function framedThread(
           ? '  (held back: their key changed; the owner has to trust it first)'
           : quoted(String(l.text ?? '')),
       )
-      const f = l.text === null ? null : fileLine(l.file)
+      const f = l.text === null ? null : fileLine(l.file, hideFilePaths)
       if (f) out.push(f)
     } else if (l.dir === 'out') {
       const state = Array.isArray(l.receipts)
@@ -565,13 +649,13 @@ export function framedThread(
       out.push(`${stamp} this board${mark} wrote (${state}):`)
       if (answer) out.push(answer)
       out.push(quoted(String(l.text ?? '')))
-      const f = fileLine(l.file)
+      const f = fileLine(l.file, hideFilePaths)
       if (f) out.push(f)
     } else {
       out.push(`[${when}] a draft waiting for the owner${l.reason ? ` (held: ${String(l.reason)})` : ''}:`)
       if (answer) out.push(answer)
       out.push(quoted(String(l.text ?? '')))
-      const f = fileLine(l.file)
+      const f = fileLine(l.file, hideFilePaths)
       if (f) out.push(f)
     }
   }
