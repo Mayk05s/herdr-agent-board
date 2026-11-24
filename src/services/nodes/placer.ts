@@ -18,14 +18,17 @@
 //   it meanwhile, and a node already current costs one small request), then `POST /api/node/launch`
 //   through its link. A sync that does not end well is the turn `bundle`. `full`, `profile`, `repo`
 //   and `bundle` send it to the next device (that one left out, place() asked again); a lost answer
-//   is sent again with the same id, which the node answers with the launch it has; a node that drops
-//   before it acknowledged puts the start back in the queue. One it acknowledged is the node's and
-//   never starts elsewhere; its card here goes once the node shows it.
-// - The queue (adapters/node-queue.ts): a start that waits is a launch in state `queued` with its
-//   blocker, kept on disk. Tried again when a device's payload moves (its status asked then), when this
-//   computer's awake sessions drop, and every 15 s while anything waits; an entry that cannot go does
-//   not hold back one that can, and a device that turned it away is asked again only once its status
-//   moved. Cancel takes it out.
+//   is sent again with the same id, which the node answers with the launch it has; a sync that
+//   drops returns to the queue to be placed again, while a drop after `POST /api/node/launch` was
+//   sent keeps the start pinned to that node (`sent` / `sentAt`) until acknowledged, seen in its
+//   payload, turned away, paused/drained/revoked, or past `SENT_TTL_MS`. One it acknowledged is
+//   the node's and never starts elsewhere; its card here goes once the node shows it.
+// - The queue (adapters/node-queue.ts): a start that waits, or is on its way to a node
+//   (syncing or sent without an acknowledgement yet, #588), is kept on disk in queue.json until
+//   acknowledged, refused, run locally, or cancelled. Tried again when a device's payload moves
+//   (its status asked then), when this computer's awake sessions drop, and every 15 s while
+//   anything waits; an entry that cannot go does not hold back one that can, and a device that
+//   turned it away is asked again only once its status moved. Cancel takes it out.
 //
 // Made by server/app.ts only once `nodes` is on; a board without it never reaches any of this.
 import { randomUUID } from 'node:crypto'
@@ -62,6 +65,7 @@ import type { Config, Item } from '../../core/types.ts'
 import type { Launches, LaunchPlacer } from '../launch/launches.ts'
 import type { LaunchRequest } from '../launch/request.ts'
 import { type Launch, newLaunch } from '../launch/run.ts'
+import { REMEMBER_MS } from '../node/launch.ts'
 import { type Clock, realClock } from '../tunnel.ts'
 import type { RemotePart } from './aggregate.ts'
 import type { BundleSync, SyncReport } from './bundle-sync.ts'
@@ -69,6 +73,8 @@ import type { NodeLinks } from './links.ts'
 
 /** The queue is tried again this often while anything waits (8.3; BOARD_NODE_QUEUE_MS in tests). */
 export const QUEUE_MS = 15_000
+/** How long an unacknowledged `sent` pin holds a start to one node: 1 min under the node's REMEMBER_MS (#588). */
+export const SENT_TTL_MS = REMEMBER_MS - 60_000
 /** A lost answer is sent again this many times, this far apart (paced), while the link is up. */
 const RESENDS = 3
 const RESEND_MS = 1000
@@ -146,6 +152,18 @@ interface Held {
   left: Map<string, number>
   busy: boolean
   gone: boolean
+  /** The node `POST /api/node/launch` was sent to without an acknowledgement yet (#588). */
+  sent: string | null
+  /** When `POST /api/node/launch` was sent to `sent` (ms, #588). */
+  sentAt: number | null
+  /** The node whose profile is being synced before the launch request (#588). */
+  syncing: string | null
+  /**
+   * Last `sent` / `syncing` written to queue.json for this entry, so toQueue avoids redundant
+   * writes yet never leaves stale markers on disk.
+   */
+  diskSent: string | null
+  diskSyncing: string | null
 }
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -371,13 +389,32 @@ export function createPlacer(o: PlacerOptions): Placer {
       task: h.task,
       source: h.source,
       ...(wait && { wait }),
+      ...(h.sent
+        ? { sent: h.sent, ...(h.sentAt !== null && { sentAt: h.sentAt }) }
+        : h.syncing
+          ? { syncing: h.syncing }
+          : {}),
       ...(l.exactSession && { exactSession: true as const }),
+    }
+  }
+
+  function keep(h: Held, wait?: Blocker): boolean {
+    try {
+      if (!queue.put(entryOf(h, wait))) return false
+      h.diskSent = h.sent
+      h.diskSyncing = h.sent ? null : h.syncing
+      return true
+    } catch (err) {
+      o.log(`placer: the queue: ${messageOf(err)}`)
+      return false
     }
   }
 
   /** Done with a start: out of the queue's file and the placer. */
   function letGo(h: Held): void {
     held.delete(h.l.id)
+    h.diskSent = null
+    h.diskSyncing = null
     try {
       queue.remove(h.l.id)
     } catch (err) {
@@ -398,18 +435,22 @@ export function createPlacer(o: PlacerOptions): Placer {
   }
 
   function toQueue(h: Held, wait: Blocker | undefined): void {
+    if (h.gone || closed) return
     const p = placeOf(h)
+    const syncingNow = h.sent ? null : h.syncing
     // Waiting already on the same thing: nothing to write.
-    if (h.l.state === 'queued' && !p.device && JSON.stringify(p.wait) === JSON.stringify(wait)) return
+    if (
+      h.l.state === 'queued' &&
+      !p.device &&
+      JSON.stringify(p.wait) === JSON.stringify(wait) &&
+      h.diskSent === h.sent &&
+      h.diskSyncing === syncingNow
+    )
+      return
     delete p.device
     if (wait) p.wait = wait
     else delete p.wait
-    let kept = false
-    try {
-      kept = queue.put(entryOf(h, wait))
-    } catch (err) {
-      o.log(`placer: the queue: ${messageOf(err)}`)
-    }
+    const kept = keep(h, wait)
     if (!kept) {
       // 50 wait already, or the file cannot be written: refused rather than held where a restart loses it.
       p.queueFull = true
@@ -419,6 +460,7 @@ export function createPlacer(o: PlacerOptions): Placer {
       return
     }
     h.l.state = 'queued'
+    h.l.step = 'placing'
     timerFollows()
   }
 
@@ -473,13 +515,27 @@ export function createPlacer(o: PlacerOptions): Placer {
     (r.why === 'node' && (r.detail === 'error' || r.detail === 'node-offline'))
 
   /** The start on a node: acknowledged, turned away (try the next device), or lost (back to the queue). */
-  async function send(h: Held, device: string): Promise<'acked' | 'turned' | 'done'> {
+  async function send(
+    h: Held,
+    device: string,
+    { skipSync = false }: { skipSync?: boolean } = {},
+  ): Promise<'acked' | 'turned' | 'done'> {
     const session = h.l.sessionGiven ?? ''
     const p = placeOf(h)
     p.device = device
     delete p.wait
     h.l.state = 'starting'
-    if (o.bundle) {
+    if (o.bundle && !skipSync) {
+      if (h.gone || closed) {
+        if (closed) release(session)
+        return 'done'
+      }
+      // Persist before syncing so a restart mid-sync keeps the start on disk (#588). Best effort:
+      // a queue write error logs and still runs the start as before.
+      h.syncing = device
+      h.sent = null
+      h.sentAt = null
+      keep(h)
       // The node made current for this profile first (9.2); the start waits as long as the sync
       // takes, and two starts for one device and profile share one sync (syncIfBehind joins it).
       h.l.step = 'syncing'
@@ -491,9 +547,13 @@ export function createPlacer(o: PlacerOptions): Placer {
       } finally {
         syncing.delete(session)
       }
-      if (h.gone) return 'done'
+      if (h.gone || closed) {
+        if (closed) release(session)
+        return 'done'
+      }
       if (!r.ok) {
         // Not on its way to that device any more: the card says the board chooses again.
+        h.syncing = null
         delete p.device
         h.l.step = 'placing'
         o.log(
@@ -510,11 +570,20 @@ export function createPlacer(o: PlacerOptions): Placer {
     h.l.step = h.source?.kind === 'repo' ? 'cloning' : 'placing'
     o.launches.changed()
     const body = JSON.stringify(bodyOf(h, device))
-    for (let tries = 0; tries <= RESENDS && !h.gone; tries++) {
+    for (let tries = 0; tries <= RESENDS && !h.gone && !closed; tries++) {
       if (tries) await new Promise<void>(r => clock.setTimeout(() => r(), Math.round(RESEND_MS * pace())))
+      if (h.gone || closed) break
       const link = o.links.link(device)
       const up = link?.state().state === 'online'
       if (!link || !up) break
+      // Write-ahead before POST /api/node/launch so an unacknowledged start survives a restart (#588).
+      // Best effort: a queue write error logs and still sends the start.
+      if (h.sent !== device) {
+        h.syncing = null
+        h.sent = device
+        h.sentAt = clock.now()
+        keep(h)
+      }
       let res: Response
       try {
         res = await link.fetch('/api/node/launch', {
@@ -526,18 +595,37 @@ export function createPlacer(o: PlacerOptions): Placer {
       } catch {
         continue
       }
+      if (closed) {
+        release(session)
+        return 'done'
+      }
       const answer = (await res.json().catch(() => null)) as { error?: unknown; detail?: unknown } | null
+      if (closed) {
+        release(session)
+        return 'done'
+      }
       if (res.status === 202) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
         h.l.state = 'done'
         h.l.doneAt = clock.now()
         letGo(h)
         return 'acked'
       }
       const error = typeof answer?.error === 'string' ? answer.error : ''
-      if (res.status === 409 && (TURNS as readonly string[]).includes(error)) return turn(h, device, error as NodeTurn)
+      if (res.status === 409 && (TURNS as readonly string[]).includes(error)) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
+        return turn(h, device, error as NodeTurn)
+      }
       // The node's own launch pipeline refused the start: that is its answer, not a lost one. A
       // token the node no longer takes, or its lockout, is a link that is down, not an answer.
       if (res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 403 && res.status !== 429) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
         release(session)
         h.l.state = 'failed'
         h.l.error = typeof answer?.detail === 'string' ? answer.detail : error
@@ -546,8 +634,9 @@ export function createPlacer(o: PlacerOptions): Placer {
       }
       // 5xx, node-offline, a refused token: the answer is lost; the same id again is the same start there.
     }
+    h.syncing = null
     release(session)
-    if (!h.gone) toQueue(h, { device, kind: 'offline' })
+    if (!h.gone && !closed) toQueue(h, { device, kind: 'offline' })
     return 'done'
   }
 
@@ -563,6 +652,9 @@ export function createPlacer(o: PlacerOptions): Placer {
       const part = o.remote()
       const there = part?.devices.find(d => d.id !== LOCAL && nodeShows(d.id, session, part))
       if (there) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
         placeOf(h).device = there.id
         delete placeOf(h).wait
         h.l.state = 'done'
@@ -572,8 +664,40 @@ export function createPlacer(o: PlacerOptions): Placer {
       }
       // A device that turned it away is asked again once a status of it came since.
       for (const [device, at] of h.left) if ((seen.get(device)?.got ?? 0) > at) h.left.delete(device)
+      if (h.sent) {
+        const sent = h.sent
+        const sentAt = h.sentAt ?? h.l.startedAt
+        const cfg = nodes()
+        if (closed) return
+        if (!cfg) return nodesGone(h)
+        const dev = cfg.devices[sent]
+        if (clock.now() - sentAt >= SENT_TTL_MS || !dev || dev.revoked || dev.paused || dev.drain) {
+          h.sent = null
+          h.sentAt = null
+        } else {
+          const link = o.links.link(sent)
+          if (link?.state().state !== 'online') return toQueue(h, { device: sent, kind: 'offline' })
+          const ok = await decided(async () => {
+            if (closed || h.gone) return false
+            reservations.push({ id: session, device: sent, at: clock.now() })
+            return true
+          })
+          if (!ok) return
+          if ((await send(h, sent, { skipSync: true })) !== 'turned') return
+        }
+      } else if (h.syncing) {
+        const cfg = nodes()
+        if (closed) return
+        if (!cfg) return nodesGone(h)
+        const dev = cfg.devices[h.syncing]
+        const link = o.links.link(h.syncing)
+        if (dev?.link && !dev.revoked && !dev.paused && !dev.drain && link?.state().state === 'connecting')
+          return toQueue(h, { device: h.syncing, kind: 'no-status' })
+        h.syncing = null
+      }
       for (;;) {
         const v = await decide(h)
+        if (closed) return
         if (!v && !h.gone) return nodesGone(h)
         if (!v || h.gone) {
           if (v && 'on' in v) release(h.l.sessionGiven ?? '')
@@ -591,8 +715,9 @@ export function createPlacer(o: PlacerOptions): Placer {
       }
     } catch (err) {
       o.log(`placer: ${h.l.name}: ${messageOf(err)}`)
+      h.syncing = null
       release(h.l.sessionGiven ?? '')
-      if (!h.gone) toQueue(h, undefined)
+      if (!h.gone && !closed) toQueue(h, undefined)
     } finally {
       h.busy = false
       if (JSON.stringify([h.l.state, h.l.step, h.l.place]) !== before) o.launches.changed()
@@ -749,8 +874,26 @@ export function createPlacer(o: PlacerOptions): Placer {
     l.startedAt = e.at
     l.state = 'queued'
     l.step = 'placing'
-    l.place = e.wait ? { wait: e.wait } : {}
-    held.set(l.id, { l, task: e.task, source: e.source, left: new Map(), busy: false, gone: false })
+    const sent = e.sent ?? null
+    const sentAt = sent ? (e.sentAt ?? e.at) : null
+    const syncing = sent ? null : (e.syncing ?? null)
+    const wait =
+      e.wait ??
+      (sent ? { device: sent, kind: 'offline' } : syncing ? { device: syncing, kind: 'no-status' } : undefined)
+    l.place = wait ? { wait } : {}
+    held.set(l.id, {
+      l,
+      task: e.task,
+      source: e.source,
+      left: new Map(),
+      busy: false,
+      gone: false,
+      sent,
+      sentAt,
+      syncing,
+      diskSent: sent,
+      diskSyncing: syncing,
+    })
     o.launches.adopt(l)
   }
 
@@ -802,6 +945,11 @@ export function createPlacer(o: PlacerOptions): Placer {
         left: new Map(),
         busy: true,
         gone: false,
+        sent: null,
+        sentAt: null,
+        syncing: null,
+        diskSent: null,
+        diskSyncing: null,
       }
       held.set(l.id, h)
       void (async () => {
