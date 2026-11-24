@@ -109,6 +109,8 @@ export const DOOR_ROUTES: readonly DoorRoute[] = [
   { method: 'POST', path: /^\/api\/node\/pilot-bridge\/stream\/[A-Za-z0-9_-]{8,64}$/, door: true },
   // Activate a newly staged relay dial key after claim rotation (#513).
   { method: 'POST', path: '/api/node/relay-key', door: true },
+  // Telegram message routing from the master (#701).
+  { method: 'POST', path: '/api/node/telegram', door: true },
   // Guided master handover (#697): preflight, backup/prepare, bundle, apply, verify, commit, rollback, re-pair.
   { method: 'GET', path: '/api/node/handover/check', door: true },
   { method: 'POST', path: '/api/node/handover/prepare', door: true },

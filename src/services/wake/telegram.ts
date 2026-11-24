@@ -11,19 +11,21 @@
 // the state it reports (off, polling the host, or the last poll's error).
 import type { HerdrSnapshot } from '../../adapters/herdr.ts'
 import { isRecord } from '../../adapters/json-store.ts'
+import { knobMs } from '../../adapters/pacing.ts'
 import type { WakeHerdr } from '../../adapters/wake-herdr.ts'
 import { AGY_AGENT } from '../../core/agy.ts'
 import { agyDraft } from '../../core/dialogs/agy-dialogs.ts'
 import { inputDraft } from '../../core/dialogs/input-box.ts'
 import { piDraft } from '../../core/dialogs/pi-dialogs.ts'
 import type { TelegramTarget } from '../../core/wake/config.ts'
-import { formatPrompt, type RouteItem, resolve } from '../../core/wake/route.ts'
+import { isRouteResult, MAX_ROUTE_ITEMS, type RouteResult, remoteMachineHint } from '../../core/wake/node-route.ts'
+import { formatPrompt, type RouteItem, type RouteTarget, resolve } from '../../core/wake/route.ts'
 import type { TelegramStatus } from '../../core/wake/status.ts'
 import type { WakeEngine } from './engine.ts'
 import { type Timing, type WakeOutcome, waitReady, withPane } from './pane-ops.ts'
 
 /** What tg-mcp is told about a topic's messages: delivered, skipped (left in its queue), or retried in `retry` seconds. */
-export type RouteResult = { ok: true; note?: string } | { skip: true; note: string } | { retry: number; note?: string }
+export type { RouteResult }
 
 export interface TelegramDeps {
   engine: WakeEngine
@@ -37,6 +39,10 @@ export interface TelegramDeps {
   log(text: string): void
   /** The router's state changed: off, polling, or its last poll failed. */
   onState?(state: TelegramStatus): void
+  /** Remote node delivery on a master (#701); returns null when no node owns the topic. */
+  remote?(items: RouteItem[], o?: { liveOnly?: boolean }): Promise<RouteResult | null>
+  /** Whether remote routing is active now (nodes configured); when false, local routing skips `remote`. */
+  hasRemote?(): boolean
   /** Tests: the HTTP client and the pause between failed polls. */
   fetch?(url: string, init: RequestInit): Promise<Response>
   sleep?(ms: number): Promise<void>
@@ -49,6 +55,11 @@ export interface Telegram {
   stop(): void
   /** Delivers one topic's messages (a poll's group, or --deliver's one): no request to tg-mcp. */
   route(items: RouteItem[]): Promise<RouteResult>
+  /** Delivers locally on this machine if a local target matches; returns `{ matched: false }` otherwise (#701). */
+  routeLocal(
+    items: RouteItem[],
+    o?: { liveOnly?: boolean },
+  ): Promise<{ matched: false } | { matched: true; result: RouteResult }>
 }
 
 const MIN_BACKOFF_MS = 1000
@@ -63,26 +74,29 @@ const RETRY_AFTER_ERROR_SEC = 30
 const NO_ROUTER = 'the server has no router endpoints (ROUTER=1 not set?)'
 
 // herdr-wake's notes to Telegram (router.mjs), word for word.
-const BLOCKED: RouteResult = { retry: 60, note: '⏳ Сессия ждёт решения в терминале. Доставлю, когда освободится.' }
-const TRUST: RouteResult = {
+export const BLOCKED: RouteResult = {
+  retry: 60,
+  note: '⏳ Сессия ждёт решения в терминале. Доставлю, когда освободится.',
+}
+export const TRUST: RouteResult = {
   retry: 60,
   note: '🔐 Сессия спрашивает, доверять ли папке проекта. Ответь в терминале, и я доставлю.',
 }
-const BUSY: RouteResult = {
+export const BUSY: RouteResult = {
   retry: 120,
   note: '⏳ Панель сессии занята другой программой. Доставлю, когда она освободится.',
 }
-const LATE: RouteResult = { retry: 60, note: '⏳ Сессия не успела запуститься, попробую ещё раз.' }
-const DIALOG: RouteResult = { retry: 30, note: '⏳ В сессии открыт диалог. Доставлю, когда закроется.' }
-const DRAFT: RouteResult = {
+export const LATE: RouteResult = { retry: 60, note: '⏳ Сессия не успела запуститься, попробую ещё раз.' }
+export const DIALOG: RouteResult = { retry: 30, note: '⏳ В сессии открыт диалог. Доставлю, когда закроется.' }
+export const DRAFT: RouteResult = {
   retry: 30,
   note: '✍️ В поле ввода сессии недописанный текст. Доставлю, когда оно освободится.',
 }
-const missing = (topic: string): RouteResult => ({
+export const missing = (topic: string): RouteResult => ({
   skip: true,
   note: `🤷 Не нашёл в herdr сессию для «${topic}». Сообщение ждёт в очереди: агент получит его, когда подключится.`,
 })
-const wokeNote = (title: string): string => `⏰ Разбудил сессию${title ? ` «${title}»` : ''}.`
+export const wokeNote = (title: string): string => `⏰ Разбудил сессию${title ? ` «${title}»` : ''}.`
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
@@ -94,7 +108,7 @@ export function groupByKey(items: readonly RouteItem[]): RouteItem[][] {
 }
 
 /** One message as tg-mcp hands it out, each field only when of its type (meta's numbers as text). */
-function asRouteItem(it: Record<string, unknown>): RouteItem {
+export function asRouteItem(it: Record<string, unknown>): RouteItem {
   const meta = isRecord(it.meta)
     ? Object.fromEntries(
         Object.entries(it.meta).flatMap(([k, v]) =>
@@ -123,7 +137,7 @@ function routeItems(body: unknown): RouteItem[] {
 }
 
 /** herdr's snapshot as resolve reads it: the tabs' labels and numbers, and the agents' order, only when of their type. */
-function routeSnapshot(snap: HerdrSnapshot): Parameters<typeof resolve>[1] {
+export function routeSnapshot(snap: HerdrSnapshot): Parameters<typeof resolve>[1] {
   const agents = Array.isArray(snap.agents) ? snap.agents : []
   return {
     workspaces: snap.workspaces,
@@ -151,6 +165,81 @@ function routeSnapshot(snap: HerdrSnapshot): Parameters<typeof resolve>[1] {
 interface Run {
   stopped: boolean
   abort: AbortController
+}
+
+/** Types the prompt into a running Claude, unless it waits for a decision, shows a dialog, or has text in its input box. */
+export async function deliverLive(herdr: WakeHerdr, pane: string, text: string, timing: Timing): Promise<RouteResult> {
+  const agent = await herdr.agent(pane)
+  if (!agent) throw new Error(`no agent runs in ${pane}`)
+  // A pi or agy session only ever gets here woken from its sleep (#178, #631): its own input box.
+  if (agent.kind === 'pi' || agent.kind === AGY_AGENT) {
+    if (agent.status === 'blocked') return BLOCKED
+    const draft = agent.kind === AGY_AGENT ? agyDraft(await herdr.inputBox(pane)) : piDraft(await herdr.screen(pane))
+    if (draft === null) return DIALOG
+    if (draft) return DRAFT
+    await herdr.prompt(pane, text)
+    return { ok: true }
+  }
+  if (agent.status === 'blocked') {
+    const state = await waitReady(herdr, pane, knobMs('BOARD_TG_BLOCKED_WAIT_MS', BLOCKED_WAIT_MS), timing)
+    if (state !== 'ready') return state === 'trust' ? TRUST : BLOCKED
+  }
+  const draft = inputDraft(await herdr.inputBox(pane))
+  if (draft === null) return DIALOG
+  if (draft) return DRAFT
+  await herdr.prompt(pane, text)
+  return { ok: true }
+}
+
+/** Why the pane's session did not wake, as Telegram is told; one wake cannot reach is left in tg-mcp's queue. */
+export function notWoken(
+  pane: string,
+  woke: Exclude<WakeOutcome, { ok: true }>,
+  topic: string,
+  log: (text: string) => void,
+): RouteResult {
+  switch (woke.why) {
+    case 'busy':
+      return BUSY
+    case 'timeout':
+      return LATE
+    case 'trust':
+      return TRUST
+    case 'blocked':
+      return BLOCKED
+    case 'line':
+      log(`cannot wake the session in ${pane}: ${woke.error}`)
+      return missing(topic)
+  }
+}
+
+/** Posts a topic batch to the master board's `/api/nodes/telegram`; 400/413 are terminal skips, 404/405 mean disabled. */
+export async function postMasterTelegram(
+  url: string,
+  items: RouteItem[],
+  opts: { liveOnly?: boolean } | undefined,
+  timeoutMs: number,
+  log: (line: string) => void,
+  fetchFn: (url: string, init?: RequestInit) => Promise<Response> = fetch,
+): Promise<RouteResult | null> {
+  const res = await fetchFn(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-board': '1' },
+    body: JSON.stringify({ items, ...(opts?.liveOnly && { liveOnly: true }) }),
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (res.status === 404 || res.status === 405) return null
+  if (res.status === 400 || res.status === 413) {
+    log(`telegram: master board rejected ${items.length} item(s) with HTTP ${res.status}; skipping batch`)
+    return {
+      skip: true,
+      note: '⚠️ Не удалось передать сообщение на ноду: некорректный или слишком большой запрос.',
+    }
+  }
+  if (!res.ok) throw new Error(`master board HTTP ${res.status}`)
+  const data: unknown = await res.json().catch(() => null)
+  if (isRecord(data) && data.matched === true && isRouteResult(data.result)) return data.result
+  return null
 }
 
 export function createTelegram(o: TelegramDeps): Telegram {
@@ -184,71 +273,78 @@ export function createTelegram(o: TelegramDeps): Telegram {
       else timer = setTimeout(done, ms)
     })
 
-  /** Types the prompt into a running Claude, unless it waits for a decision, shows a dialog, or has text in its input box. */
-  async function deliverLive(pane: string, text: string): Promise<RouteResult> {
-    const agent = await o.herdr.agent(pane)
-    if (!agent) throw new Error(`no agent runs in ${pane}`)
-    // A pi or agy session only ever gets here woken from its sleep (#178, #631): its own input box.
-    if (agent.kind === 'pi' || agent.kind === AGY_AGENT) {
-      if (agent.status === 'blocked') return BLOCKED
-      const draft =
-        agent.kind === AGY_AGENT ? agyDraft(await o.herdr.inputBox(pane)) : piDraft(await o.herdr.screen(pane))
-      if (draft === null) return DIALOG
-      if (draft) return DRAFT
-      await o.herdr.prompt(pane, text)
-      return { ok: true }
-    }
-    if (agent.status === 'blocked') {
-      const state = await waitReady(o.herdr, pane, BLOCKED_WAIT_MS, timing)
-      if (state !== 'ready') return state === 'trust' ? TRUST : BLOCKED
-    }
-    const draft = inputDraft(await o.herdr.inputBox(pane))
-    if (draft === null) return DIALOG
-    if (draft) return DRAFT
-    await o.herdr.prompt(pane, text)
-    return { ok: true }
+  function deliverTarget(
+    target: RouteTarget,
+    items: RouteItem[],
+    first: RouteItem,
+    topic: string,
+  ): Promise<RouteResult> {
+    return withPane(target.pane, async (): Promise<RouteResult> => {
+      // A sleeper whose pane wake closed wakes in a new tab (#204): the message goes there.
+      let pane = target.pane
+      if (target.session) {
+        const woke = await o.engine.wakePane(target.pane)
+        if (!woke.ok) return notWoken(target.pane, woke, topic, o.log)
+        pane = woke.pane ?? pane
+      }
+      const r = await withPane(pane, () => deliverLive(o.herdr, pane, formatPrompt(items), timing))
+      if (!('ok' in r)) return r
+      o.log(
+        `delivered ${items.length} message(s) for ${first.key} to ${pane}${target.session ? ' after waking it' : ''}`,
+      )
+      return target.session ? { ok: true, note: wokeNote(target.title) } : r
+    })
   }
 
-  /** Why the pane's session did not wake, as Telegram is told; one wake cannot reach is left in tg-mcp's queue. */
-  function notWoken(pane: string, woke: Exclude<WakeOutcome, { ok: true }>, topic: string): RouteResult {
-    switch (woke.why) {
-      case 'busy':
-        return BUSY
-      case 'timeout':
-        return LATE
-      case 'trust':
-        return TRUST
-      case 'blocked':
-        return BLOCKED
-      case 'line':
-        o.log(`cannot wake the session in ${pane}: ${woke.error}`)
-        return missing(topic)
-    }
+  function routeLocal(
+    items: RouteItem[],
+    opts?: { liveOnly?: boolean },
+  ): Promise<{ matched: false } | { matched: true; result: RouteResult }> {
+    const first = items[0]
+    if (!first) return Promise.resolve({ matched: true, result: { ok: true } })
+    return o.engine.deliver(async () => {
+      const { snap, sessions } = await o.engine.seen()
+      const target = resolve(first, routeSnapshot(snap), sessions, o.machine)
+      if (!target || (opts?.liveOnly && target.session)) return { matched: false }
+      const topic = first.topic ?? first.key
+      return { matched: true, result: await deliverTarget(target, items, first, topic) }
+    })
   }
 
   function route(items: RouteItem[]): Promise<RouteResult> {
     const first = items[0]
     if (!first) return Promise.resolve({ ok: true })
+    const topic = first.topic ?? first.key
+    const remoteFn = o.remote && (!o.hasRemote || o.hasRemote()) ? o.remote : null
+    if (!remoteFn) {
+      return o.engine.deliver(async () => {
+        const { snap, sessions } = await o.engine.seen()
+        const target = resolve(first, routeSnapshot(snap), sessions, o.machine)
+        if (!target) return missing(topic)
+        return deliverTarget(target, items, first, topic)
+      })
+    }
     return o.engine.deliver(async () => {
+      const remoteFirst = remoteMachineHint(first.pane, o.machine) !== null
+      if (remoteFirst) {
+        const r = await remoteFn(items)
+        if (r !== null) return r
+      }
       const { snap, sessions } = await o.engine.seen()
       const target = resolve(first, routeSnapshot(snap), sessions, o.machine)
-      const topic = first.topic ?? first.key
-      if (!target) return missing(topic)
-      return withPane(target.pane, async (): Promise<RouteResult> => {
-        // A sleeper whose pane wake closed wakes in a new tab (#204): the message goes there.
-        let pane = target.pane
-        if (target.session) {
-          const woke = await o.engine.wakePane(target.pane)
-          if (!woke.ok) return notWoken(target.pane, woke, topic)
-          pane = woke.pane ?? pane
+      if (target && !target.session) return deliverTarget(target, items, first, topic)
+      if (target?.session) {
+        if ((first.live_panes ?? []).some(h => remoteMachineHint(h, o.machine) !== null)) {
+          const liveRemote = await remoteFn(items, { liveOnly: true })
+          if (liveRemote !== null) return liveRemote
         }
-        const r = await withPane(pane, () => deliverLive(pane, formatPrompt(items)))
-        if (!('ok' in r)) return r
-        o.log(
-          `delivered ${items.length} message(s) for ${first.key} to ${pane}${target.session ? ' after waking it' : ''}`,
-        )
-        return target.session ? { ok: true, note: wokeNote(target.title) } : r
-      })
+        return deliverTarget(target, items, first, topic)
+      }
+      if (!remoteFirst) {
+        const r = await remoteFn(items)
+        if (r !== null) return r
+      }
+      return missing(topic)
     })
   }
 
@@ -268,31 +364,55 @@ export function createTelegram(o: TelegramDeps): Telegram {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
   }
 
+  async function ackGroupItems(
+    t: TelegramTarget,
+    chunk: RouteItem[],
+    r: RouteResult,
+    key: string,
+  ): Promise<'delivered' | 'skipped' | 'retry'> {
+    const outcome = 'ok' in r ? 'delivered' : 'skip' in r ? 'skipped' : 'retry'
+    if (outcome !== 'delivered') o.log(`${outcome} ${chunk.length} message(s) for ${key}${r.note ? `: ${r.note}` : ''}`)
+    const retrySec = 'retry' in r ? r.retry : undefined
+    for (const [i, it] of chunk.entries()) {
+      let note = i === 0 ? r.note : undefined
+      if (outcome === 'retry' && note) {
+        const said = notified.get(it.id) ?? new Set<string>()
+        if (said.has(note)) note = undefined
+        else said.add(note)
+        notified.set(it.id, said)
+      }
+      if (outcome !== 'retry') notified.delete(it.id)
+      await ack(t, it.id, outcome, note, retrySec).catch(err => o.log(`ack ${it.id} failed: ${messageOf(err)}`))
+    }
+    return outcome
+  }
+
   /** Routes a topic's messages and acks each to the tg-mcp that handed them out; under way until the last ack. */
   function handleGroup(items: RouteItem[], t: TelegramTarget): Promise<void> {
     const key = items[0]?.key ?? ''
     return o.engine.deliver(async () => {
-      let r: RouteResult
-      try {
-        r = await route(items)
-      } catch (err) {
-        o.log(`routing ${key} failed: ${messageOf(err)}`)
-        r = { retry: RETRY_AFTER_ERROR_SEC }
-      }
-      const outcome = 'ok' in r ? 'delivered' : 'skip' in r ? 'skipped' : 'retry'
-      if (outcome !== 'delivered')
-        o.log(`${outcome} ${items.length} message(s) for ${key}${r.note ? `: ${r.note}` : ''}`)
-      const retrySec = 'retry' in r ? r.retry : undefined
-      for (const [i, it] of items.entries()) {
-        let note = i === 0 ? r.note : undefined
-        if (outcome === 'retry' && note) {
-          const said = notified.get(it.id) ?? new Set<string>()
-          if (said.has(note)) note = undefined
-          else said.add(note)
-          notified.set(it.id, said)
+      const remoteActive = Boolean(o.remote && (!o.hasRemote || o.hasRemote()))
+      const chunks =
+        remoteActive && items.length > MAX_ROUTE_ITEMS
+          ? Array.from({ length: Math.ceil(items.length / MAX_ROUTE_ITEMS) }, (_, i) =>
+              items.slice(i * MAX_ROUTE_ITEMS, (i + 1) * MAX_ROUTE_ITEMS),
+            )
+          : [items]
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunk = chunks[idx] ?? []
+        let r: RouteResult
+        try {
+          r = await route(chunk)
+        } catch (err) {
+          o.log(`routing ${key} failed: ${messageOf(err)}`)
+          r = { retry: RETRY_AFTER_ERROR_SEC }
         }
-        if (outcome !== 'retry') notified.delete(it.id)
-        await ack(t, it.id, outcome, note, retrySec).catch(err => o.log(`ack ${it.id} failed: ${messageOf(err)}`))
+        const outcome = await ackGroupItems(t, chunk, r, key)
+        if (outcome !== 'delivered' && idx + 1 < chunks.length) {
+          const rest = items.slice((idx + 1) * MAX_ROUTE_ITEMS)
+          await ackGroupItems(t, rest, r, key)
+          return
+        }
       }
     })
   }
@@ -358,5 +478,5 @@ export function createTelegram(o: TelegramDeps): Telegram {
     report({ state: 'off' })
   }
 
-  return { start, stop, route }
+  return { start, stop, route, routeLocal }
 }

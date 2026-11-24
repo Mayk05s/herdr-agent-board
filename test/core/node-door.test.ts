@@ -112,6 +112,7 @@ describe('the door takes what 6.2 lists', () => {
       ['POST', String(/^\/api\/node\/pilot-bridge\/res\/[A-Za-z0-9_-]{8,64}$/)],
       ['POST', String(/^\/api\/node\/pilot-bridge\/stream\/[A-Za-z0-9_-]{8,64}$/)],
       ['POST', '/api/node/relay-key'],
+      ['POST', '/api/node/telegram'],
       ['GET', '/api/node/handover/check'],
       ['POST', '/api/node/handover/prepare'],
       ['PUT', '/api/node/handover/bundle'],
