@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -498,6 +499,11 @@ interface BackupManifest {
   hadConfig: boolean
   files: BackupManifestEntry[]
   appliedFiles: string[]
+  /**
+   * Live files a demoted old master moved under `retired/` at commit (#777), relative to the state
+   * folder; moved back by an old-master rollback. Absent on a backup no commit retired anything from.
+   */
+  retired?: string[]
 }
 
 const isBackupManifest = (v: unknown): v is BackupManifest =>
@@ -507,7 +513,8 @@ const isBackupManifest = (v: unknown): v is BackupManifest =>
   typeof v.at === 'number' &&
   typeof v.hadConfig === 'boolean' &&
   Array.isArray(v.files) &&
-  Array.isArray(v.appliedFiles)
+  Array.isArray(v.appliedFiles) &&
+  (v.retired === undefined || (Array.isArray(v.retired) && v.retired.every(r => typeof r === 'string')))
 
 function pruneHandoverBackups(): void {
   const dir = handoverBackupsDir()
@@ -525,7 +532,12 @@ function pruneHandoverBackups(): void {
       })
       .filter((x): x is { p: string; at: number } => x !== null)
       .sort((a, b) => b.at - a.at)
-    for (const old of dirs.slice(HANDOVER_BACKUPS_KEPT)) rmSync(old.p, { recursive: true, force: true })
+    // A backup still holding what a commit moved aside (#777) is the only way back to that state:
+    // kept until a rollback takes its files back.
+    for (const old of dirs.slice(HANDOVER_BACKUPS_KEPT)) {
+      if (listFilesRecursive(join(old.p, 'retired'), '').length) continue
+      rmSync(old.p, { recursive: true, force: true })
+    }
   } catch {}
 }
 
@@ -715,10 +727,11 @@ const isOldMasterRetiredRel = (rel: string): boolean =>
 
 /**
  * Removes live shipped schedule, watch, calendar-reminder, and owner-watch files from a newly
- * demoted old master after the new master commits, preventing duplicate scheduler runs.
- * Backup copies remain in `handover/backups/<id>/` for rollback.
+ * demoted old master after the new master commits, preventing duplicate scheduler runs, then moves
+ * the rest of the shipped state aside (moveShippedOldMasterState). Backup copies remain in
+ * `handover/backups/<id>/` for rollback. Returns how many files it removed.
  */
-export function retireShippedOldMasterState(id: string): number {
+export function retireShippedOldMasterState(id: string, log?: (line: string) => void): number {
   const dir = handoverBackupDir(id)
   const manifest = readJson(join(dir, 'backup-manifest.json'), isBackupManifest)
   if (!manifest) throw new Error(`handover backup ${id} not found or unreadable`)
@@ -744,17 +757,170 @@ export function retireShippedOldMasterState(id: string): number {
   rmFile(remindersFile())
   rmFile(ownerWatchFile())
   forgetOwnerWatch()
+
+  moveShippedOldMasterState(id, log)
   return removed
+}
+
+/** Whether the commit's move of the shipped state (moveShippedOldMasterState) ran for this backup. */
+export function shippedStateMoved(id: string): boolean {
+  const manifest = readJson(join(handoverBackupDir(id), 'backup-manifest.json'), isBackupManifest)
+  return manifest?.retired !== undefined
+}
+
+/**
+ * What the new master took over and this board, a node now, no longer runs (#777): moved under the
+ * backup's retired/ folder, not deleted, so a rollback puts the very same files back. Run by the
+ * commit, and once at boot by a node demoted before it existed. Best effort, file by file: a file
+ * that will not move (locked, no room) is named in the log and stays live, and the rest go on, so a
+ * finalization never stops halfway on it. A second run (a finalization retried after a crash) keeps
+ * the copy the first one moved. Returns how many files moved.
+ */
+export function moveShippedOldMasterState(id: string, log: (line: string) => void = () => {}): number {
+  const dir = handoverBackupDir(id)
+  const manifestFile = join(dir, 'backup-manifest.json')
+  const manifest = readJson(manifestFile, isBackupManifest)
+  if (!manifest) throw new Error(`handover backup ${id} not found or unreadable`)
+  const save = (retired: string[]): void =>
+    replaceFile(manifestFile, `${JSON.stringify({ ...manifest, retired }, null, 2)}\n`, undefined, PRIVATE_MODE)
+  // The manifest names them before the first move: a crash halfway leaves every moved file findable
+  // (a rollback skips a name whose copy is not there).
+  const retiredRoot = join(dir, 'retired')
+  const known = manifest.retired ?? []
+  const moves = retirableOldMasterFiles().filter(
+    f => isSafeHandoverRelPath(f.rel) && !existsSync(join(retiredRoot, ...f.rel.split('/'))),
+  )
+  const planned = [...new Set([...known, ...moves.map(f => f.rel)])]
+  if (manifest.retired === undefined || planned.length !== known.length) save(planned)
+  const failed = new Set<string>()
+  let moved = 0
+  for (const f of moves) {
+    const dest = join(retiredRoot, ...f.rel.split('/'))
+    try {
+      mkdirSync(dirname(dest), { recursive: true, mode: PRIVATE_DIR_MODE })
+      moveFile(f.abs, dest)
+      moved++
+    } catch (err) {
+      failed.add(f.rel)
+      log(`handover ${id}: ${f.rel} stays in place: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  if (failed.size) save(planned.filter(rel => !failed.has(rel)))
+  return moved
+}
+
+const SQLITE_SIDECARS = ['-wal', '-shm', '-journal'] as const
+
+/**
+ * The live master-owned state a handover ships to the new master (collectMasterState) that a demoted
+ * old master keeps no use for: the databases with their sidecars, the access and Team stores, thread
+ * and Team files, the calendar, the tunnel's own key and known hosts, and the backup's folder.
+ * Schedule, watches and reminders are removed outright above (their copies are in the backup).
+ */
+function retirableOldMasterFiles(): { rel: string; abs: string }[] {
+  const out: { rel: string; abs: string }[] = []
+  const one = (rel: string, abs: string): void => {
+    if (existsSync(abs)) out.push({ rel, abs })
+  }
+  for (const [rel, abs] of [
+    ['board.db', dbFile()],
+    ['journal.db', journalFile()],
+  ] as const) {
+    one(rel, abs)
+    for (const end of SQLITE_SIDECARS) one(`${rel}${end}`, `${abs}${end}`)
+  }
+  one('access.json', accessFile())
+  one('access-passkeys.json', passkeysFile())
+  one('access-logins.json', loginsFile())
+  one('access-attempts.json', attemptsFile())
+  for (const [rel, abs] of [
+    ['team-key.json', teamKeyFile()],
+    ['team-box.json', teamBoxFile()],
+    ['team-passkeys.json', teamPasskeysFile()],
+    ['team-inbox.json', teamInboxFile()],
+    ['team-outbox.json', teamOutboxFile()],
+    ['team-pins.json', teamPinsFile()],
+    ['team-audit.jsonl', teamAuditFile()],
+    ['team-drafts.json', teamDraftsFile()],
+    ['team-threads.json', teamThreadsFile()],
+    ['team-agents.json', teamAgentsFile()],
+    ['team-blobs.json', teamBlobsFile()],
+    ['team-reads.json', teamReadsFile()],
+  ] as const)
+    one(rel, abs)
+  for (const [prefix, absDir] of [
+    ['thread-files', threadFilesDir()],
+    ['team-files', teamFilesDir()],
+    ['calendar', calendarDir()],
+    ['backup', backupDir()],
+  ] as const) {
+    for (const f of listFilesRecursive(absDir, prefix)) out.push({ rel: f.rel, abs: f.abs })
+  }
+  // The tunnel's generated key and known hosts only: a custom key lives outside the state folder,
+  // and the ssh pid file belongs to a process, not to the master.
+  one('tunnel/id_ed25519', generatedKey())
+  one('tunnel/id_ed25519.pub', `${generatedKey()}.pub`)
+  one('tunnel/known_hosts', knownHostsFile())
+  return out
+}
+
+/** A rename, or a copy and a delete across file systems. */
+function moveFile(from: string, to: string): void {
+  try {
+    renameSync(from, to)
+  } catch (err) {
+    if ((err as { code?: string }).code !== 'EXDEV') throw err
+    copyFileSync(from, to)
+    rmSync(from, { force: true })
+  }
+}
+
+/**
+ * Puts back what retireShippedOldMasterState moved under retired/ (#777), over whatever a node made
+ * in its place meanwhile; a database's live sidecars go first, so a stale WAL never meets the file
+ * that comes back. Callers close cached SQLite connections first (`beforeDbReplace`).
+ */
+function restoreRetired(dir: string, manifest: BackupManifest): number {
+  const list = manifest.retired ?? []
+  if (!list.length) return 0
+  const retiredRoot = join(dir, 'retired')
+  let restored = 0
+  for (const [rel, abs] of [
+    ['board.db', dbFile()],
+    ['journal.db', journalFile()],
+  ] as const) {
+    if (!list.includes(rel) || !existsSync(join(retiredRoot, rel))) continue
+    for (const end of SQLITE_SIDECARS) rmSync(`${abs}${end}`, { force: true })
+  }
+  for (const rel of list) {
+    if (!isSafeHandoverRelPath(rel)) continue
+    const src = join(retiredRoot, ...rel.split('/'))
+    if (!existsSync(src)) continue
+    const dest = join(stateDir(), ...rel.split('/'))
+    mkdirSync(dirname(dest), { recursive: true })
+    rmSync(dest, { force: true })
+    moveFile(src, dest)
+    restored++
+  }
+  replaceFile(
+    join(dir, 'backup-manifest.json'),
+    `${JSON.stringify({ ...manifest, retired: [] }, null, 2)}\n`,
+    undefined,
+    PRIVATE_MODE,
+  )
+  return restored
 }
 
 /**
  * Restores `config.json` and backed-up state from `handover/backups/<id>/`.
- * Callers must close cached SQLite connections (`beforeDbReplace`) before calling `'all'` scope.
+ * Callers must close cached SQLite connections (`beforeDbReplace`) before calling `'all'` or
+ * `'old-master-committed'` scope.
  * - `'all'` (default, target/new-master): full restore of all backed-up state and removal of appliedFiles.
  * - `'old-master-precommit'`: restores only `config.json` and `node/*` (clears stale `node/*` added
  *   during handover, preserving any live `board.db`/`journal.db`/`access*` on old master).
  * - `'old-master-committed'`: restores `config.json`, `node/*`, and retired schedule/watch/reminder
- *   files while still preserving live `board.db`/`journal.db`/`access*`.
+ *   files, and moves back the live state the commit moved under `retired/` (`board.db`,
+ *   `journal.db`, `access*`, Team, calendar, tunnel and backup files, #777).
  */
 export async function restoreLocalBackup(
   id: string,
@@ -849,6 +1015,9 @@ export async function restoreLocalBackup(
     }
     restored++
   }
+
+  // An old master's rollback: what the commit moved aside comes back (#777).
+  if (scope !== 'all') restored += restoreRetired(dir, manifest)
 
   if (!manifest.hadConfig && existsSync(configFile())) {
     rmSync(configFile(), { force: true })

@@ -56,6 +56,15 @@ function render(props: Partial<BackupBodyProps>) {
   return { all: text(nodes), button, inputs }
 }
 
+test('on a node: the master backs up, nothing to set or send here (#777)', () => {
+  const r = render({
+    view: { ...VIEW, onNode: 'The board is backed up on atlas: Settings → Backup there.' },
+  })
+  expect(r.all).toBe('The board is backed up on atlas: Settings → Backup there.')
+  expect(r.button('Back up now')).toBeUndefined()
+  expect(r.inputs).toEqual([])
+})
+
 test('while the view is asked, and when it could not be read', () => {
   expect(render({}).all).toContain('Reading the backup’s state…')
   const failed = render({ loadError: 'status 500' })
