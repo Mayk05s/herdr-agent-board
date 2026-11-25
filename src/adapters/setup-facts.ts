@@ -4,7 +4,7 @@
 // the board would start MokuPilot (core/mokupilot.ts).
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, posix, resolve, win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { cardStore } from '../core/card-store.ts'
 import { DEFAULT_CONFIG } from '../core/categories.ts'
 import { shimTarget } from '../core/install-plan.ts'
@@ -41,9 +41,18 @@ type Env = Record<string, string | undefined>
 /** How long a probe waits for an answer by default. */
 const PROBE_MS = 1500
 
+/** Node's path rules for `platform`: what gatherFacts joins for the platform passed in (#483). */
+const pathOf = (platform: string) => (platform === 'win32' ? win32 : posix)
+
 /** herdr's config.toml: under %APPDATA% on Windows, ~/.config elsewhere (as the plugin config). */
-export const herdrConfigFile = (env: Env = process.env, home = homedir()): string =>
-  join(env.APPDATA || join(home, '.config'), 'herdr', 'config.toml')
+export const herdrConfigFile = (
+  env: Env = process.env,
+  home = homedir(),
+  platform: string = process.platform,
+): string => {
+  const path = pathOf(platform)
+  return path.join(env.APPDATA || path.join(home, '.config'), 'herdr', 'config.toml')
+}
 
 /** A text file as a string (a BOM taken off, as Windows PowerShell writes one), or null. */
 export function readText(file: string): string | null {
@@ -146,7 +155,12 @@ async function probe(
 /** The program a launcher runs, found the way the board would: a path as it is, else on PATH. */
 function program(name: string, env: Env, platform: string): ProgramFound | null {
   if (!name) return null
-  if (isAbsolute(name) || /[\\/]/.test(name)) return { file: resolve(name), found: existsSync(resolve(name)) }
+  const path = pathOf(platform)
+  if (path.isAbsolute(name) || /[\\/]/.test(name)) {
+    const file = path.resolve(name)
+    // Looked for on this disk: for another platform's path (a test) found says nothing.
+    return { file, found: existsSync(file) }
+  }
   const f = findCommand(name, { env, platform })
   const found = f.ps ?? f.sh
   return { file: found?.file ?? name, found: !!found }
@@ -325,7 +339,10 @@ export async function gatherFacts(
 ): Promise<SetupFacts> {
   const shown =
     given ??
-    shownProfiles(mergeProfiles(cfg?.profiles, findProfileDirs(home), home, inheritedProfileDir(env, home)).list)
+    shownProfiles(
+      mergeProfiles(cfg?.profiles, findProfileDirs(home), home, inheritedProfileDir(env, home, platform), platform)
+        .list,
+    )
   // The board's own copy of the agents' skill, which each profile's is compared with.
   const source = readText(boardFiles(root).skill)
   const settingsIn = (
@@ -349,8 +366,8 @@ export async function gatherFacts(
   }))
   // The first one's at the top, where the checks with one profile and the notification check read
   // it (none shown, in a hand-edited config.json: ~/.claude's, as before).
-  const first = profiles[0] ?? settingsIn(defaultProfileDir(home))
-  const configFile = herdrConfigFile(env, home)
+  const first = profiles[0] ?? settingsIn(defaultProfileDir(home, platform))
+  const configFile = herdrConfigFile(env, home, platform)
   const wakeUrl = typeof cfg?.wakeUrl === 'string' && cfg.wakeUrl ? cfg.wakeUrl : null
   const wakeNew = await wakeFacts(cfg, probeMs)
   let storage: SetupFacts['cardStore']
@@ -364,7 +381,7 @@ export async function gatherFacts(
     root,
     cardStore: storage,
     node: process.versions.node ?? '',
-    binDir: join(home, '.local', 'bin'),
+    binDir: pathOf(platform).join(home, '.local', 'bin'),
     path: String(env.PATH ?? env.Path ?? ''),
     files: boardFiles(root, platform as NodeJS.Platform),
     commands: {

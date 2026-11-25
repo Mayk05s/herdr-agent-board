@@ -80,3 +80,62 @@ export function createBroadcaster(
     },
   }
 }
+
+/** A replay stream only reads a page when the client is ready for it. */
+export function replayResponse<T extends { id: number; type: string }>(
+  req: Request,
+  since: number,
+  read: (cursor: number) => readonly T[],
+  listen: (changed: () => void) => () => void,
+): Response {
+  const encoder = new TextEncoder()
+  let cursor = since
+  let wake: (() => void) | undefined
+  let ended = false
+  const unlisten = listen(() => wake?.())
+  const close = () => {
+    ended = true
+    req.signal.removeEventListener('abort', close)
+    unlisten()
+    wake?.()
+  }
+  req.signal.addEventListener('abort', close, { once: true })
+  if (req.signal.aborted) close()
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(': connected\n\n'))
+    },
+    async pull(controller) {
+      try {
+        while (!ended) {
+          const rows = read(cursor)
+          const last = rows.at(-1)
+          if (last) {
+            cursor = last.id
+            controller.enqueue(encoder.encode(rows.map(row => `id: ${row.id}\n${namedEvent(row.type, row)}`).join('')))
+            return
+          }
+          const pinged = await new Promise<boolean>(resolve => {
+            const timer = setTimeout(() => resolve(true), 15_000)
+            timer.unref()
+            wake = () => {
+              clearTimeout(timer)
+              resolve(false)
+            }
+          })
+          wake = undefined
+          if (pinged && !ended) {
+            controller.enqueue(encoder.encode(': ping\n\n'))
+            return
+          }
+        }
+        controller.close()
+      } catch (error) {
+        close()
+        if (!req.signal.aborted) controller.error(error)
+      }
+    },
+    cancel: close,
+  })
+  return new Response(stream, { headers: { ...HEADERS, 'x-accel-buffering': 'no' } })
+}

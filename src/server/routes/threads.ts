@@ -10,19 +10,18 @@
 //   POST /api/threads/<key or id> {op: 'share', to, history?} | 'unshare' | 'decline-share'
 //                                 | 'take' | 'decline' (an offer) | 'history'
 //   POST /api/threads {op: 'track', topic, lane}               a Team topic as a thread (13.3)
-//   POST /api/threads-settings {mode?, share?}                 Settings → Threads (#410), also while off
+//   POST /api/threads-settings {mode?, share?, cases?, verify?}  Settings → Threads (#410, #596), also while off
 //   GET  /api/threads/events                                               SSE: `rev` on each change
 //
 // A write over HTTP is the owner's: the party comes from the path, never from the body (3.2). A
 // POST carries X-Board: 1. With threads off every route but the setting answers 409 and reads nothing. Away from
 // the computer only the owner's own logins reach them (core/remote.ts ownerThreads); the setting
 // stays on the computer (localOnly), as it writes into the Claude profiles there.
-import { existsSync } from 'node:fs'
-import { resolve, sep } from 'node:path'
-import { editThreads } from '../../adapters/config-file.ts'
+import { resolve } from 'node:path'
+import { editThreads, readThreadsSettings } from '../../adapters/config-file.ts'
 import type { BoardDb } from '../../adapters/db.ts'
 import { isRecord } from '../../adapters/json-store.ts'
-import { uploadsDir } from '../../adapters/paths.ts'
+import { uploadsCheck } from '../../adapters/own-files.ts'
 import {
   childrenOf,
   entriesOf,
@@ -34,15 +33,19 @@ import {
   watchesOf,
 } from '../../adapters/work-thread-store.ts'
 import { t } from '../../core/lang.ts'
+import { OWNER as OWNER_WATCH } from '../../core/owner-watch.ts'
 import { type OwnerAction, unlocks } from '../../core/team-confirm.ts'
 import type { Config } from '../../core/types.ts'
+import { caseSessions, caseSessionViews, isCase, type SessionLive } from '../../core/work-cases.ts'
 import {
+  afterN,
   isOpen,
   isThreadStatus,
   MINE,
   OWNER,
   type Party,
   sharedOf,
+  sharingOf,
   THREAD_KEY,
   type ThreadEntry,
   type ThreadEntryView,
@@ -100,6 +103,20 @@ export function threadOpenState(now: () => number = Date.now): ThreadOpenState {
   }
 }
 
+/**
+ * Why an owner's action that goes out may not go now (428 with its confirmation), or null (#224).
+ * Decisions' answer on a shared thread (#487) goes through it too.
+ */
+export function confirmGate(c: ThreadsApp['confirm'], req: Request, action: OwnerAction): Response | null {
+  if (!c?.required()) return null
+  if (unlocks(action) && c.unlocked(req.headers.get('x-board-unlock'))) return null
+  if (!c.safe()) return json(503, { ok: false, error: 'loopback' })
+  // From away (#377), as routes/team.ts held(): it waits for the owner at the computer.
+  const away = c.away(req.url)
+  const id = c.pend(action, away)
+  return json(428, { ok: false, error: 'confirm', id, confirm: c.urlOf(id), ...(away && { where: 'computer' }) })
+}
+
 /** What the routes take of the board. */
 export interface ThreadsApp {
   cfg: Pick<Config, 'threads'>
@@ -111,7 +128,7 @@ export interface ThreadsApp {
    */
   tell(session: string, text: string): Promise<{ ok: true } | { ok: false; error: string }>
   /** Clears the question on the session's card, as its next prompt would, while it is still `question`. */
-  clearAsk(session: string, question: string): void | Promise<void>
+  clearAsk(session: string, question: string, answer?: string): void | Promise<void>
   /** The tests' schedule, state folder and clock. */
   schedule?: EventSchedule
   state?: string
@@ -121,7 +138,9 @@ export interface ThreadsApp {
   /** Settings turned threads on (#410): their skill into the shown profiles, as the install action puts it. */
   skill?(): void
   /** The owner's passkey (#224): what sends as the owner waits for it while it is on. */
-  confirm?: Pick<TeamConfirm, 'required' | 'unlocked' | 'safe' | 'pend' | 'urlOf'>
+  confirm?: Pick<TeamConfirm, 'required' | 'unlocked' | 'safe' | 'pend' | 'urlOf' | 'away'>
+  /** Case files (#488): where these sessions are now, from the board's own items and the archive. */
+  caseLive?(keys: readonly string[]): Map<string, SessionLive>
 }
 
 /** The revision's own stream: made on its first client, so a board with threads off keeps no timer for it. */
@@ -241,7 +260,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
       if (mine) {
         const watched = watchesOf(db, mine)
           .map(w => w.target)
-          .filter(target => target !== MINE && !target.startsWith('lane:'))
+          .filter(target => target !== MINE && target !== OWNER_WATCH && !target.startsWith('lane:'))
         ids = [...new Set([...mineIds(db, mine), ...watched])]
       }
       if (since !== undefined) {
@@ -278,7 +297,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
       const all = entriesOf(db, head.id)
       const entries =
         since !== undefined
-          ? all.filter(e => e.n > since)
+          ? all.filter(e => afterN(e, since, sharingOf(head) !== null))
           : full
             ? all
             : all.slice(-Math.min(last ?? ENTRIES_DEFAULT, ENTRIES_DEFAULT))
@@ -289,9 +308,21 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
         entries: entries.map(e => entryView(e, app.state)),
         earlier: all.length - entries.length,
         ask: openAsk(head, all)?.id ?? null,
+        // Case files (#488): one rule with `show`, sessions only for a thread that is a case.
+        ...(threadsConfig(app.cfg.threads)?.cases && isCase(head) && { case: caseView(head, all) }),
       }
       return json(200, { ok: true, rev: threadsRev(db), ...view })
     })
+  }
+
+  /** Case files (#488): the thread's sessions from its feed, with where the board sees them now. */
+  function caseView(head: ThreadHead, all: readonly ThreadEntry[]): NonNullable<ThreadView['case']> {
+    const sessions = caseSessions(head, all)
+    let live: Map<string, SessionLive> | undefined
+    try {
+      live = sessions.length ? app.caseLive?.(sessions.map(s => s.key)) : undefined
+    } catch {}
+    return { sessions: caseSessionViews(sessions, live) }
   }
 
   /** A thread a body names as a parent, or none. */
@@ -316,15 +347,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
     return { kind: 'session', key: v.key, name: typeof v.name === 'string' ? v.name.slice(0, 80) : v.key.slice(0, 8) }
   }
 
-  /** Why an owner's action that goes out may not go now (428 with its confirmation), or null (#224). */
-  function gate(req: Request, action: OwnerAction): Response | null {
-    const c = app.confirm
-    if (!c?.required()) return null
-    if (unlocks(action) && c.unlocked(req.headers.get('x-board-unlock'))) return null
-    if (!c.safe()) return json(503, { ok: false, error: 'loopback' })
-    const id = c.pend(action)
-    return json(428, { ok: false, error: 'confirm', id, confirm: c.urlOf(id) })
-  }
+  const gate = (req: Request, action: OwnerAction): Response | null => confirmGate(app.confirm, req, action)
 
   const unlockedBy = (req: Request): boolean =>
     !app.confirm?.required() || app.confirm.unlocked(req.headers.get('x-board-unlock'))
@@ -402,11 +425,12 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
       app.changed()
       return json(r.status, r.body)
     }
-    // Only what the page uploaded: a path inside the board's uploads, resolved, that is there.
-    const root = resolve(uploadsDir()) + sep
-    const files = strings(body.files, 5).map(p => resolve(p))
-    const outside = files.find(p => !p.startsWith(root) || !existsSync(p))
-    if (outside !== undefined) return json(400, { ok: false, error: t('thread.err.file'), code: 'file' })
+    // Only what the page uploaded: a file in the board's uploads by real paths, so a link or a
+    // junction out of them is refused (#457).
+    const raw = strings(body.files, 5)
+    if (raw.length && !raw.every(uploadsCheck()))
+      return json(400, { ok: false, error: t('thread.err.file'), code: 'file' })
+    const files = raw.map(p => resolve(p))
     const done = withDb(true, db => {
       if (!db) throw new ThreadError('no_db', t('thread.err.noDb'))
       const ctx = ctxOf(db)
@@ -437,6 +461,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
               ...(body.private === true && { private: true }),
               links: strings(body.links, 5),
               files,
+              directOwner: true,
             }),
           }
         }
@@ -477,7 +502,7 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
         error: err instanceof Error ? err.message : String(err),
       }))
       // Its card's question goes once it has the answer; one it did not get stays on show.
-      if (told.ok) await app.clearAsk(asker, answered.question)
+      if (told.ok) await app.clearAsk(asker, answered.question, answered.text)
       out.told = told.ok
       if (!told.ok) out.why = told.error
     }
@@ -491,8 +516,10 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
   }
 
   /**
-   * Settings → Threads (#410), { mode?, share? }: config.json's `threads` under its lock; turned on,
-   * the skill goes where the install action puts it. The running board follows the file (liveConfig).
+   * Settings → Threads (#410), { mode?, share?, cases?, verify? } (case files and verified done,
+   * #596): config.json's `threads` under its lock; turned on, the skill goes where the install action
+   * puts it. The running board follows the file (liveConfig). The change is made once config.json is
+   * written: a skill that could not be copied after it is said in `note`, the answer still ok.
    */
   function settings(body: Record<string, unknown>): Response {
     const r = editThreads(body)
@@ -501,9 +528,9 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
       try {
         app.skill()
       } catch (err) {
-        return json(500, {
-          ok: false,
-          error: t('thread.err.skill', { error: err instanceof Error ? err.message : String(err) }),
+        return json(200, {
+          ok: true,
+          note: t('thread.err.skill', { error: err instanceof Error ? err.message : String(err) }),
         })
       }
     }
@@ -511,6 +538,11 @@ export function threadsRoutes(app: ThreadsApp, revs: RevStream): Route[] {
   }
 
   return [
+    {
+      method: 'GET',
+      path: '/api/threads-settings',
+      handle: () => json(200, readThreadsSettings(app.cfg.threads)),
+    },
     {
       // Taken while threads are off too, as Tasks' setting is.
       method: 'POST',

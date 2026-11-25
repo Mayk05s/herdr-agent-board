@@ -19,7 +19,10 @@ import { BackupPanel, type BackupPanelProps } from './backup/BackupPanel.tsx'
 import { CalendarPanel, type CalendarPanelProps } from './calendar/CalendarPanel.tsx'
 import { CalendarSettingsPanel, type CalendarSettingsPanelProps } from './calendar/CalendarSettingsPanel.tsx'
 import { CategoriesPanel, type CategoriesPanelProps } from './categories/CategoriesPanel.tsx'
+import { DecisionsPanel, type DecisionsPanelProps } from './decisions/DecisionsPanel.tsx'
+import { DevicesPanel, type DevicesPanelProps } from './devices/DevicesPanel.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
+import { HousekeepingPanel, type HousekeepingPanelProps } from './housekeeping/HousekeepingPanel.tsx'
 import { MokupilotPanel, type MokupilotPanelProps } from './mokupilot/MokupilotPanel.tsx'
 import { LocalPathsPanel, type LocalPathsPanelProps } from './phones/LocalPathsPanel.tsx'
 import { PhonesPanel, type PhonesPanelProps } from './phones/PhonesPanel.tsx'
@@ -27,12 +30,15 @@ import { ProfilesPanel, type ProfilesPanelProps } from './profiles/ProfilesPanel
 import { SchedulePanel, type SchedulePanelProps } from './schedule/SchedulePanel.tsx'
 import { SecretsPanel, type SecretsPanelProps } from './secrets/SecretsPanel.tsx'
 import { ServerPanel, type ServerPanelProps } from './server/ServerPanel.tsx'
+import { SettingsPanel, type SettingsPanelProps } from './settings/SettingsPanel.tsx'
 import { Sheet, type SheetSlots } from './sheet/Sheet.tsx'
+import { SpendPanel, type SpendPanelProps } from './spend/SpendPanel.tsx'
 import { TeamPanel, type TeamPanelProps } from './team/TeamPanel.tsx'
 import { ThreadsPanel, type ThreadsPanelProps } from './threads/ThreadsPanel.tsx'
 import { TimePanel, type TimePanelProps } from './time/TimePanel.tsx'
 import { TimeSettingsPanel, type TimeSettingsPanelProps } from './time/TimeSettingsPanel.tsx'
 import { TodosPanel, type TodosPanelProps } from './todos/TodosPanel.tsx'
+import { UpdatesPanel, type UpdatesPanelProps } from './updates/UpdatesPanel.tsx'
 import { WakePanel, type WakePanelProps } from './wake/WakePanel.tsx'
 
 export interface SidePanelsProps {
@@ -60,10 +66,18 @@ export interface SidePanelsProps {
   todos?: TodosPanelProps
   /** Threads (#392): given by the page while the payload carries `threads`. */
   threads?: ThreadsPanelProps
+  /** Decisions (#487): drawn while the payload carries `decisions`. */
+  decisions?: DecisionsPanelProps
   /** Settings → Backup… (#233); drawn when given (the page gives it once opened, on the local board only). */
   backup?: BackupPanelProps
+  /** Settings → Updates… (#617); drawn when given (once opened, on the local board only). */
+  updates?: UpdatesPanelProps
+  /** Settings → Housekeeping… (#652); drawn when given (once opened, on the local board only). */
+  housekeeping?: HousekeepingPanelProps
   /** Time (#233): drawn while the board has time tracking on. */
   time?: TimePanelProps
+  /** Token spend (#636): mounted on first opening. */
+  spend?: SpendPanelProps
   /** Settings → Time tracking… (#237); drawn when given (the page gives it once opened, on the local board only). */
   timeSettings?: TimeSettingsPanelProps
   /** The calendar (#328): drawn while the board has it on. */
@@ -74,6 +88,13 @@ export interface SidePanelsProps {
   team?: TeamPanelProps
   /** Settings → Server… and the head's chip: given by the page once opened, on the board's own server's page only (offersServer). */
   server?: ServerPanelProps
+  /**
+   * Settings → Devices… (#510): given by the page once opened, on the local page; a board without
+   * `nodes` gets Add a server alone there (#509).
+   */
+  devices?: DevicesPanelProps
+  /** Structured Settings panel (#651). */
+  settings?: SettingsPanelProps
 }
 
 export function SidePanels({
@@ -90,13 +111,19 @@ export function SidePanels({
   archive,
   todos,
   threads,
+  decisions,
   backup,
+  updates,
+  housekeeping,
   time,
+  spend,
   timeSettings,
   calendar,
   calendarSettings,
   team,
   server,
+  devices,
+  settings,
 }: SidePanelsProps) {
   const { data, ui, dispatch } = useBoardContext()
   return (
@@ -115,14 +142,20 @@ export function SidePanels({
       {secrets && <SecretsPanel {...secrets} />}
       {todos && data?.todos && <TodosPanel {...todos} />}
       {threads && data?.threads && <ThreadsPanel {...threads} />}
+      {decisions && data?.decisions && <DecisionsPanel {...decisions} />}
       {backup && <BackupPanel {...backup} />}
+      {updates && <UpdatesPanel {...updates} />}
+      {housekeeping && <HousekeepingPanel {...housekeeping} />}
       {time && data?.time && <TimePanel {...time} />}
+      {spend && <SpendPanel {...spend} />}
       {timeSettings && <TimeSettingsPanel {...timeSettings} />}
       {calendar && data?.calendar && <CalendarPanel {...calendar} />}
       {calendarSettings && <CalendarSettingsPanel {...calendarSettings} />}
       {localPaths && remotePage() && <LocalPathsPanel {...localPaths} />}
       {team && offersTeam(data) && <TeamPanel {...team} />}
       {server && <ServerPanel {...server} />}
+      {devices && <DevicesPanel {...devices} />}
+      {settings && <SettingsPanel {...settings} />}
     </>
   )
 }

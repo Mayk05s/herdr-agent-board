@@ -1,11 +1,15 @@
 import { expect, test } from 'bun:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { openDb } from '../../src/adapters/db.ts'
+import { workdeskStore } from '../../src/adapters/workdesk-store.ts'
+import { workerRoster } from '../../src/adapters/workdesk-worker-store.ts'
 import { failureKind } from '../../src/core/launch/launcher-command.ts'
-import { parseArgs } from '../../src/core/launch/spawn-args.ts'
+import { CASES_HELP, drivePath, HELP, parseArgs, withConvertedPaths } from '../../src/core/launch/spawn-args.ts'
 import { profileReport, profileTag, sessionProfile } from '../../src/core/profiles.ts'
 import { absoluteDir } from '../../src/services/launch/spawn-agent.ts'
+import { isolatedHome } from '../support/env.ts'
 import { root, type Sandbox, sandbox } from '../support/sandbox.ts'
 
 // spawn-agent end to end against the sandbox's fake herdr.
@@ -103,7 +107,12 @@ const callList = (box: Sandbox) => {
 }
 
 test('a folder as given: ~ is the home folder', () => {
-  assert.equal(absoluteDir('~'), absoluteDir(process.env.USERPROFILE || process.env.HOME || ''))
+  // A home of the test's own (#419): under --parallel a worker's process.env starts each file afresh,
+  // while homedir() can still read a home an earlier file in that worker set and left behind.
+  const home = join(isolatedHome(), 'home')
+  assert.equal(absoluteDir('~'), resolve(home))
+  assert.equal(absoluteDir('~/Acme project'), join(home, 'Acme project'))
+  if (process.platform === 'win32') assert.equal(absoluteDir('~\\Acme project'), join(home, 'Acme project'))
   assert.equal(absoluteDir('"C:\\Work"'), absoluteDir('C:\\Work'))
 })
 
@@ -180,6 +189,97 @@ test('spawn-agent: a dialog before Claude is ready, a brief herdr calls stalled,
   assert.match(missing.stderr, /No such folder/)
   const noWorkspace = await runSpawn(box2, ['--name', 'Nowhere', '--cwd', box2.dir])
   assert.match(noWorkspace.stderr, /No herdr workspace/)
+}, 30_000)
+
+// Claude's box with a line in it, as `agent read --ansi` shows it (core/dialogs/input-box.ts).
+const boxWith = (typed: string) => `● ok\n${'─'.repeat(40)}\n❯ ${typed}\n${'─'.repeat(40)}\n  ⏵⏵ auto mode on\n`
+
+test('spawn-agent: a dialog where the box should be once Claude is ready stops the start before the brief, as a dialog (#602)', async () => {
+  // herdr called it ready with the Code Mode notice up: the /rename went to it and never showed.
+  const notice = readFileSync(new URL('../support/screens/startup-code-mode.txt', import.meta.url), 'utf8')
+  const box = await sandbox()
+  box.state({ ...STATE, 'pane read': { text: notice }, 'agent read': { text: notice } })
+  const r = await runSpawn(box, ['--name', 'Calm', '--cwd', box.dir, '--workspace', 'wA', '--brief', 'Go on.'])
+  assert.equal(r.code, 1)
+  const last = r.stderr.trim().split('\n').at(-1) ?? ''
+  assert.match(last, /^spawn-agent: Claude in wA:p9 waits for a dialog/)
+  // The board takes it for a dialog: it waits for the answer and sends the brief then (services/launch/run.ts).
+  assert.equal(failureKind(last), 'dialog')
+  assert.deepEqual(
+    callList(box).filter(c => c.startsWith('agent prompt')),
+    ['agent prompt wA:p9 /rename Calm'],
+  )
+}, 30_000)
+
+test('spawn-agent: a /rename Claude left in its box gets one more Enter, and the brief comes as a submit of its own (#479)', async () => {
+  // The second Enter takes it: "Session renamed" shows on the third look.
+  const box = await sandbox()
+  box.state({
+    ...STATE,
+    'pane read': {
+      seq: [{ text: '❯ /rename Calm' }, { text: '❯ /rename Calm' }, { text: 'Session renamed to: Calm' }],
+    },
+    'agent read': { text: boxWith('/rename Calm') },
+  })
+  const r = await runSpawn(box, ['--name', 'Calm', '--cwd', box.dir, '--workspace', 'wA', '--brief', '# Brief: go on.'])
+  assert.equal(r.code, 0, r.stderr)
+  const after = callList(box).slice(callList(box).indexOf('agent prompt wA:p9 /rename Calm'))
+  assert.deepEqual(after, [
+    'agent prompt wA:p9 /rename Calm',
+    'pane read wA:p9 --source visible',
+    'pane read wA:p9 --source visible',
+    'agent read wA:p9 --source visible --ansi',
+    'pane send-keys wA:p9 enter',
+    'pane read wA:p9 --source visible',
+    'agent prompt wA:p9 # Brief: go on.',
+  ])
+
+  // Claude never takes it: two more Enters, then the brief is not typed after the line (the name
+  // would eat it); the session runs, so it fails as "did not reach", which the board does not retry.
+  const box2 = await sandbox()
+  box2.state({ ...STATE, 'pane read': { text: '❯ /rename Calm' }, 'agent read': { text: boxWith('/rename Calm') } })
+  const stuck = await runSpawn(box2, [
+    '--name',
+    'Calm',
+    '--cwd',
+    box2.dir,
+    '--workspace',
+    'wA',
+    '--brief',
+    '# Brief: go on.',
+  ])
+  assert.equal(stuck.code, 1)
+  const last = stuck.stderr.trim().split('\n').at(-1) ?? ''
+  assert.match(last, /^spawn-agent: The brief did not reach Claude in wA:p9: its input box still holds "\/rename Calm"/)
+  assert.equal(failureKind(last), 'message')
+  const calls = box2.calls().map(a => a.join(' '))
+  assert.deepEqual(
+    calls.filter(c => c.startsWith('agent prompt')),
+    ['agent prompt wA:p9 /rename Calm'],
+  )
+  assert.equal(calls.filter(c => c === 'pane send-keys wA:p9 enter').length, 2)
+
+  // A /rename that vanished without "Session renamed" (an empty box): the brief goes as before.
+  const box3 = await sandbox()
+  box3.state({ ...STATE, 'pane read': { text: '' }, 'agent read': { text: boxWith('') } })
+  const gone = await runSpawn(box3, ['--name', 'Calm', '--cwd', box3.dir, '--workspace', 'wA', '--brief', 'Go on.'])
+  assert.equal(gone.code, 0, gone.stderr)
+  assert.ok(box3.calls().some(a => a.join(' ') === 'agent prompt wA:p9 Go on.'))
+  assert.equal(
+    box3.calls().some(a => a.join(' ') === 'pane send-keys wA:p9 enter'),
+    false,
+  )
+
+  // A box herdr cannot show (agent read fails): no Enter, and the brief goes as before.
+  const box4 = await sandbox()
+  box4.state({
+    ...STATE,
+    'pane read': { text: '❯ /rename Calm' },
+    'agent read': { code: 'agent_not_found', error: 'agent_not_found' },
+  })
+  const unread = await runSpawn(box4, ['--name', 'Calm', '--cwd', box4.dir, '--workspace', 'wA', '--brief', 'Go on.'])
+  assert.equal(unread.code, 0, unread.stderr)
+  assert.ok(box4.calls().some(a => a.join(' ') === 'agent prompt wA:p9 Go on.'))
 }, 30_000)
 
 test('spawn-agent --pane starts Claude in a pane that is there, its tab named after the session', async () => {
@@ -1029,6 +1129,49 @@ test('a start command that starts pi: pi is named with /name, briefed, and its f
   expect(cardOf(box, SID)).toBeNull()
 }, 30_000)
 
+test('pi moves start card category onto its file card and drops the start card; Claude keeps its start card unchanged (#663)', async () => {
+  const piBox = await profileBox({}, () => [], { default: { command: 'pi' } })
+  piBox.box.state({
+    ...STATE,
+    'pane get': { seq: [{ result: { pane: { pane_id: 'wA:p9', agent: null } } }, PI_READY] },
+    'pane read': { text: 'Session name set: Acme invoices' },
+  })
+  mkdirSync(piBox.box.cards, { recursive: true })
+  writeFileSync(join(piBox.box.cards, `${SID}.json`), JSON.stringify({ key: SID, category: 'acme' }))
+  const piRes = await runSpawn(piBox.box, [
+    '--agent',
+    'pi',
+    '--name',
+    'Acme invoices',
+    '--cwd',
+    piBox.dir,
+    '--workspace',
+    'wA',
+    '--session-id',
+    SID,
+  ])
+  assert.equal(piRes.code, 0, piRes.stderr)
+  expect(cardOf(piBox.box, PI_CARD)).toMatchObject({ key: PI_FILE, category: 'acme', profileWant: 'default' })
+  expect(cardOf(piBox.box, SID)).toBeNull()
+
+  const claudeBox = await profileBox()
+  mkdirSync(claudeBox.box.cards, { recursive: true })
+  writeFileSync(join(claudeBox.box.cards, `${SID}.json`), JSON.stringify({ key: SID, category: 'acme' }))
+  const claudeRes = await runSpawn(claudeBox.box, [
+    '--name',
+    'Acme invoices',
+    '--cwd',
+    claudeBox.dir,
+    '--workspace',
+    'wA',
+    '--session-id',
+    SID,
+  ])
+  assert.equal(claudeRes.code, 0, claudeRes.stderr)
+  assert.equal(callList(claudeBox.box)[1], `pane run wA:p9 claude --session-id ${SID}`)
+  expect(cardOf(claudeBox.box, SID)).toMatchObject({ key: SID, category: 'acme', profileWant: 'default' })
+}, 30_000)
+
 test('pi’s first Enter takes the completion of /name: the line still in its editor gets one more', async () => {
   const { box, dir } = await profileBox({}, () => [], { default: { command: 'pi' } })
   box.state({
@@ -1342,3 +1485,416 @@ test('--resume with --model in a profile with its own command and args: the comm
   ])
   expect(cardOf(box, SID)).toMatchObject({ profileWant: 'work', modelWant: 'haiku' })
 }, 30_000)
+
+test.each(['claude', 'codex'])(
+  'an explicit Workdesk worker launch from a %s master registers its observed SID',
+  async kind => {
+    const box = await sandbox()
+    const master = '7fe7b6e7-97f1-4dd0-82af-ab00000abcde'
+    const masterPane = 'wA:p1'
+    const masterAgent = {
+      result: { agent: { agent: kind, agent_session: { value: master }, agent_status: 'working' } },
+    }
+    const shown = {
+      result: {
+        pane: {
+          pane_id: 'wA:p9',
+          tab_id: 'wA:t9',
+          agent: 'claude',
+          agent_status: 'idle',
+          agent_session: { value: SID },
+        },
+      },
+    }
+    box.state({
+      ...STATE,
+      'pane get': shown,
+      'agent get wA:p1': masterAgent,
+      'api snapshot': {
+        result: {
+          snapshot: {
+            panes: [{ pane_id: 'wA:p9', agent: 'claude', agent_session: { value: SID } }],
+            tabs: [],
+            workspaces: [],
+          },
+        },
+      },
+    })
+    boardConfig(box, { threads: true, workdesk: { executable: process.execPath, topology: { deviceId: 'mac' } } })
+    const db = openDb({ path: join(box.env.LOCALAPPDATA as string, 'herdr/plugins/agent-board/board.db') })
+    if (!db) throw Error('fixture database missing')
+    try {
+      const store = workdeskStore(db)
+      const owner = { key: master, name: 'Master with spaces', lane: 'board' }
+      store.reserve(7, owner)
+      store.handoff(
+        {
+          id: 7,
+          executor: owner.name,
+          title: 'Fixture',
+          status: 'doing',
+          project: 'Board',
+          description: '',
+          acceptance: '',
+          url: 'https://workdesk.test/tasks/7',
+          executor_model: 'codex',
+        },
+        owner,
+        Date.now(),
+      )
+      const env = {
+        HERDR_PANE_ID: masterPane,
+        ...(kind === 'claude' ? { CLAUDE_CODE_SESSION_ID: master } : { CODEX_THREAD_ID: master }),
+      }
+      const launched = await runSpawn(
+        box,
+        ['-Name', 'Acme invoices', '-Cwd', box.dir, '-Workspace', 'wA', '--workdesk-worker'],
+        env,
+      )
+      expect(launched).toMatchObject({
+        code: 0,
+        stdout: 'pane=wA:p9 name=Acme invoices agent=acme-invoices-2\n',
+        stderr: '',
+      })
+      expect(workerRoster(db, master)).toBeNull()
+      const cmd = (args: string[]) => box.run('cli', { args: ['workdesk', 'workers', ...args], env }).exited
+      expect((await cmd(['complete'])).code).toBe(0)
+      expect(workerRoster(db, master)).toEqual([SID])
+      expect((await cmd(['unlink', SID])).code).toBe(0)
+      expect(workerRoster(db, master)).toEqual([])
+      expect((await cmd(['link', 'pane-p9'])).code).toBe(1)
+      expect((await cmd(['link', SID])).code).toBe(0)
+      expect(workerRoster(db, master)).toEqual([SID])
+    } finally {
+      db.close()
+    }
+  },
+)
+
+test('withConvertedPaths: only the folder and file values that start with / are converted, in one call (#490)', () => {
+  const o = parseArgs([
+    '--name',
+    'Anna',
+    '--cwd',
+    '/c/work/anna',
+    '--brief',
+    '/review this',
+    '--config-dir',
+    '/c/u/.claude',
+  ])
+  assert.ok(!('help' in o))
+  const seen: string[][] = []
+  const out = withConvertedPaths(o, paths => {
+    seen.push(paths)
+    return paths.map(p => `C:${p.slice(2)}`)
+  })
+  assert.deepEqual(seen, [['/c/work/anna', '/c/u/.claude']])
+  assert.deepEqual(
+    [out.cwd, out.configDir, out.brief, out.name],
+    ['C:/work/anna', 'C:/u/.claude', '/review this', 'Anna'],
+  )
+  // Windows paths already: nothing to convert, no call.
+  const win = parseArgs(['--name', 'Ben', '--cwd', 'C:\\work', '--brief-file', 'D:\\b.md'])
+  assert.ok(!('help' in win))
+  assert.equal(
+    withConvertedPaths(win, () => assert.fail('called')),
+    win,
+  )
+  // A converter that gives nothing back for one leaves it as typed.
+  const file = parseArgs(['--name', 'Cleo', '--cwd', '/x', '--brief-file', '/tmp/b.md'])
+  assert.ok(!('help' in file))
+  const half = withConvertedPaths(file, () => ['X:/', ''])
+  assert.deepEqual([half.cwd, half.briefFile], ['X:/', '/tmp/b.md'])
+  // Without cygpath: the drive paths, as cygpath -m writes them; the rest as typed.
+  assert.deepEqual(['/c/work/anna', '/d', '/D/x', '/tmp/b.md', '/cd/x', '//srv/share'].map(drivePath), [
+    'C:/work/anna',
+    'D:/',
+    'D:/x',
+    '/tmp/b.md',
+    '/cd/x',
+    '//srv/share',
+  ])
+})
+
+// Case files (#488): spawn-agent --thread starts a fresh session from the case's brief and gives it the thread.
+async function boardCli(box: Sandbox, args: string[], env: Record<string, string> = {}) {
+  const proc = Bun.spawn([process.execPath, join(root, 'src', 'entrypoints', 'cli.ts'), ...args], {
+    cwd: root,
+    env: { ...box.env, ...PACED, ...env },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
+  return { code: await proc.exited, stdout: stdout.trim(), stderr: stderr.trim() }
+}
+
+const OLD = '7c9e6679-7425-40de-944b-e07fc1f90ae7'
+/** No wake answers here: the live one on this computer is never asked. */
+const FAKE_WAKE = 'http://127.0.0.1:9'
+
+test('spawn-agent --thread: the case brief typed in, the new session its assignee; its folder from the session that held the case', async () => {
+  const box = await sandbox()
+  box.state({ ...STATE, 'api snapshot': { result: { snapshot: { panes: [], tabs: [], workspaces: [] } } } })
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true } })
+  const folder = join(box.dir, 'atlas work')
+  mkdirSync(folder)
+  // A session that worked on the case and is in the archive since, with the folder it ran in.
+  const archive = join(box.env.LOCALAPPDATA as string, 'herdr', 'plugins', 'agent-board', 'archive')
+  mkdirSync(archive, { recursive: true })
+  writeFileSync(
+    join(archive, `${OLD}.json`),
+    JSON.stringify({
+      key: OLD,
+      session: OLD,
+      state: 'archived',
+      name: 'anna',
+      cwd: folder,
+      category: 'atlas',
+      held: [],
+      archivedAt: 1,
+    }),
+  )
+  const made = await boardCli(box, [
+    'thread',
+    'new',
+    '--lane',
+    'atlas',
+    '--ref',
+    'ABC-12',
+    '--to',
+    OLD,
+    'Import mapping',
+  ])
+  assert.equal(made.stdout, `ok · atlas-1 · doing · ${OLD.slice(0, 8)}`, made.stderr)
+  await boardCli(box, ['thread', 'post', 'atlas-1', '--session', OLD, '--state', 'Mapped 217 rows.\nNext: the prices.'])
+  const task = join(box.dir, 'task.txt')
+  writeFileSync(task, 'Check the client reply.')
+  // The thread named in capitals: the session is named by its key all the same.
+  const r = await runSpawn(box, ['--thread', 'ATLAS-1', '--workspace', 'wA', '--brief-file', task, '--session-id', SID])
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(r.stdout.trim(), 'pane=wA:p9 name=atlas-1 agent=atlas-1 thread=atlas-1')
+  assert.match(r.stderr, new RegExp(`atlas-1 starts in .*atlas work, the folder of anna \\(${OLD}\\)`))
+  assert.match(r.stderr, /atlas-1 assigned to atlas-1/)
+  const calls = box.calls().map(a => a.join(' '))
+  assert.ok(calls.includes(`tab create --workspace wA --cwd ${folder} --label atlas-1 --no-focus`), calls.join('\n'))
+  const prompt = calls.filter(c => c.startsWith('agent prompt wA:p9 ')).at(-1) ?? ''
+  for (const part of [
+    'You pick up the case in thread atlas-1',
+    'board thread post atlas-1 --state',
+    'Case atlas-1 · doing · Import mapping',
+    'State, ',
+    'Mapped 217 rows.\nNext: the prices.',
+    // The brief as the new session finds the case: given to it, anna the one before.
+    'held by you (atlas-1), before you by anna',
+    `- anna (${OLD}) archived held it`,
+    `in ${folder}`,
+    'Your task:\nCheck the client reply.',
+  ])
+    assert.ok(prompt.includes(part), `${part}\n---\n${prompt}`)
+  assert.doesNotMatch(prompt, /board resume \S/)
+  const shown = JSON.parse((await boardCli(box, ['thread', 'show', 'atlas-1', '--json'])).stdout)
+  assert.deepEqual(shown.thread.assignee, { kind: 'session', key: SID, name: 'atlas-1' })
+}, 60_000)
+
+test('spawn-agent --thread: refused before anything starts with case files off, an unknown thread, or no folder to start in', async () => {
+  const box = await sandbox()
+  box.state(STATE)
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: true })
+  const off = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA'])
+  assert.equal(off.code, 1)
+  assert.match(off.stderr, /--thread needs case files: "threads": \{ "cases": true \} in config\.json/)
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true } })
+  const none = await runSpawn(box, ['--thread', 'atlas-9', '--workspace', 'wA', '--cwd', box.dir])
+  assert.equal(none.code, 1)
+  assert.match(none.stderr, /no thread "atlas-9" on this board/)
+  await boardCli(box, ['thread', 'new', '--lane', 'atlas', 'Nobody worked on it'])
+  const nowhere = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA'])
+  assert.equal(nowhere.code, 1)
+  assert.match(nowhere.stderr, /no session that held atlas-1 has a folder that still exists .*: pass --cwd <folder>/)
+  assert.deepEqual(
+    box.calls().filter(a => a[0] === 'tab'),
+    [],
+    'no tab was opened',
+  )
+  assert.throws(() => parseArgs(['--thread', 'atlas-1', '--resume', SID]), /--thread starts a fresh Claude session/)
+  assert.deepEqual(parseArgs(['--thread', 'atlas-1']), { name: 'atlas-1', cwd: '', timeoutSec: 120, thread: 'atlas-1' })
+  // --help tells of --thread after the help, saying it needs case files, without reading the config:
+  // a config that does not parse leaves it as it is.
+  writeFileSync(
+    join(box.env.APPDATA as string, 'herdr', 'plugins', 'config', 'agent-board', 'config.json'),
+    '{ not json',
+  )
+  const help = await runSpawn(box, ['--help'])
+  assert.equal(help.code, 0, help.stderr)
+  assert.equal(help.stdout.trim(), `${HELP}\n\n${CASES_HELP}`)
+  assert.match(CASES_HELP, /"threads": \{ "cases": true \}/)
+}, 60_000)
+
+const LEAD = '9a1f0c2e-3b4d-4e5f-8a6b-7c8d9e0f1a2b'
+const PI_SESSION = '1b4e28ba-2fa1-41d2-883f-0016d3cca427'
+const EMPTY = { result: { snapshot: { panes: [], tabs: [], workspaces: [] } } }
+
+/** A session in the board's archive since, with the folder it ran in. */
+function archived(box: Sandbox, key: string, name: string, cwd: string): void {
+  const archive = join(box.env.LOCALAPPDATA as string, 'herdr', 'plugins', 'agent-board', 'archive')
+  mkdirSync(archive, { recursive: true })
+  writeFileSync(
+    join(archive, `${key}.json`),
+    JSON.stringify({ key, session: key, state: 'archived', name, cwd, category: 'atlas', held: [], archivedAt: 1 }),
+  )
+}
+
+test("spawn-agent --thread: the folder is a holder's, never the coordinator's that made the thread and wrote last; with no holder's folder left, refused", async () => {
+  const box = await sandbox()
+  box.state({ ...STATE, 'api snapshot': EMPTY })
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true } })
+  const hub = join(box.dir, 'hub')
+  const work = join(box.dir, 'anna work')
+  mkdirSync(hub)
+  mkdirSync(work)
+  archived(box, LEAD, 'lead', hub)
+  archived(box, OLD, 'anna', work)
+  // A coordinator in another folder makes the case for anna, and writes after anna's state.
+  const asLead = { CLAUDE_CODE_SESSION_ID: LEAD }
+  const made = await boardCli(
+    box,
+    ['thread', 'new', '--lane', 'atlas', '--ref', 'ABC-12', '--to', OLD, 'Import'],
+    asLead,
+  )
+  assert.match(made.stdout, /^ok · atlas-1 · doing/, made.stderr)
+  await boardCli(box, ['thread', 'post', 'atlas-1', '--session', OLD, '--state', 'Mapped 217 rows.'])
+  await boardCli(box, ['thread', 'post', 'atlas-1', 'A note from the lead.'], asLead)
+  const r = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA', '--session-id', SID], asLead)
+  assert.equal(r.code, 0, r.stderr)
+  assert.match(r.stderr, new RegExp(`atlas-1 starts in .*anna work, the folder of anna \\(${OLD}\\)`))
+  const calls = box.calls().map(a => a.join(' '))
+  assert.ok(calls.includes(`tab create --workspace wA --cwd ${work} --label atlas-1 --no-focus`), calls.join('\n'))
+  // The assignment is written as the coordinator that ran it.
+  const shown = JSON.parse((await boardCli(box, ['thread', 'show', 'atlas-1', '--json', '--full'])).stdout)
+  assert.deepEqual(shown.thread.assignee, { kind: 'session', key: SID, name: 'atlas-1' })
+  assert.equal(shown.entries.at(-1).author.key, LEAD)
+  // anna's folder gone: refused, though the coordinator's is still there.
+  rmSync(work, { recursive: true, force: true })
+  const none = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA'], asLead)
+  assert.equal(none.code, 1)
+  assert.match(none.stderr, /no session that held atlas-1 has a folder that still exists/)
+}, 60_000)
+
+test('spawn-agent --thread run from a pi session: written as that session, and refused as one where agents do not write threads', async () => {
+  const box = await sandbox()
+  const pi = { pane_id: 'wA:p1', agent: 'pi', agent_session: { value: PI_SESSION }, terminal_title_stripped: 'ben' }
+  box.state({ ...STATE, 'api snapshot': { result: { snapshot: { panes: [pi], tabs: [], workspaces: [] } } } })
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true, agents: false } })
+  await boardCli(box, ['thread', 'new', '--lane', 'atlas', '--ref', 'ABC-12', 'Import'])
+  // CODEX_THREAD_ID inherited in a pane that runs pi: read as the board reads it, the pi session.
+  const asPi = { HERDR_PANE_ID: 'wA:p1', CODEX_THREAD_ID: '019a0000-0000-7000-8000-000000000001' }
+  const refused = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA', '--cwd', box.dir], asPi)
+  assert.equal(refused.code, 1)
+  assert.match(refused.stderr, /threads are the owner's on this board: agents do not write to them/)
+  assert.deepEqual(
+    box.calls().filter(a => a[0] === 'tab'),
+    [],
+  )
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true } })
+  const r = await runSpawn(
+    box,
+    ['--thread', 'atlas-1', '--workspace', 'wA', '--cwd', box.dir, '--session-id', SID],
+    asPi,
+  )
+  assert.equal(r.code, 0, r.stderr)
+  const shown = JSON.parse((await boardCli(box, ['thread', 'show', 'atlas-1', '--json', '--full'])).stdout)
+  assert.deepEqual(shown.thread.assignee, { kind: 'session', key: SID, name: 'atlas-1' })
+  assert.deepEqual(shown.entries.at(-1).author, { kind: 'session', key: PI_SESSION, name: 'ben' })
+}, 60_000)
+
+test('spawn-agent --thread: a session stopped at a dialog holds the case all the same; a closed thread is said, not refused', async () => {
+  const box = await sandbox()
+  const blocked = {
+    result: { pane: { pane_id: 'wA:p9', agent: 'claude', agent_status: 'blocked', agent_session: { value: SID } } },
+  }
+  box.state({ ...STATE, 'pane get': blocked, 'api snapshot': EMPTY })
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true } })
+  await boardCli(box, ['thread', 'new', '--lane', 'atlas', '--ref', 'ABC-12', 'Import'])
+  await boardCli(box, ['thread', 'done', 'atlas-1', '--summary', 'shipped'])
+  const r = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA', '--cwd', box.dir, '--session-id', SID])
+  assert.equal(r.code, 1)
+  assert.match(r.stderr, /atlas-1 is done: the session starts on it all the same/)
+  assert.match(
+    r.stderr,
+    new RegExp(`atlas-1 assigned to atlas-1; the session runs in wA:p9 as ${SID} but did not finish starting`),
+  )
+  assert.match(r.stderr, /waits for a dialog/)
+  const shown = JSON.parse((await boardCli(box, ['thread', 'show', 'atlas-1', '--json'])).stdout)
+  assert.deepEqual(shown.thread.assignee, { kind: 'session', key: SID, name: 'atlas-1' })
+}, 60_000)
+
+test("spawn-agent --thread: from a node's session refused in words, nothing started; with nodes it is not placed", async () => {
+  const box = await sandbox()
+  box.state({ ...STATE, 'api snapshot': EMPTY })
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true }, node: { id: 'server-1', port: 12430 } })
+  const r = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA', '--cwd', box.dir])
+  assert.equal(r.code, 1)
+  assert.match(
+    r.stderr,
+    /--thread starts a session on the board's own computer: run it there, not from a node's session/,
+  )
+  assert.deepEqual(box.calls(), [])
+  // On the master (`nodes`), --thread starts here: no board is asked where to place it.
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true }, nodes: {} })
+  await boardCli(box, ['thread', 'new', '--lane', 'atlas', '--ref', 'ABC-12', 'Import'])
+  const here = await runSpawn(box, ['--thread', 'atlas-1', '--workspace', 'wA', '--cwd', box.dir, '--session-id', SID])
+  assert.equal(here.code, 0, here.stderr)
+  assert.equal(here.stdout.trim(), 'pane=wA:p9 name=atlas-1 agent=atlas-1 thread=atlas-1')
+}, 60_000)
+
+test('spawn-agent --thread: a start command that never comes up as an agent gives the case to nobody; it stays with its holder', async () => {
+  const box = await sandbox()
+  box.state({ ...STATE, 'pane get': { result: { pane: { pane_id: 'wA:p9', agent: null } } }, 'api snapshot': EMPTY })
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true } })
+  await boardCli(box, ['thread', 'new', '--lane', 'atlas', '--ref', 'ABC-12', '--to', OLD, 'Import'])
+  const r = await runSpawn(box, [
+    '--thread',
+    'atlas-1',
+    '--workspace',
+    'wA',
+    '--cwd',
+    box.dir,
+    '--session-id',
+    SID,
+    '--timeout-sec',
+    '1',
+  ])
+  assert.equal(r.code, 1)
+  assert.match(r.stderr, /did not get ready in wA:p9/)
+  assert.match(r.stderr, new RegExp(`atlas-1 stays with ${OLD.slice(0, 8)}: no session came up to give it to`))
+  assert.doesNotMatch(r.stderr, /assigned|the session runs/)
+  const shown = JSON.parse((await boardCli(box, ['thread', 'show', 'atlas-1', '--json'])).stdout)
+  assert.equal(shown.thread.assignee.key, OLD)
+}, 60_000)
+
+test('spawn-agent --thread: an agent herdr named once and gone by the failure gets nothing; the case stays with its holder', async () => {
+  const box = await sandbox()
+  const starting = {
+    result: { pane: { pane_id: 'wA:p9', agent: 'claude', agent_status: 'working', agent_session: { value: SID } } },
+  }
+  const exited = { result: { pane: { pane_id: 'wA:p9', agent: null } } }
+  box.state({ ...STATE, 'pane get': { seq: [starting, exited] }, 'api snapshot': EMPTY })
+  boardConfig(box, { port: 9, wakeUrl: FAKE_WAKE, threads: { cases: true } })
+  await boardCli(box, ['thread', 'new', '--lane', 'atlas', '--ref', 'ABC-12', '--to', OLD, 'Import'])
+  const r = await runSpawn(box, [
+    '--thread',
+    'atlas-1',
+    '--workspace',
+    'wA',
+    '--cwd',
+    box.dir,
+    '--session-id',
+    SID,
+    '--timeout-sec',
+    '1',
+  ])
+  assert.equal(r.code, 1)
+  assert.match(r.stderr, new RegExp(`atlas-1 stays with ${OLD.slice(0, 8)}: no session came up to give it to`))
+  const shown = JSON.parse((await boardCli(box, ['thread', 'show', 'atlas-1', '--json'])).stdout)
+  assert.equal(shown.thread.assignee.key, OLD)
+}, 60_000)

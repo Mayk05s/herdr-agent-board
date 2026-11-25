@@ -99,7 +99,7 @@ test('brief: `board secret` only where config.json has sinks, for Claude; withou
 
 test('brief: the board’s own store as the one sink says how to ask for a variable and read it; beside other sinks, one line more', () => {
   const none = brief(cfg, null, 'C:X', {})
-  const store = brief(cfg, null, 'C:X', {}, 'Claude', null, null, ['store'], ['store'])
+  const store = brief(cfg, null, 'C:X', {}, 'Claude', null, null, ['store'], false, null, false, null, ['store'])
   assert.match(
     store,
     /board secret request --title "<what for>" --field <NAME>\[:shown\]\.\.\. \[--global \| --profile <id>\]/,
@@ -109,7 +109,7 @@ test('brief: the board’s own store as the one sink says how to ask for a varia
   assert.equal(store.split('\n').length, none.split('\n').length + 1)
   // with sinks of the owner's, their line as it was, the store named at its end
   const plain = brief(cfg, null, 'C:X', {}, 'Claude', null, null, ['wss', 'vault'])
-  const mixed = brief(cfg, null, 'C:X', {}, 'Claude', null, null, ['wss', 'vault'], ['vault'])
+  const mixed = brief(cfg, null, 'C:X', {}, 'Claude', null, null, ['wss', 'vault'], false, null, false, null, ['vault'])
   assert.match(mixed, /Sinks: wss, vault \(board secret sinks says what each takes\)\. vault: the board's own store/)
   assert.equal(mixed.replace(/ vault: the board's own store[^\n]*/, ''), plain)
 })
@@ -117,10 +117,10 @@ test('brief: the board’s own store as the one sink says how to ask for a varia
 test('the calendar (#328): agents hear of board cal only while it is on; off, the brief is as it was', () => {
   const cfg = { categories: [{ id: 'alpha', title: 'Alpha', color: 'blue', paths: [] }] }
   const off = brief(cfg, null, 'C:X', {}, 'Claude', null, null, [])
-  assert.equal(brief(cfg, null, 'C:X', {}, 'Claude', null, null, [], [], false), off)
+  assert.equal(brief(cfg, null, 'C:X', {}, 'Claude', null, null, [], false), off)
   assert.doesNotMatch(off, /board cal/)
-  const on = brief(cfg, null, 'C:X', {}, 'Claude', null, null, [], [], true)
+  const on = brief(cfg, null, 'C:X', {}, 'Claude', null, null, [], true)
   assert.match(on, /- board cal list \[--day <d> \| --from <t> --to <t>\] \[--json\]: the owner's schedule/)
   assert.match(on, /only when the owner asked for that event: --source <id> --asked/)
-  assert.doesNotMatch(brief(cfg, null, 'C:X', {}, 'Codex', null, null, [], [], true), /board cal/)
+  assert.doesNotMatch(brief(cfg, null, 'C:X', {}, 'Codex', null, null, [], true), /board cal/)
 })

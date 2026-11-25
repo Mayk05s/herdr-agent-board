@@ -20,7 +20,7 @@ import { type AccessAsk, loginAsk, tunnelAsk } from '../../models/access.ts'
 import { ACCESS_TABS, type AccessTab, loadTab, saveTab } from '../../models/access-tabs.ts'
 import { savesTracker, versionOnOpen } from '../../models/server-setup.ts'
 import { classNames } from '../class-names.ts'
-import { Panel } from '../panel/Panel.tsx'
+import { Panel, type PanelBack } from '../panel/Panel.tsx'
 import { LoginSection } from './LoginSection.tsx'
 import { LoginsSection } from './LoginsSection.tsx'
 import { ServerSetupBody, ServerSync, useServerSetup } from './ServerSetup.tsx'
@@ -29,6 +29,7 @@ import { TunnelEntry, TunnelSection } from './TunnelSection.tsx'
 export interface AccessPanelProps {
   open: boolean
   onClose(): void
+  back?: PanelBack | undefined
 }
 
 export interface AccessBodyProps {
@@ -40,13 +41,14 @@ export interface AccessBodyProps {
   tab?: AccessTab
 }
 
-export function AccessPanel({ open, onClose }: AccessPanelProps) {
+export function AccessPanel({ open, onClose, back }: AccessPanelProps) {
   const t = useT()
   const { view, send, steps, testing } = useAccess(open)
   return (
     <Panel
       id="access-sheet"
       kind="access"
+      back={back}
       open={open}
       onClose={onClose}
       title={

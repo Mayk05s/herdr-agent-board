@@ -19,12 +19,13 @@ import type {
   TeamView,
   ThreadLine,
   ThreadView,
+  Waiting,
   Welcome,
 } from '../../models/team.ts'
 import { firstUnread } from '../../models/team-chat.ts'
 import { topicWork } from '../../models/work-share.ts'
 import { useBoardContext } from '../../state/BoardProvider.tsx'
-import { Panel } from '../panel/Panel.tsx'
+import { Panel, type PanelBack } from '../panel/Panel.tsx'
 import { TeamList } from './TeamList.tsx'
 import { TeamPeople } from './TeamPeople.tsx'
 import { TeamThread } from './TeamThread.tsx'
@@ -32,12 +33,13 @@ import { TeamThread } from './TeamThread.tsx'
 export interface TeamPanelProps {
   open: boolean
   onClose(): void
+  back?: PanelBack | undefined
   /** A thread a notification's click asked for (#355): it is shown once, then onFocused. */
   focus?: string | null
   onFocused?(): void
 }
 
-export function TeamPanel({ open, onClose, focus, onFocused }: TeamPanelProps) {
+export function TeamPanel({ open, onClose, back, focus, onFocused }: TeamPanelProps) {
   const t = useT()
   const { canEdit } = useBoardContext()
   const team = useTeam(open)
@@ -110,6 +112,7 @@ export function TeamPanel({ open, onClose, focus, onFocused }: TeamPanelProps) {
     <Panel
       id="team-sheet"
       kind="team"
+      back={back}
       measure="full"
       open={open}
       onClose={onClose}
@@ -127,6 +130,8 @@ export function TeamPanel({ open, onClose, focus, onFocused }: TeamPanelProps) {
         thread={team.thread}
         lines={team.lines}
         drafts={team.drafts}
+        waiting={team.waiting}
+        onConfirmWaiting={id => void team.confirmWaiting(id)}
         unread={team.unread}
         agents={team.agents}
         draft={drafts.text(key)}
@@ -195,6 +200,9 @@ export interface TeamBodyProps {
   lines: ThreadLine[]
   /** The agents' drafts that wait, every thread's (#415); none given: none listed. */
   drafts?: readonly DraftLine[]
+  /** What the owner's phone asked and waits for the passkey here (#377); none given: none listed. */
+  waiting?: readonly Waiting[]
+  onConfirmWaiting?(id: string): void
   /** Each thread's unread messages (#355); none given: none shown. */
   unread?: Record<string, number>
   /** The owner's switches; null (a remote page but the board's own server's): not shown, and the team chat's mute neither. */
@@ -255,6 +263,8 @@ export function TeamBody(props: TeamBodyProps) {
         onSelect={props.onSelect}
         onPeople={() => props.onPeople?.(true)}
         {...(props.drafts && { drafts: props.drafts })}
+        {...(props.waiting && { waiting: props.waiting })}
+        {...(props.onConfirmWaiting && { onConfirmWaiting: props.onConfirmWaiting })}
         onSendDraft={props.onSendDraft}
         onDiscardDraft={props.onDiscardDraft}
         {...(props.onWelcome && { onWelcome: props.onWelcome })}

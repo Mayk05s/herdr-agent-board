@@ -33,6 +33,8 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     'launch.err.profileParent': 'A session started from {name} runs in its profile, {title}',
     'launch.err.profileUnknown': 'The profile of {name} is not one the board knows: choose one',
     'launch.err.profileFolder': 'The folder of the profile {title} is not there: {path}',
+    'launch.err.codexEnv':
+      'herdr cannot set CODEX_HOME={dir} for the new tab (--env needs herdr 0.9.5 or newer): update herdr, or start this session yourself',
     'launch.err.env':
       'herdr cannot set CLAUDE_CONFIG_DIR={dir} for the new tab (--env needs herdr 0.9.5 or newer): update herdr, or start this session yourself',
     // a session's profile in a message when the board knows neither it nor its folder (core/profiles.ts)
@@ -55,6 +57,12 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     // herdr's notification of a session whose hooks report another profile than its start asked for (server/board-state.ts)
     'profile.wrongTitle': 'Wrong profile: {name}',
     'profile.wrongBody': '{name} was started in {want} but runs in {got}',
+    'model.wrongTitle': 'Wrong model: {name}',
+    'model.wrongBody': '{name} runs on {got}, expected {want}',
+    'model.wrong': '{got}, expected {want}',
+    'model.wrongHint': 'Runs on {model}, expected {want}',
+    'menu.modelOk': 'This model is fine here',
+    'tui.wrongModel': 'wrong model',
     // the profile switch beside the lanes control, and the tag on a card (web/src/components/ProfileSwitch.tsx, ProfileTag.tsx)
     'tb.profiles': 'Profiles',
     // the profile switch folded into one pill (web/src/components/SegmentPick.tsx)
@@ -92,6 +100,16 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     'move.sum.refused': ['{n} refused', '{n} refused'],
     'move.sum.usual': 'new sessions start in {profile}',
     'move.err.usual': '{lane}’s usual profile stays as it was: {why}',
+    // a session moved to another device from its card's menu (#616, web/src/models/device-move.ts)
+    'moveDevice.menu': 'Device',
+    'moveDevice.busy': 'Moving to {device}…',
+    'moveDevice.done': '{name} moved to {device}',
+    'moveDevice.working': 'It is working: move it once it is free',
+    'moveDevice.changes': [
+      '{name} takes {n} uncommitted change to {device}: {list}',
+      '{name} takes {n} uncommitted changes to {device}: {list}',
+    ],
+    'moveDevice.go': 'Move with them',
     // the Profiles panel, from Settings with more than one profile folder (web/src/components/profiles)
     'set.profiles': 'Profiles…',
     'prof.title': 'Profiles',
@@ -153,6 +171,8 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     'launch.err.profileParent': 'Сессия, начатая из {name}, работает в её профиле, {title}',
     'launch.err.profileUnknown': 'Профиль сессии {name} доске не известен: выбери профиль',
     'launch.err.profileFolder': 'Папки профиля {title} нет: {path}',
+    'launch.err.codexEnv':
+      'herdr не умеет задать CODEX_HOME={dir} для новой вкладки (--env нужен herdr 0.9.5 или новее): обновите herdr или запустите сессию сами',
     'launch.err.env':
       'herdr не может задать CLAUDE_CONFIG_DIR={dir} для новой вкладки (--env есть в herdr с 0.9.5): обнови herdr или запусти эту сессию сам',
     // a session's profile in a message when the board knows neither it nor its folder (core/profiles.ts)
@@ -175,6 +195,12 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     // herdr's notification of a session whose hooks report another profile than its start asked for (server/board-state.ts)
     'profile.wrongTitle': 'Не тот профиль: {name}',
     'profile.wrongBody': '{name}: запущена в профиле {want}, а работает в {got}',
+    'model.wrongTitle': 'Не та модель: {name}',
+    'model.wrongBody': '{name}: работает на {got}, ожидается {want}',
+    'model.wrong': '{got}, ожидается {want}',
+    'model.wrongHint': 'Работает на {model}, ожидается {want}',
+    'menu.modelOk': 'Эта модель здесь подходит',
+    'tui.wrongModel': 'не та модель',
     // the profile switch beside the lanes control, and the tag on a card (web/src/components/ProfileSwitch.tsx, ProfileTag.tsx)
     'tb.profiles': 'Профили',
     // the profile switch folded into one pill (web/src/components/SegmentPick.tsx)
@@ -216,6 +242,16 @@ export const PROFILE_STRINGS: Record<Lang, Record<string, string | string[]>> = 
     'move.sum.refused': ['{n} не перенесена', '{n} не перенесены', '{n} не перенесено'],
     'move.sum.usual': 'новые сессии начнутся в {profile}',
     'move.err.usual': 'Обычный профиль «{lane}» не изменился: {why}',
+    'moveDevice.menu': 'Устройство',
+    'moveDevice.busy': 'Переношу на {device}…',
+    'moveDevice.done': '{name}: теперь на {device}',
+    'moveDevice.working': 'Сессия работает: перенести можно, когда освободится',
+    'moveDevice.changes': [
+      '{name} возьмёт на {device} {n} незакоммиченное изменение: {list}',
+      '{name} возьмёт на {device} {n} незакоммиченных изменения: {list}',
+      '{name} возьмёт на {device} {n} незакоммиченных изменений: {list}',
+    ],
+    'moveDevice.go': 'Перенести с ними',
     // the Profiles panel, from Settings with more than one profile folder (web/src/components/profiles)
     'set.profiles': 'Профили…',
     'prof.title': 'Профили',

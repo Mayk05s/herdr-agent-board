@@ -1,9 +1,21 @@
 // Reading what Claude Code wrote into a transcript (JSONL lines): the end of it for a card, the
 // last turns for the detail view. Pure: the file reading lives with the adapter.
 
+import { parseChecklist } from './checklist.ts'
 import { type FormQuestion, questionsOf } from './dialogs/question-form.ts'
 import { t } from './lang.ts'
-import { boardNotice, compactNotice, isNotice, type Notice, taskNotice } from './notices.ts'
+import { parseLostAccess } from './lost-access.ts'
+import {
+  boardNotice,
+  type CallNotice,
+  compactNotice,
+  isCall,
+  isNotice,
+  isTask,
+  type Notice,
+  type TaskNotice,
+  taskNotice,
+} from './notices.ts'
 import { DEFAULT_PROMPT_FILTERS, type PromptFilter } from './prompt-filters.ts'
 import {
   type CallLinks,
@@ -207,6 +219,25 @@ function isRecap(line: string | undefined, info: TranscriptInfo): boolean {
 }
 
 /**
+ * Read the newest valid TodoWrite call in an assistant message (#637). Returns true once the
+ * checklist state is settled (either active items or an empty/all-completed reset).
+ */
+function readChecklist(o: Rec, content: unknown[], errored: ReadonlySet<string>, info: TranscriptInfo): boolean {
+  if (o.isSidechain || o.forkedFrom) return false
+  const at = Date.parse(str(o.timestamp)) || undefined
+  for (let j = content.length - 1; j >= 0; j--) {
+    const b = rec(content[j])
+    if (b?.type !== 'tool_use' || str(b.name) !== 'TodoWrite') continue
+    if (errored.has(str(b.id))) continue
+    const parsed = parseChecklist(b.input, at)
+    if (!parsed.found) continue
+    if (parsed.checklist) info.checklist = parsed.checklist
+    return true
+  }
+  return false
+}
+
+/**
  * True once the tail holds everything a card needs; the reader widens its window until then. Not
  * a recap: many sessions never get one.
  */
@@ -229,7 +260,10 @@ export const tailComplete = (info: TranscriptInfo): boolean =>
 export function parseTranscriptTail(lines: string[]): TranscriptInfo {
   const info: TranscriptInfo = { title: '', prompt: '', lastText: '', question: '', replied: false, tool: null }
   const results = new Set<string>() // tool_use ids that already have a result (seen later in the file)
+  const errored = new Set<string>() // tool_use ids whose tool_result failed
   let compacted = false // a compaction came after every request still to be read: they say nothing of the context now
+  let accessSettled = false // newest assistant outcome decides whether access is currently lost (#632)
+  let checklistSettled = false // newest valid TodoWrite decides whether a checklist is active (#637)
   let i = lines.length - 1
   for (; i >= 0 && !tailComplete(info); i--) {
     const line = lines[i]
@@ -269,7 +303,11 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
       if (Array.isArray(content)) {
         for (const b of content) {
           const block = rec(b)
-          if (block?.type === 'tool_result') results.add(str(block.tool_use_id))
+          if (block?.type === 'tool_result') {
+            const id = str(block.tool_use_id)
+            results.add(id)
+            if (block.is_error === true) errored.add(id)
+          }
         }
       }
       // A reminder the board typed in (services/scheduler.ts) or a background task reporting back is not the user answering.
@@ -284,9 +322,30 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
       continue
     }
     if (o.type !== 'assistant' || !Array.isArray(content)) continue
+    if (!checklistSettled && line.includes('"TodoWrite"')) {
+      if (readChecklist(o, content, errored, info)) checklistSettled = true
+    }
+    if (!accessSettled) {
+      const errorCode = typeof o.error === 'string' ? o.error : ''
+      if (o.isApiErrorMessage === true || errorCode) {
+        const errText = content
+          .map(b => saidIn(o, b))
+          .filter(Boolean)
+          .join('\n')
+        const hit = parseLostAccess(errText, { errorCode, at: Date.parse(str(o.timestamp)) || 0 })
+        if (hit) info.lostAccess = hit
+        accessSettled = true
+      } else if (message?.model !== '<synthetic>' && content.length > 0) {
+        accessSettled = true
+      }
+    }
     // The model it runs, for the card when the status line has not said (a synthetic message's is no model).
-    if (!info.model && typeof message?.model === 'string' && message.model !== '<synthetic>')
+    if (!info.model && typeof message?.model === 'string' && message.model !== '<synthetic>') {
       info.model = message.model.slice(0, 60)
+      // When that line was written (#429): a model from before a restart is not the one it runs now.
+      const at = Date.parse(str(o.timestamp))
+      if (at) info.modelAt = at
+    }
     // The effort that turn was sent with: on the transcript's line, not in the message.
     if (!info.effort) {
       const effort =
@@ -318,11 +377,32 @@ export function parseTranscriptTail(lines: string[]): TranscriptInfo {
       } else if (!info.lastText && saidIn(o, b)) {
         info.lastText = clip(saidIn(o, b), 700)
         info.question = trailingQuestion(saidIn(o, b))
+        if (o.isApiErrorMessage === true) info.apiError = true
       }
     }
   }
-  // The window read for the rest can hold an older recap still: looked for without reading more.
-  for (; i >= 0 && info.recap === undefined; i--) isRecap(lines[i], info)
+  // The window read for the rest can hold an older recap or checklist still: looked for without reading more.
+  for (; i >= 0 && (info.recap === undefined || !checklistSettled); i--) {
+    const line = lines[i]
+    if (!line) continue
+    if (info.recap === undefined) isRecap(line, info)
+    if (!checklistSettled) {
+      if (line.includes('"is_error"') && line.includes('"type":"user"')) {
+        const o = parse(line)
+        const content = o && !o.isSidechain ? rec(o.message)?.content : undefined
+        if (Array.isArray(content)) {
+          for (const b of content) {
+            const block = rec(b)
+            if (block?.type === 'tool_result' && block.is_error === true) errored.add(str(block.tool_use_id))
+          }
+        }
+      } else if (line.includes('"TodoWrite"') && line.includes('"type":"assistant"')) {
+        const o = parse(line)
+        const content = o ? rec(o.message)?.content : undefined
+        if (o && Array.isArray(content) && readChecklist(o, content, errored, info)) checklistSettled = true
+      }
+    }
+  }
   return info
 }
 
@@ -353,25 +433,61 @@ export interface ToolTurn extends CallLinks {
   id?: string
   ask?: Pick<FormQuestion, 'question' | 'header' | 'multiSelect'>[]
   answers?: string[] | null
+  /** Only when the thread's budget cut what it sent or an answer (fitThread). */
+  cut?: true
 }
-/** A background task reporting back or a board reminder (core/notices.ts), at its time. */
-export type NoticeTurn = Notice & { role: 'notice'; at: number }
+/**
+ * A background task reporting back or a board reminder (core/notices.ts), at its time; `cut` only
+ * when the thread's budget cut its report (fitThread).
+ */
+export type NoticeTurn = Notice & { role: 'notice'; at: number; cut?: true }
 /** Another session's or a teammate's message; `cut` only when the thread's budget cut it (fitThread). */
 export type PeerTurn = Peer & { role: 'peer'; at: number; cut?: true }
 export type ConversationTurn = UserTurn | AssistantTurn | ToolTurn | NoticeTurn | PeerTurn
 
 /**
- * The most message text (prompts, answers and other sessions' messages, in characters) a thread
- * carries (#174). Messages come whole; a thread over it, as one with a pasted log of hundreds of
- * KB, has its longest messages cut to one length until it fits (fitThread), so the detail read on
- * every step stays small. The longest real message measured was under 20,000 characters, the most
- * in one real thread about 60,000.
+ * The most text (in characters) a thread carries: its messages (prompts, answers and other
+ * sessions' messages, #174), what it sent to other sessions, the answers to its question forms and
+ * the reports of its tasks and calls (#187). All come whole; a thread over it, as one with a pasted
+ * log of hundreds of KB, has its longest texts cut to one length until it fits (fitThread), so the
+ * detail read on every step stays small. The longest real message measured was under 20,000
+ * characters, the most message text in one real thread about 60,000; with the rest counted too, the
+ * last 40 turns of the largest local transcripts measured stayed under 30,000.
  */
 export const THREAD_TEXT_BUDGET = 100_000
 
 type MessageTurn = UserTurn | AssistantTurn | PeerTurn
 const isMessage = (t: ConversationTurn): t is MessageTurn =>
   t.role === 'user' || t.role === 'assistant' || t.role === 'peer'
+
+/** A notice that carries a report: a task's or a call's results; not a reminder or a compaction. */
+const isReport = (t: ConversationTurn): t is NoticeTurn & (TaskNotice | CallNotice) =>
+  t.role === 'notice' && (isTask(t) || isCall(t))
+
+/**
+ * The texts of a turn the budget counts: a message's, what a SendMessage sent and a question form's
+ * answers, a task's report or a call's results (#187).
+ */
+function textsOf(t: ConversationTurn): string[] {
+  if (isMessage(t)) return [t.text]
+  if (t.role === 'tool') return [t.send?.text ?? '', ...(t.answers ?? [])].filter(Boolean)
+  return isReport(t) && t.detail ? [t.detail] : []
+}
+
+/** `t` with each of its texts over `cap` cut to it, and `cut` when one was. */
+function capTurn(t: ConversationTurn, cap: number): ConversationTurn {
+  if (!textsOf(t).some(s => s.length > cap)) return t
+  const fit = (s: string): string => (s.length > cap ? clipWhole(s, cap) : s)
+  if (isMessage(t)) return { ...t, text: fit(t.text), cut: true }
+  if (t.role === 'tool')
+    return {
+      ...t,
+      ...(t.send && { send: { ...t.send, text: fit(t.send.text) } }),
+      ...(t.answers && { answers: t.answers.map(fit) }),
+      cut: true,
+    }
+  return isReport(t) ? { ...t, detail: fit(t.detail), cut: true } : t
+}
 
 /** `s` cut to `n` characters with "…" at the end, never between the halves of a character (an emoji). */
 function clipWhole(s: string, n: number): string {
@@ -382,11 +498,11 @@ function clipWhole(s: string, n: number): string {
 }
 
 /**
- * `turns` with their messages within `budget` (THREAD_TEXT_BUDGET): only the longest are cut, all
- * to the same length, and say so (`cut`).
+ * `turns` with their texts (textsOf) within `budget` (THREAD_TEXT_BUDGET): only the longest are
+ * cut, all to the same length, and their turns say so (`cut`).
  */
 export function fitThread(turns: ConversationTurn[], budget = THREAD_TEXT_BUDGET): ConversationTurn[] {
-  const sizes = turns.flatMap(t => (isMessage(t) ? [t.text.length] : []))
+  const sizes = turns.flatMap(t => textsOf(t).map(s => s.length))
   if (sizes.reduce((a, b) => a + b, 0) <= budget) return turns
   // Shortest first: a message that fits in its share of what is left stays whole.
   sizes.sort((a, b) => a - b)
@@ -401,7 +517,7 @@ export function fitThread(turns: ConversationTurn[], budget = THREAD_TEXT_BUDGET
     }
     left -= size
   }
-  return turns.map(t => (isMessage(t) && t.text.length > cap ? { ...t, text: clipWhole(t.text, cap), cut: true } : t))
+  return turns.map(t => capTurn(t, cap))
 }
 
 export interface ConversationOptions {
@@ -436,7 +552,8 @@ function askAnswers(ask: readonly { question: string }[], result: unknown): stri
   // Keyed by the full question text, which questionsOf keeps whole.
   return ask.map(q => {
     const a = answers[q.question]
-    return typeof a === 'string' ? clip(a, 2000) : ''
+    // Whole (#187): the thread's budget counts them with the rest (fitThread).
+    return typeof a === 'string' ? a : ''
   })
 }
 

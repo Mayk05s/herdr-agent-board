@@ -15,6 +15,8 @@ export interface MenuItem {
   id: string
   label: string
   hint?: string
+  /** One line under the label on what the item does (a Settings switch, #596); a gray item's reason shows instead. */
+  note?: string
   /** Set (true or false): the item has a check, and the menu a check column. */
   checked?: boolean
   disabled?: boolean
@@ -257,6 +259,13 @@ export interface MenuProfile {
   color: string
 }
 
+/** A device a session can be moved to (#616): `why` grays it out (not reachable now). */
+export interface MenuDevice {
+  id: string
+  title: string
+  why?: string | undefined
+}
+
 export interface CardMenuContext extends MenuContext {
   categories?: readonly MenuCategory[] | undefined
   /** The column the card shows in now. */
@@ -269,6 +278,7 @@ export interface CardMenuContext extends MenuContext {
   mokupilot?: boolean | undefined
   /** The board can fork a session into a new tab. */
   fork?: boolean | undefined
+  codexFork?: boolean | undefined
   /** A restart of it is on its way. */
   restarting?: boolean | undefined
   /** Why it cannot go to the archive now, a text key, or '' (src/core/archive.ts archiveBlock). */
@@ -277,6 +287,18 @@ export interface CardMenuContext extends MenuContext {
   profiles?: readonly MenuProfile[] | undefined
   /** The profile it runs in now, '' when the board does not know it. */
   profile?: string | undefined
+  /**
+   * A card of another device (#502): what the menu leaves out for it (open in the file manager, Go
+   * to herdr, a MokuPilot call), and while the master does not hear that device, `why`: the reason
+   * its items gray out with ("server-1 is not reachable"). Absent for this computer's cards.
+   */
+  device?: { title: string; why: string } | undefined
+  /**
+   * A master's devices, this computer among them (#616): the card's Device, which moves it to
+   * another; `deviceAt` the one it runs on. Absent on a board without devices.
+   */
+  devices?: readonly MenuDevice[] | undefined
+  deviceAt?: string | undefined
 }
 
 /** What a card's menu reads of the board item. */
@@ -329,6 +351,22 @@ export function categoryChoices({
   }))
 }
 
+/**
+ * The devices a session can be moved to (`device:<id>`, #616), the one it runs on checked. One not
+ * reachable is grayed with why; a session at work moves nowhere until it is free.
+ */
+export function deviceChoices(devices: readonly MenuDevice[], current: string, working: string): MenuItem[] {
+  return devices.map(d => {
+    const why = d.id === current ? '' : working || d.why || ''
+    return {
+      id: `device:${d.id}`,
+      label: d.title,
+      checked: d.id === current,
+      ...(why && { disabled: true, reason: why }),
+    }
+  })
+}
+
 /** The profiles a session can be moved to (`profile:<id>`), the one it runs in checked. */
 export function profileChoices(profiles: readonly MenuProfile[], current: string): MenuItem[] {
   return profiles.map(p => ({ id: `profile:${p.id}`, label: p.title, checked: p.id === current, dot: p.color }))
@@ -344,10 +382,14 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
   const { t } = ctx
   const herdrWhy = ctx.canEdit ? t('mobile.readOnly') : t('live.off')
   const editWhy = t('live.off')
+  // An offline device's card (#502) grays what goes to that device, as stale data does here.
+  const away = ctx.device?.why ? { disabled: true, reason: ctx.device.why } : null
   const herdr = (extra?: Partial<MenuItem>): Partial<MenuItem> =>
-    ctx.canMutate ? (extra ?? {}) : { disabled: true, reason: herdrWhy }
-  const edit = (): Partial<MenuItem> => (ctx.canEdit ? {} : { disabled: true, reason: editWhy })
+    ctx.canMutate ? (away ?? extra ?? {}) : { disabled: true, reason: herdrWhy }
+  const edit = (): Partial<MenuItem> => (ctx.canEdit ? (away ?? {}) : { disabled: true, reason: editWhy })
   const turn = it.status === 'working' || it.status === 'blocked'
+  // Not on this computer (#502): no folder to open here, no herdr pane to go to, no MokuPilot call.
+  const here = !ctx.device
   // A MokuPilot call agent with no pane (#326) runs in MokuPilot: nothing of herdr's or a terminal's
   // to do with it, no call or fork of it, no profile to move it to, no tab to archive.
   const own = !inMokupilot(it)
@@ -362,6 +404,7 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
   return tidy<MenuEntry>([
     { id: 'open', label: t('menu.open'), hint: 'Enter' },
     own &&
+      here &&
       (!ctx.remote || ctx.desk) && {
         id: 'focus',
         label: t(it.sleeping ? 'menu.wakeFocus' : 'menu.focus'),
@@ -375,7 +418,13 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
       claude &&
       it.agent === 'claude' && { id: 'mokupilot', label: t('mokupilot.call'), ...edit() },
     // A fork in a new tab starts a session through herdr, as a new one does.
-    own && ctx.fork && claude && it.agent === 'claude' && { id: 'fork', label: t('fork.menu'), ...herdr() },
+    own &&
+      claude &&
+      ((ctx.fork && it.agent === 'claude') || (ctx.codexFork && it.agent === 'codex')) && {
+        id: 'fork',
+        label: t('fork.menu'),
+        ...herdr(),
+      },
     // A sleeper without a pane wakes in a new tab first (#178, #204); a MokuPilot day session (#331)
     // takes it through its day's inbox.
     {
@@ -395,7 +444,7 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
     own &&
       !it.sleeping &&
       claude &&
-      it.agent === 'claude' && {
+      (it.agent === 'claude' || it.agent === 'agy') && {
         id: 'restart',
         label: t('sheet.restart'),
         ...herdr(ctx.restarting ? { disabled: true, reason: t('sheet.restartPending') } : {}),
@@ -405,6 +454,8 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
     own && it.workspace && { id: 'renameWorkspace', label: t('menu.renameWorkspace'), ...herdr() },
     // Kept in sight: first in its column, whole, left out of a tidy-up (the card's, so the board's).
     { id: 'favorite', label: t(it.favorite ? 'menu.unfavorite' : 'menu.favorite'), ...edit() },
+    // On another model than config.json's `models` expects (#429): the owner allows it here.
+    !!it.modelWrong && { id: 'modelOk', label: t('menu.modelOk'), ...edit() },
     SEP,
     {
       id: 'category',
@@ -424,9 +475,21 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
         ...herdr(),
         submenu: ctx.canMutate ? profileChoices(ctx.profiles, ctx.profile ?? '') : null,
       },
+    // The device it runs on (#616): another one moves it there, its folder by git, resumed there.
+    claude &&
+      it.agent === 'claude' &&
+      ctx.devices &&
+      ctx.devices.length >= 2 && {
+        id: 'device',
+        label: t('moveDevice.menu'),
+        ...herdr(),
+        submenu: ctx.canMutate
+          ? deviceChoices(ctx.devices, ctx.deviceAt ?? 'local', it.status === 'working' ? t('moveDevice.working') : '')
+          : null,
+      },
     dismissable && { id: 'dismiss', label: t(it.attention === 'later' ? 'asked.seen' : 'card.noReply'), ...edit() },
     SEP,
-    it.cwd && !ctx.remote && { id: 'reveal', label: t('menu.openFolder'), ...edit() },
+    it.cwd && !ctx.remote && here && { id: 'reveal', label: t('menu.openFolder'), ...edit() },
     it.cwd && { id: 'changes', label: t('changes.open') },
     claude && { id: 'history', label: t('history.open') },
     SEP,
@@ -438,10 +501,10 @@ export function cardMenu(it: MenuSession, ctx: CardMenuContext): MenuEntry[] {
       submenu: copy.filter((c): c is MenuItem => !!c),
     },
     SEP,
-    // Off the board until Return: its tab closes, Claude keeps the conversation.
+    // Off the board until Return: its tab closes, Claude/Antigravity keeps the conversation.
     own &&
       claude &&
-      it.agent === 'claude' && {
+      (it.agent === 'claude' || it.agent === 'agy') && {
         id: 'archive',
         label: t('archive.menu'),
         ...herdr(ctx.archiveWhy ? { disabled: true, reason: t(ctx.archiveWhy) } : {}),
@@ -588,6 +651,8 @@ export interface MenuLaunch {
   state: string
   pane?: string | null | undefined
   kind?: string | undefined
+  /** Placed on another device (#502): its pane is not this computer's to go to. */
+  device?: string | undefined
 }
 
 /** A starting or failed new session's menu. */
@@ -598,7 +663,7 @@ export function launchMenu(l: MenuLaunch, ctx: MenuContext): MenuEntry[] {
     l.state === 'trust' && { id: 'trust', label: t('launch.trust.go'), ...herdr },
     l.state === 'trust' && { id: 'closeTab', label: t('launch.trust.close'), ...herdr },
     l.state === 'trust' && SEP,
-    l.pane && (!ctx.remote || ctx.desk) && { id: 'focus', label: t('menu.focus'), ...herdr },
+    l.pane && !l.device && (!ctx.remote || ctx.desk) && { id: 'focus', label: t('menu.focus'), ...herdr },
     // A launch that failed only at its first message has a running session: a retry would start a second one.
     l.state === 'failed' && l.kind !== 'message' && { id: 'retry', label: t('launch.retry') },
     l.state === 'failed' && { id: 'copyError', label: t('launch.copyError') },

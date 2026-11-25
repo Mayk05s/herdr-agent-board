@@ -50,7 +50,7 @@ export interface RemoteAccess {
   /** What the panel shows (GET /api/access). */
   view(): Promise<AccessView>
   /** One change, `{ op, … }` (POST /api/access): 200 `{ ok: true, … }`, a refusal 409 `{ ok: false, error, … }`, an unknown op 400. */
-  op(body: unknown): Promise<{ status: number; body: unknown }>
+  op(body: unknown, ctx?: { remote?: boolean; address?: string }): Promise<{ status: number; body: unknown }>
   /** "Do it myself" as one command, for the tunnel's settings and key (GET /api/access/server-command). */
   command(): Promise<{ status: number; body: unknown }>
 }
@@ -244,22 +244,31 @@ export function createRemoteAccess(d: RemoteAccessDeps): RemoteAccess {
       return d.server.oneshot(key.publicKey)
     },
 
-    async op(body) {
+    async op(body, ctx) {
       const b0 = isRecord(body) ? body : {}
       const op = typeof b0.op === 'string' ? b0.op : ''
-      if (!(op in LOGS_IN)) return answer(b0)
+      if (!(op in LOGS_IN)) return answer(b0, ctx)
       // the held passwords where the request carries none; then held, or dropped, by the answer
       const before = held.view()?.until ?? null
       const b = held.fill(b0)
-      const a = await answer(b)
+      const a = await answer(b, ctx)
       held.settle(b, a, LOGS_IN[op] === true)
       if ((held.view()?.until ?? null) !== before) changed()
       return a
     },
   }
 
-  async function answer(b: Record<string, unknown>): Promise<Answer> {
+  async function answer(b: Record<string, unknown>, ctx?: { remote?: boolean; address?: string }): Promise<Answer> {
     const id = typeof b.id === 'string' ? b.id : ''
+    const stepUp = (code: unknown): Answer | null => {
+      if (!ctx?.remote) return null
+      const r = access.verifyStepUp(code, ctx.address || 'remote')
+      if (r.ok) return null
+      return {
+        status: r.status,
+        body: { ok: false, error: r.error, ...(r.retryAfterS !== undefined && { retryAfterS: r.retryAfterS }) },
+      }
+    }
     switch (b.op) {
       case 'tunnel':
         return editFields(b.fields, b.confirm === true)
@@ -302,12 +311,20 @@ export function createRemoteAccess(d: RemoteAccessDeps): RemoteAccess {
         changed()
         return ok({ steps, publicPort: found })
       }
-      case 'password':
+      case 'password': {
+        const need = stepUp(b.totpCode ?? b.currentCode ?? b.code)
+        if (need) return need
         return edited(await access.setPassword(b.password))
+      }
       case 'totp-begin':
         return ok(access.beginTotp(conf().domain))
-      case 'totp-confirm':
+      case 'totp-confirm': {
+        // Remote callers must prove a fresh code from the current TOTP (`totpCode`) in addition to
+        // `code` (the confirmation code for the new pending secret).
+        const need = stepUp(b.totpCode ?? b.currentCode)
+        if (need) return need
         return edited(access.confirmTotp(b.code))
+      }
       // Gone already (another tab, an expiry) is what was asked for, too.
       case 'passkey-remove':
         access.removePasskey(id)
@@ -318,9 +335,12 @@ export function createRemoteAccess(d: RemoteAccessDeps): RemoteAccess {
       case 'logins-end-all':
         access.endAll()
         return ok()
-      case 'lockout-lift':
+      case 'lockout-lift': {
+        const need = stepUp(b.totpCode ?? b.currentCode ?? b.code)
+        if (need) return need
         access.liftLockout()
         return ok()
+      }
       // Setting up the server: answers that never hold the body (the passwords)
       case 'server-admin':
         return d.server.admin(b)

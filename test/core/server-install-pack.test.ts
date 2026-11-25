@@ -1,12 +1,12 @@
 // Path B of the board on a server (core/server-install.ts): the command that receives the local
 // checkout's pack on the server, the setup link kept out of the install's output, and the pack's
-// mark added to its tar (core/tar.ts).
+// mark added to its tar (core/tar-append.ts).
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { receiverScript, setupLinkIn } from '../../src/core/server-install.ts'
-import { tarAppend } from '../../src/core/tar.ts'
+import { tarAppend } from '../../src/core/tar-append.ts'
 
 describe("path B's command and its output", () => {
   test('the receiver: the pack from stdin, unpacked in a folder of root’s own, its bootstrap run without a question', () => {

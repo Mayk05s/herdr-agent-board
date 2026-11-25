@@ -17,6 +17,8 @@
 // local board's page and on the board's own server (offersSecrets). Backup… the backup of the
 // board's database (#233, components/backup/BackupPanel.tsx), and Time tracking… its clients and
 // projects (#237, components/time/TimeSettingsPanel.tsx), there too (offersBackup, offersTimeSettings).
+// Updates… the board's update of itself from git (#617, components/updates/UpdatesPanel.tsx), on
+// the local board's page.
 // Server… opens the board's own server's state (components/server/ServerPanel.tsx), on its page
 // only (models/server-state.ts offersServer).
 // Passwords opens the owner's password vault (/vault, src/core/vault.ts) in a tab of its own, on the
@@ -30,10 +32,14 @@
 // went away (by itself, only an offer, by hand only), and after how many idle minutes.
 // Auto-compact (#378, src/core/compact.ts) is the board's: Off, or the default limit every session
 // without one of its own compacts at (a session's own is set on its sheet or with `board compact`).
+// Watches (#486), Decisions (#487, with whether a default may answer) and Away journal (#489) after
+// Threads, and under Threads while they are on, Case files (#488) and Verified done (#492): Off or
+// On, on the local board's page, each with one line on what it does (#596).
 import { FOLD_MODES, type FoldMode, isFoldMode } from '../../../src/core/fold-mode.ts'
 import { isPresenceMode, PRESENCE_MODES, type PresenceMode } from '../../../src/core/presence.ts'
 import { isTodoMode, TODO_MODES, type TodoMode } from '../../../src/core/todos.ts'
 import type { Translator } from '../../../src/core/types.ts'
+import { isWatch } from '../../../src/core/watches.ts'
 import { isThreadMode, THREAD_MODES, type ThreadMode } from '../../../src/core/work-threads.ts'
 import { CARD_TEXTS, type CardText, isCardText } from './card-text.ts'
 import { isLook, LOOKS } from './look.ts'
@@ -72,6 +78,10 @@ export interface SettingsNow {
   secrets?: boolean
   /** The local board's page, or the board's own server's (offersBackup): Backup… is offered (#233). */
   backup?: boolean
+  /** The local board's page: Updates… is offered (#617). */
+  updates?: boolean
+  /** The local board's page: Housekeeping… is offered (#652). */
+  housekeeping?: boolean
   /** The local board's page, or the board's own server's (offersTimeSettings): Time tracking… is offered (#237). */
   timeSettings?: boolean
   /** The board's own server's page with its password vault (offersVault): Passwords opens it. */
@@ -82,6 +92,8 @@ export interface SettingsNow {
   calendarSettings?: boolean
   /** The local board's page with the payload's teamRev (#231): Team… is offered. */
   team?: boolean
+  /** The local page of a board with `nodes` (the payload's `devices`, #510): Devices… is offered. */
+  devices?: boolean
   /** This page signed in through the owner's domain: Sign out is offered, last. */
   signOut?: boolean
   /** Presence as the board has it ('none': not on); none given: no Presence item (an older board). */
@@ -98,6 +110,139 @@ export interface SettingsNow {
   localPaths?: boolean
   /** Auto-compact's default limit as the board has it (#378, '' for off); none given: no item (an older board). */
   compact?: string | undefined
+  /** Watches on (#486, the payload's `watches`); none given: no item (another device's page). */
+  watches?: boolean | undefined
+  /** Decisions on (#487, the payload's `decisions`); none given: no item (another device's page). */
+  decisions?: boolean | undefined
+  /** Whether a decision's default may answer it (the payload's `decisions.defaults`); none given: no choice (decisions off). */
+  decisionsDefaults?: boolean | undefined
+  /** The away journal on (#489, the payload's `journal`); none given: no item (another device's page). */
+  journal?: boolean | undefined
+  /** Case files on (#488, the payload's `threads.cases`); none given: no item (threads off, another device's page). */
+  threadsCases?: boolean | undefined
+  /** Verified done on (#492, the payload's `threads.verify`); none given: no item (threads off, another device's page). */
+  threadsVerify?: boolean | undefined
+  /** Watches being checked now: Off says they stop (#596). */
+  watchesRunning?: number | undefined
+  /** Decisions' defaults due to run: Off says they will not (#596). */
+  defaultsRunning?: number | undefined
+  /** The journal is on but journal.db did not open: what went wrong, shown in place of its line. */
+  journalError?: string | undefined
+}
+
+/** The features Settings switches on and off by themselves (#596). */
+export const FEATURE_SWITCHES = ['watches', 'decisions', 'journal'] as const
+export type FeatureSwitch = (typeof FEATURE_SWITCHES)[number]
+const isFeatureSwitch = (v: unknown): v is FeatureSwitch => FEATURE_SWITCHES.includes(v as FeatureSwitch)
+
+/**
+ * The switches as the payload says them (#596): watches by `watches`, decisions and the journal by
+ * their own lines (there only while on), case files and verified done by the threads line's
+ * `cases` and `verify` (absent while threads are off). Defaults only while decisions are on.
+ */
+export function featuresNow(payload: {
+  watches?: true | undefined
+  decisions?: { defaults: boolean; items?: readonly { defaultAt: number | null; held: boolean }[] } | undefined
+  journal?: { strip?: unknown; last?: unknown; error?: string | undefined } | undefined
+  threads?: { cases?: true; verify?: true } | undefined
+  schedules?: readonly unknown[] | undefined
+}): FeaturesNow {
+  const { decisions, threads, journal } = payload
+  const watches = payload.watches === true
+  const checked = watches ? (payload.schedules ?? []).filter(e => isWatch(e) && !e.off).length : 0
+  const defaults = (decisions?.items ?? []).filter(d => d.defaultAt !== null && !d.held).length
+  return {
+    watches,
+    decisions: !!decisions,
+    ...(decisions && { decisionsDefaults: decisions.defaults !== false }),
+    journal: !!journal,
+    ...(journal?.error && { journalError: journal.error }),
+    ...(checked && { watchesRunning: checked }),
+    ...(defaults && { defaultsRunning: defaults }),
+    ...(threads && { threadsCases: threads.cases === true, threadsVerify: threads.verify === true }),
+  }
+}
+
+type FeaturesNow = Pick<
+  SettingsNow,
+  | 'watches'
+  | 'decisions'
+  | 'decisionsDefaults'
+  | 'journal'
+  | 'journalError'
+  | 'watchesRunning'
+  | 'defaultsRunning'
+  | 'threadsCases'
+  | 'threadsVerify'
+>
+
+/**
+ * One feature's Off and On (#596), its line under the name (`note`: another line in its place);
+ * `running` things Off would leave behind are said on Off while it is on; `more` after them.
+ */
+function switchItem(
+  now: SettingsNow,
+  edit: { disabled?: boolean; reason?: string },
+  id: FeatureSwitch,
+  on: boolean | undefined,
+  o: { more?: MenuEntry[]; running?: number | undefined; note?: string | undefined } = {},
+): MenuEntry[] {
+  const { t } = now
+  if (on === undefined) return []
+  const left = on && o.running ? { note: t(`set.${id}.offNote`, { n: o.running }) } : {}
+  return [
+    {
+      id,
+      label: t(`set.${id}`),
+      note: o.note ?? t(`set.${id}.note`),
+      ...edit,
+      submenu: [
+        { id: `${id}:off`, label: t('set.feature.off'), checked: !on, ...left },
+        { id: `${id}:on`, label: t('set.feature.on'), checked: on },
+        ...(o.more ?? []),
+      ],
+    },
+  ]
+}
+
+function featureItems(now: SettingsNow, edit: { disabled?: boolean; reason?: string }): MenuEntry[] {
+  const { t, decisions, decisionsDefaults } = now
+  const defaults: MenuEntry[] =
+    decisions && decisionsDefaults !== undefined
+      ? [
+          { separator: true as const },
+          { id: 'decisionsDefaults:on', label: t('set.decisions.defaults'), checked: decisionsDefaults },
+          { id: 'decisionsDefaults:off', label: t('set.decisions.noDefaults'), checked: !decisionsDefaults },
+        ]
+      : []
+  return [
+    ...switchItem(now, edit, 'watches', now.watches, { running: now.watchesRunning }),
+    ...switchItem(now, edit, 'decisions', decisions, { more: defaults, running: now.defaultsRunning }),
+    ...switchItem(now, edit, 'journal', now.journal, {
+      note: now.journal && now.journalError ? t('set.journal.error', { error: now.journalError }) : undefined,
+    }),
+  ]
+}
+
+/** Under Threads while they are on (#596): case files and verified done, a check each; a pick asks for the other state. */
+function threadParts(now: SettingsNow): MenuEntry[] {
+  const { t } = now
+  const parts = (
+    [
+      ['threadsCases', 'cases', now.threadsCases],
+      ['threadsVerify', 'verify', now.threadsVerify],
+    ] as const
+  ).filter(([, , on]) => on !== undefined)
+  if (now.threads === 'none' || !parts.length) return []
+  return [
+    { separator: true as const },
+    ...parts.map(([id, name, on]) => ({
+      id: `${id}:${on ? 'off' : 'on'}`,
+      label: t(`set.${name}`),
+      note: t(`set.${name}.note`),
+      checked: !!on,
+    })),
+  ]
 }
 
 /** The default limits Settings → Auto-compact offers (#378); config.json or the CLI may hold any other. */
@@ -158,6 +303,7 @@ function threadsItem(now: SettingsNow, edit: { disabled?: boolean; reason?: stri
                 checked: threadsShare === (id === 'shared'),
               })),
             ]),
+        ...threadParts(now),
       ],
     },
   ]
@@ -262,6 +408,7 @@ export function settingsMenu(now: SettingsNow): MenuEntry[] {
         ]
       : []),
     ...threadsItem(now, edit),
+    ...featureItems(now, edit),
     ...compactItem(now, edit),
     ...(now.profiles ? [{ id: 'profiles', label: t('set.profiles') }] : []),
     ...(now.wake ? [{ id: 'wake', label: t('set.wake') }] : []),
@@ -270,12 +417,15 @@ export function settingsMenu(now: SettingsNow): MenuEntry[] {
     ...(now.access ? [{ id: 'access', label: t('set.access') }] : []),
     ...(now.secrets ? [{ id: 'secrets', label: t('set.secrets') }] : []),
     ...(now.backup ? [{ id: 'backup', label: t('set.backup') }] : []),
+    ...(now.updates ? [{ id: 'updates', label: t('set.updates') }] : []),
+    ...(now.housekeeping ? [{ id: 'housekeeping', label: t('set.housekeeping') }] : []),
     ...(now.timeSettings ? [{ id: 'timeSettings', label: t('set.time') }] : []),
     ...(now.server ? [{ id: 'server', label: t('set.server') }] : []),
     ...(now.vault ? [{ id: 'vault', label: t('set.vault') }] : []),
     ...(now.calendarSettings ? [{ id: 'calendarSettings', label: t('set.calendar') }] : []),
     ...(now.localPaths ? [{ id: 'localPaths', label: t('set.localPaths') }] : []),
     ...(now.team ? [{ id: 'team', label: t('set.team') }] : []),
+    ...(now.devices ? [{ id: 'devices', label: t('node.set.devices') }] : []),
     { separator: true },
     { id: 'sleepers', label: t('tb.sleepersTitle'), checked: now.sleepers },
     ...(now.fold
@@ -309,17 +459,24 @@ export type SettingPick =
   | { kind: 'access' }
   | { kind: 'secrets' }
   | { kind: 'backup' }
+  | { kind: 'updates' }
+  | { kind: 'housekeeping' }
   | { kind: 'timeSettings' }
   | { kind: 'vault' }
   | { kind: 'server' }
   | { kind: 'calendarSettings' }
   | { kind: 'team' }
+  | { kind: 'devices' }
   | { kind: 'signout' }
   | { kind: 'presence'; value: PresenceMode | 'none' }
   | { kind: 'presenceIdle'; value: number }
   | { kind: 'todos'; value: TodoMode }
   | { kind: 'threads'; value: ThreadMode }
   | { kind: 'threadsShare'; value: boolean }
+  | { kind: 'feature'; feature: FeatureSwitch; value: boolean }
+  | { kind: 'decisionsDefaults'; value: boolean }
+  | { kind: 'threadsCases'; value: boolean }
+  | { kind: 'threadsVerify'; value: boolean }
   | { kind: 'compact'; value: string }
   | { kind: 'localPaths' }
   | null
@@ -388,17 +545,26 @@ export function settingPicked(id: string): SettingPick {
   if (id === 'access') return { kind: 'access' }
   if (id === 'secrets') return { kind: 'secrets' }
   if (id === 'backup') return { kind: 'backup' }
+  if (id === 'updates') return { kind: 'updates' }
+  if (id === 'housekeeping') return { kind: 'housekeeping' }
   if (id === 'timeSettings') return { kind: 'timeSettings' }
   if (id === 'vault') return { kind: 'vault' }
   if (id === 'server') return { kind: 'server' }
   if (id === 'calendarSettings') return { kind: 'calendarSettings' }
   if (id === 'team') return { kind: 'team' }
+  if (id === 'devices') return { kind: 'devices' }
   if (id === 'signout') return { kind: 'signout' }
   if (kind === 'presence' && (value === 'none' || isPresenceMode(value))) return { kind, value }
   if (kind === 'presenceIdle' && /^\d+$/.test(value)) return { kind, value: Number(value) }
   if (kind === 'todos' && isTodoMode(value)) return { kind, value }
   if (kind === 'threads' && isThreadMode(value)) return { kind, value }
   if (kind === 'threadsShare' && (value === 'shared' || value === 'local')) return { kind, value: value === 'shared' }
+  // The feature switches (#596): on or off, as the item asks.
+  if (value === 'on' || value === 'off') {
+    if (isFeatureSwitch(kind)) return { kind: 'feature', feature: kind, value: value === 'on' }
+    if (kind === 'decisionsDefaults' || kind === 'threadsCases' || kind === 'threadsVerify')
+      return { kind, value: value === 'on' }
+  }
   // Off is '' for the board; a limit as the menu wrote it.
   if (kind === 'compact' && value) return { kind, value: value === 'off' ? '' : value }
   if (id === 'localPaths') return { kind: 'localPaths' }

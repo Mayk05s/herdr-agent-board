@@ -8,8 +8,10 @@
 // page's (hooks/useContextMenus.ts).
 import { archiveBlock } from '../../../src/core/archive.ts'
 import { itemProfile, shownProfiles } from '../../../src/core/item-profile.ts'
+import type { BoardDevice } from '../../../src/core/payload.ts'
 import type { ScheduleEntry } from '../../../src/core/schedule-rules.ts'
 import type { Item, LaunchView, Translator } from '../../../src/core/types.ts'
+import { deviceTitle, nodeLook, reachable } from './devices.ts'
 import type { LanePicks } from './lane-picks.ts'
 import {
   boardMenu,
@@ -74,6 +76,8 @@ export interface BoardMenuActions {
   dismiss(key: string, from: MenuOrigin): unknown
   /** Into the favorites, or out of them. */
   favorite(key: string, from: MenuOrigin): unknown
+  /** "This model is fine here" (#429): its card's warning goes until it runs on another family. */
+  modelOk?(key: string, from: MenuOrigin): unknown
   clear(key: string, from: MenuOrigin): unknown
   changes(key: string, from: MenuOrigin): unknown
   history(key: string, from: MenuOrigin): unknown
@@ -87,6 +91,8 @@ export interface BoardMenuActions {
   archive(key: string, from: MenuOrigin): unknown
   /** To the Claude profile `id`, keeping its conversation (#256, models/profile-move.ts). */
   profile(key: string, id: string): unknown
+  /** To the device `id` (titled `title`), keeping its conversation (#616, models/device-move.ts). */
+  device?(key: string, id: string, title: string): unknown
   /** The lane's sessions `keys` to the profile `id`; `usual`: it becomes the lane's usual profile too. */
   laneProfile(lane: MenuCategory, id: string, keys: readonly string[], usual: boolean): unknown
   /** The sleeping sessions in "Idle" asleep `days` days or more to the archive: in lane `lane`, or in the lanes on show. */
@@ -142,10 +148,13 @@ export interface BoardMenuDeps {
       /** The board runs on its own server (src/core/on-server.ts). */
       server?: boolean | undefined
       fork?: boolean | undefined
+      codexFork?: boolean | undefined
       /** The schedule: a restart of a session on its way grays its Restart. */
       schedules?: readonly ScheduleEntry[] | undefined
       /** The Claude profiles (a board before them sent none). */
       profiles?: readonly (MenuProfile & { hidden: boolean })[] | undefined
+      /** A master's devices (#502); absent on every other board. */
+      devices?: readonly BoardDevice[] | undefined
     }
   }
   /** The board's sessions, for a lane's: those its menu moves to another profile. */
@@ -269,6 +278,15 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
   const state = board.state()
   const nameEl = el.matches?.('.card') ? el.querySelector('.name') : el
   const profiles = movable(board)
+  // A card of another device (#502); none for this computer's.
+  const node = nodeLook(it, state.data.devices, Date.now(), t)
+  // A master's devices, for the card's Device (#616): a revoked one is none to move to.
+  const devices = (state.data.devices ?? [])
+    .filter(d => !d.revoked)
+    .map(d => {
+      const title = deviceTitle(d, t)
+      return { id: d.id, title, why: reachable(d) ? '' : t('node.offline', { name: title }) }
+    })
   return {
     label: it.name,
     items: cardMenu(it, {
@@ -276,12 +294,15 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
       terminal: state.data.terminal !== false,
       mokupilot: !!state.data.mokupilot,
       fork: !!state.data.fork,
+      codexFork: !!state.data.codexFork,
       categories: state.data.categories,
       column: board.column(it),
       category: board.category(it),
       restarting: (state.data.schedules ?? []).some(e => e.kind === 'restart' && e.key === key && !e.failed),
       archiveWhy: archiveBlock(it, state.data.schedules ?? []),
       ...(profiles && { profiles, profile: itemProfile(it, state.data.profiles ?? [])?.id ?? '' }),
+      ...(node && { device: { title: node.title, why: node.why } }),
+      ...(devices.length >= 2 && { devices, deviceAt: it.device ?? 'local' }),
     }),
     pick: id => {
       const [what, arg = ''] = id.split(/:(.*)/s)
@@ -289,6 +310,10 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
       if (what === 'cat') return void board.do.move(key, { cat: arg })
       if (what === 'profile')
         return void (arg !== itemProfile(it, state.data.profiles ?? [])?.id && board.do.profile(key, arg))
+      if (what === 'device')
+        return void (
+          arg !== (it.device ?? 'local') && board.do.device?.(key, arg, devices.find(d => d.id === arg)?.title ?? arg)
+        )
       if (what === 'col') return void board.do.move(key, { column: arg })
       if (what === 'copy') {
         const values: Record<string, string | null | undefined> = {
@@ -304,6 +329,7 @@ function forCard(board: BoardMenuDeps, key: string, it: Item, el: Element, at: P
         return void board.do.renameWorkspace(key, el.closest('.sheet-head')?.querySelector('#sheet-workspace') ?? null)
       if (id === 'reveal') return void board.do.openPath(it.cwd, 'open')
       if (id === 'newHere') return void board.do.newSession({ item: it }, from)
+      if (id === 'modelOk') return void board.do.modelOk?.(key, from)
       if (isCardAction(id)) board.do[id](key, from)
     },
   }

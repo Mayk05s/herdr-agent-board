@@ -6,11 +6,24 @@
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching terminal escape sequences
 const ESCAPES = /\x1b\[([0-9;?]*)([A-Za-z])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b./g
 const RULE = /^\s*─{8,}/
+// The rule over the box carries the session's name at its right end ("──── anna ─"). A name
+// longer than the rule takes its whole start, cut with "…" and no run of dashes left (#484).
+const NAMED_RULE = /^\s*─*\s+\S.*\s─\s*$/
+const width = (s: string): number => [...s.trimEnd()].length
+
+/**
+ * Whether a plain line is the rule Claude Code draws over its input box: a run of dashes, or a
+ * rule that carries the session's name, which Claude draws as wide as the rule under the box
+ * (`bottom`, the next rule down; undefined when there is none), so a heading that ends in a dash
+ * over a picker is not taken for it.
+ */
+export const boxTop = (top: string, bottom: string | undefined): boolean =>
+  RULE.test(top) || (NAMED_RULE.test(top) && bottom !== undefined && RULE.test(bottom) && width(top) === width(bottom))
 
 export const stripAnsi = (s: string): string => s.replace(ESCAPES, '')
 
 /** A line without its escapes and without the parts drawn dim. */
-function nonDimText(line: string): string {
+export function nonDimText(line: string): string {
   let dim = false
   let out = ''
   let last = 0
@@ -41,11 +54,12 @@ export function inputDraft(ansiScreen: unknown): string | null {
   const plain = (i: number): string => stripAnsi(lines[i] ?? '')
   for (let i = lines.length - 1; i > 0; i--) {
     if (!plain(i).trimStart().startsWith('❯')) continue
-    if (!RULE.test(plain(i - 1))) continue
+    if (!RULE.test(plain(i - 1)) && !NAMED_RULE.test(plain(i - 1))) continue
     const parts: string[] = []
     let end = i
     for (; end < lines.length && !(end > i && RULE.test(plain(end))); end++) parts.push(nonDimText(lines[end] ?? ''))
     if (end === lines.length) return null
+    if (!boxTop(plain(i - 1), plain(end))) continue
     // A dialog can leave the previous input box above it, with or without a new ❯ cursor.
     // Its instructions are not the normal prompt's "esc to interrupt" or "tab to accept".
     const footer = lines
@@ -78,4 +92,34 @@ export function stillPasting(ansiScreen: unknown): boolean {
   let last = -1
   for (let i = lines.length - 1; i >= 0 && last < 0; i--) if (RULE.test(lines[i] ?? '')) last = i
   return last >= 0 && lines.slice(last + 1).some(l => /^\s*Pasting(?:…|\.\.\.)\s*$/.test(l))
+}
+
+// The line under a dialog that says how to answer it: "Enter to confirm · Esc to cancel", "Esc to
+// start without it", "Enter to select · ↑/↓ to navigate". Not a working Claude's "esc to interrupt".
+const HOW_TO_ANSWER = /\b(?:enter|esc(?:ape)?) to (?!interrupt\b)\p{L}/iu
+const CHOICE = /^\s*❯\s*\S/
+
+/**
+ * Whether the screen ends in a dialog: what Claude Code draws when it wants an answer before its
+ * input box takes text (the folder trust, a project's MCP servers, a permission, a first-run notice
+ * or an upsell). Told by its shape, not its words: a choice marked ❯, and under it, among the
+ * screen's last three lines (a narrow pane wraps it), how to answer it. A complete current input box
+ * is never one (inputDraft).
+ */
+export function choiceDialog(ansiScreen: unknown): boolean {
+  if (inputDraft(ansiScreen) !== null) return false
+  const lines = stripAnsi(String(ansiScreen ?? ''))
+    .split(/\r?\n/)
+    .filter(l => l.trim())
+  const how = lines.findIndex((l, i) => i >= lines.length - 3 && HOW_TO_ANSWER.test(l))
+  return how > 0 && lines.slice(0, how).some(l => CHOICE.test(l))
+}
+
+/** What a screen shows where a line would be typed: the input box and its text, a dialog, or neither (null). */
+export type PromptScreen = { kind: 'box'; draft: string } | { kind: 'dialog' } | null
+
+export function promptScreen(ansiScreen: unknown): PromptScreen {
+  const draft = inputDraft(ansiScreen)
+  if (draft !== null) return { kind: 'box', draft }
+  return choiceDialog(ansiScreen) ? { kind: 'dialog' } : null
 }

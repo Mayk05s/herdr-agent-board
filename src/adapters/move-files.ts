@@ -189,6 +189,30 @@ export function copySession(
   }
 }
 
+/** Whether the Claude state file `file` trusts `cwd` (it or a folder above it); false when there is none. Throws when it does not parse. */
+export function trustsFolder(file: string, cwd: string): boolean {
+  return !!cwd && trustedKey(readState(file), cwd) !== null
+}
+
+/**
+ * Trust in `cwd` written into the Claude state file `file`, as copyTrust writes the source's
+ * (#616: a session moved to another device, whose folder there is another path): 'copied', or
+ * 'trusted' when it trusts the folder already, or 'none' when the file is not there yet.
+ */
+export function grantTrust(
+  file: string,
+  cwd: string,
+  platform: string = process.platform,
+): 'copied' | 'trusted' | 'none' {
+  const target = readState(file)
+  if (cwd && trustedKey(target, cwd) !== null) return 'trusted'
+  const next = withTrust({ projects: { [cwd]: { hasTrustDialogAccepted: true } } }, target, cwd, platform)
+  if (!next) return 'none'
+  const mode = process.platform === 'win32' ? undefined : statSync(file).mode & 0o777
+  replaceFile(file, `${JSON.stringify(next, null, 2)}\n`, undefined, mode)
+  return 'copied'
+}
+
 /** A JSON file's value, a BOM taken off; null when there is none. Throws when it is there but does not parse. */
 function readState(file: string): unknown {
   if (!existsSync(file)) return null

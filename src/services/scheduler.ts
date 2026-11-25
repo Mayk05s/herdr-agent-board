@@ -6,6 +6,11 @@
 // `scheduleWaitMin` minutes of trying; then the run is logged as missed. A one-off entry goes
 // after its run; a cron one moves to its next time.
 //
+// Plain one-off reminders due for one session in the same minute, with the same `idle`, go as one
+// prompt, a line each with its own tag (#306): one turn of the session for all of them. Each is
+// claimed, held, sent and logged as it would be alone; a cron entry, a restart, a sleep, a call's
+// results and a retry-safe report always go on their own.
+//
 // Runs that came due while the board was off: a one-off is sent once, saying how late it is; the
 // missed runs of a cron entry go as one, saying how many. Time the board was off does not count
 // against the wait. An entry is claimed in its file before it is sent, so a second board (a
@@ -39,27 +44,41 @@
 // sleeping session: it waits, without counting the wait, and goes once the session is awake. Only
 // such entries take that branch; every other one goes down the code above.
 //
+// Watches (#486, `board wait --probe`): while config.json's `watches` is on, each tick also runs the
+// probes that are due (services/watches.ts), without asking herdr unless one is; off, no watch is
+// looked at. A probe that fires turns its watch into a plain reminder, sent as above.
+//
 // It also closes the panes of sessions put in the archive once their time to come back from the
 // page's toast is over (archive.ts closeDue): a board that restarts meanwhile does it on start.
 import { type FSWatcher, mkdirSync, watch } from 'node:fs'
 import { beginReport, deferReport, settleReport, verifyReport } from '../adapters/call-receipts.ts'
 import { readCard } from '../adapters/cards.ts'
+import { herdr } from '../adapters/herdr.ts'
+import { nameForCwd, nameScript } from '../adapters/name-for-cwd.ts'
 import { archiveDir, scheduleDir } from '../adapters/paths.ts'
-import { getEntry, listEntries, logRun, removeEntry, updateEntry } from '../adapters/schedule-store.ts'
+import { getEntry, listEntries, listWatches, logRun, removeEntry, updateEntry } from '../adapters/schedule-store.ts'
 import { itemProfile } from '../core/item-profile.ts'
 import { t } from '../core/lang.ts'
+import { parseNodeKey } from '../core/nodes.ts'
 import { callTitle } from '../core/notices.ts'
 import { profileLabel, sessionProfile } from '../core/profiles.ts'
-import { cleanText, promptOf, type ScheduleEntry, targetOf } from '../core/schedule-rules.ts'
+import { cleanText, NODE_OFFLINE_WHY, promptOf, type ScheduleEntry, targetOf } from '../core/schedule-rules.ts'
 import type { Item } from '../core/types.ts'
 import { wakeOffByKey } from '../core/wake/mode.ts'
+import { watchesConfig } from '../core/watches.ts'
 import { nextRun } from '../core/when.ts'
+import { threadsConfig } from '../core/work-threads.ts'
+import { workdeskConfig } from '../core/workdesk.ts'
 import { type ActionResult, checkWake, readyToSleep, send, sleepSession, wake } from './actions.ts'
 import { closeDue, listArchive } from './archive.ts'
 import { collect } from './board.ts'
+import { defaultDue, recordDefault } from './decisions.ts'
 import type { Deps } from './deps.ts'
 import { moveAsleep, moveTarget } from './move.ts'
 import { currentWakeMode } from './wake/mode.ts'
+import { watchPass } from './watches.ts'
+import { recordOwnerPostFailure } from './work-threads.ts'
+import type { Verifier } from './work-verify.ts'
 
 // A run on its way (waking a session takes up to three minutes) holds its claim this long.
 const CLAIM_MS = 5 * 60_000
@@ -88,14 +107,81 @@ const waitsForWake = (item: Item, r: ActionResult): boolean =>
 /** A number an entry keeps (the scheduler's own fields), else undefined. */
 const numberOf = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined)
 
+/** A plain one-off reminder, which goes in one prompt with others due beside it (#306). */
+const joins = (e: ScheduleEntry): boolean => !e.kind && !e.cron && !e.receipt && e.decision === undefined
+// The texts of a joined prompt, at most: herdr gets the prompt as one argument, and Windows refuses
+// a long one. What is left over goes on the next tick, as the next prompt.
+const JOINED_MAX = 8000
+
+/** How a device stands for remote delivery (#695). */
+export type RemoteDeviceState = 'online' | 'offline' | 'revoked' | 'forgotten'
+
+/** How a delivery to another device's session went (RemoteDelivery). */
+export type RemoteSent =
+  | { ok: true }
+  | {
+      ok: false
+      error: string
+      gone?: boolean
+      asleep?: boolean
+      busy?: boolean
+      dialog?: boolean
+      draft?: boolean
+      offline?: boolean
+      end?: boolean
+    }
+
+/**
+ * Delivery to a session of another device (#501, docs/design/nodes 10 item 5): a reminder the
+ * master holds for a node's card goes to that node as the page's message does
+ * (server/routes/node-proxy.ts), and the node's board types it into its own herdr.
+ */
+export interface RemoteDelivery {
+  deviceState?(device: string): RemoteDeviceState
+  send(
+    key: string,
+    text: string,
+    o: { requestId: string; idle: boolean; noWake: boolean; draft?: boolean },
+  ): Promise<RemoteSent>
+}
+
 /**
  * Start sending due entries. `deps.cfg` is the live config: scheduleTickSec (15), scheduleWaitMin
  * (240), restartSettleSec (8). `onChange` is called after each run, so the board redraws.
+ * `remote`: the delivery to another device's session while config.json has `nodes`, else null;
+ * asked only for an entry whose key has a device's prefix (core/nodes.ts parseNodeKey), which
+ * exists only with `nodes`. Every other entry goes as it went before.
  */
-export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onChange?: () => void }): {
+export function startScheduler({
+  deps,
+  onChange = () => {},
+  remote,
+  remoteItems,
+  verify,
+}: {
+  deps: Deps
+  onChange?: () => void
+  remote?: () => RemoteDelivery | null
+  /** Other devices' items from the aggregate while `nodes` is on (#675), only handed to the verifier. */
+  remoteItems?: () => readonly Item[]
+  /** Verified done (#492, services/work-verify.ts): its sweep on every tick, its `verify` entries. */
+  verify?: Verifier
+}): {
   stop(): void
+  /** Pause scheduled ticks during a master handover (#697). */
+  pause(): void
+  /** Resume scheduled ticks after a paused/rolled-back handover (#697). */
+  resume(): void
+  /** A device's link or revocation state changed: try its held entries at once (#695). */
+  wakeDevice(device: string): void
+  /** `nodes` config changed: try held entries for all held devices at once (#695). */
+  wakeDevices(): void
 } {
   const { cfg, log } = deps
+  const withRemote = (local: Item[]): Item[] => {
+    const extra = remoteItems?.()
+    return extra?.length ? [...local, ...extra] : local
+  }
   // Five minutes at most: setTimeout takes no more than 24 days, and a larger value runs at once.
   const tickMs = (): number => Math.min(300, Math.max(0.1, positive(cfg.scheduleTickSec, 15))) * 1000
   const patience = (): number => positive(cfg.scheduleWaitMin, 240) * 60_000
@@ -104,13 +190,24 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
   // Runs that went out but whose entry could not be updated (its lock was taken): the next
   // tick finishes the entry instead of sending it again.
   const delivered = new Map<string, number>() // id -> next
+  const heldDevices = new Set<string>()
+  const wokenDevices = new Set<string>()
   let waking = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let ticking = false
   let stopped = false
+  let paused = false
+  // Watches (#486, services/watches.ts): their probes, only while config.json's `watches` is on.
+  const watches = watchPass({ deps, patience, onChange })
+
+  function workdeskDue(entry: ScheduleEntry): boolean {
+    if (entry.workdeskTaskId === undefined) return true
+    const watch = workdeskConfig(cfg.workdesk)
+    return !!watch && !!threadsConfig(cfg.threads) && (!watch.onlyTaskId || watch.onlyTaskId === entry.workdeskTaskId)
+  }
 
   async function tick(): Promise<void> {
-    if (ticking || stopped) return
+    if (ticking || stopped || paused) return
     ticking = true
     try {
       const archived = await closeDue(deps, { log }).catch((err: unknown) => {
@@ -118,13 +215,45 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
         return null
       })
       if (archived?.closed || archived?.kept) onChange()
+      if (watchesConfig(cfg.watches)) void watches.pass()
+      // Held dones get their verifiers, failed launches go to the owner (#492): only while threads.verify is set.
+      if (verify && threadsConfig(cfg.threads)?.verify)
+        await verify
+          .sweep(async () => withRemote(await collect(deps)))
+          .catch((err: unknown) => log(`verify: ${messageOf(err)}`))
       const now = Date.now()
+      const woken = new Set(wokenDevices)
+      wokenDevices.clear()
+      const all = listEntries()
+      heldDevices.clear()
+      for (const e of all) {
+        if (e.why !== NODE_OFFLINE_WHY) continue
+        const at = parseNodeKey(e.key)
+        if (at) heldDevices.add(at.device)
+      }
       // A run that waits for its session is tried again once a tick, not on every file change; a
       // restart herdr-wake refused, not before its retry time.
       const tried = (e: ScheduleEntry): boolean => typeof e.tried === 'number' && e.tried > now - tickMs() * 0.9
       const later = (e: ScheduleEntry): boolean => typeof e.retryAt === 'number' && e.retryAt > now
-      const due = listEntries().filter(e => e.next <= now && !flying.has(e.key) && !tried(e) && !later(e))
+      const remoteWoke = (e: ScheduleEntry): boolean => {
+        if (e.why !== NODE_OFFLINE_WHY) return false
+        const at = parseNodeKey(e.key)
+        return !!at && woken.has(at.device)
+      }
+      // Due: what may go now. One tried a moment ago still goes along with another due beside it.
+      const ready = all.filter(e => e.next <= now && !later(e) && workdeskDue(e))
+      const due = ready.filter(e => !flying.has(e.key) && (!tried(e) || remoteWoke(e)))
       if (!due.length) return
+      // Keep remote deliveries for the same session strictly FIFO when an earlier entry waits on dialog/draft/busy.
+      const headBlocked = (e: ScheduleEntry): boolean =>
+        ready.some(
+          earlier =>
+            earlier !== e &&
+            earlier.key === e.key &&
+            (earlier.next < e.next || (earlier.next === e.next && (earlier.created ?? 0) < (e.created ?? 0))) &&
+            earlier.why !== 'asleep' &&
+            (!earlier.idle || !!e.idle),
+        )
       // Fresh: whether a session sleeps or works decides what happens now.
       const items = await collect(deps)
       const set = deps.profiles()
@@ -132,9 +261,72 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
       const profileOf = (key: string): Pick<Item, 'profile' | 'profileFolder'> =>
         items.find(i => i.key === key) ?? sessionProfile(readCard(key), set.list)
       const profileIdOf = (key: string): string | undefined => itemProfile(profileOf(key), set.list)?.id
+      let changed = false
       for (const entry of due) {
+        if (!workdeskDue(entry)) continue
         if (delivered.get(entry.id) === entry.next) {
           finish(entry)
+          continue
+        }
+        // A verifier's time limit, then its archive (#492): the board's own, nothing is typed.
+        if (entry.kind === 'verify') {
+          if (!verify || flying.has(entry.key)) continue
+          flying.add(entry.key)
+          verify
+            .due(entry, withRemote(items))
+            .catch(err => log(`verify ${entry.id}: ${messageOf(err)}`))
+            .finally(() => {
+              flying.delete(entry.key)
+              onChange()
+            })
+          continue
+        }
+        // A decision's default (#487, services/decisions.ts): only while its question is still open.
+        if (entry.decision !== undefined) {
+          const open = defaultDue(entry, cfg, Date.now())
+          if (open === 'wait') continue
+          if (open === 'drop') {
+            removeEntry(entry.id, 'cancelled')
+            logRun(record(entry, now, 'cancelled', 'answered'))
+            continue
+          }
+        }
+        // Another device's session (#501): through its node, never this computer's herdr.
+        const at = parseNodeKey(entry.key)
+        const via = at ? (remote?.() ?? null) : null
+        if (via && at) {
+          if (flying.has(entry.key)) continue
+          if ((!entry.kind || entry.kind === 'telegram') && !entry.receipt) {
+            const devState = via.deviceState?.(at.device)
+            if (devState === 'revoked' || devState === 'forgotten') {
+              if (claim(entry.id, now)) {
+                endRemote(entry, now, devState === 'revoked' ? 'node-revoked' : 'node-forgotten')
+                changed = true
+              }
+              continue
+            }
+            if (devState === 'offline') {
+              if (holdNode(entry, now)) changed = true
+              heldDevices.add(at.device)
+              continue
+            }
+          }
+          if (headBlocked(entry)) continue
+          flying.add(entry.key)
+          let settled = false
+          viaNode(entry, via, at.device)
+            .then(done => {
+              settled = done
+            })
+            .catch(err => log(`schedule ${entry.id}: ${messageOf(err)}`))
+            .finally(() => {
+              flying.delete(entry.key)
+              onChange()
+              if (settled && !stopped) {
+                wokenDevices.add(at.device)
+                plan(0)
+              }
+            })
           continue
         }
         const { item, other } = targetOf(entry, items, profileIdOf)
@@ -148,7 +340,10 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
         }
         if (flying.has(entry.key) || (item && flying.has(item.key)) || (item?.sleeping && waking >= MAX_WAKING))
           continue
-        const keys = [entry.key, item?.key].filter((k): k is string => !!k)
+        // Other plain reminders due for this session in the same minute go with it, one prompt
+        // for all of them (#306): one turn of the session, not one each.
+        const more = item ? alongside(entry, item, ready, items, profileIdOf) : []
+        const keys = [entry.key, item?.key, ...more.map(e => e.key)].filter((k): k is string => !!k)
         for (const k of keys) flying.add(k)
         // The session now in its pane runs in another profile: the entry waits, saying so.
         const held = other
@@ -157,13 +352,14 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
               was: profileLabel(profileOf(entry.key), set),
             })
           : ''
-        run(entry, item, held)
-          .catch(err => log(`schedule ${entry.id}: ${messageOf(err)}`))
+        run(entry, item, held, more)
+          .catch(err => log(`schedule ${[entry, ...more].map(e => e.id).join(',')}: ${messageOf(err)}`))
           .finally(() => {
             for (const k of keys) flying.delete(k)
             onChange()
           })
       }
+      if (changed) onChange()
     } catch (err) {
       log(`schedule: ${messageOf(err)}`)
     } finally {
@@ -171,8 +367,54 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
     }
   }
 
-  /** `other`: why it does not go to the session now in its pane (another profile's), '' for none. */
-  async function run(entry: ScheduleEntry, item: Item | undefined, other: string): Promise<void> {
+  /**
+   * The plain reminders due for `item` in the same minute as `entry`, with the same `idle`, that go
+   * with it as one prompt (#306). Only one-off reminders join: a cron entry, a restart, a sleep, a
+   * call's results and a retry-safe report go on their own, as do one that waits for the session to
+   * wake (`noWake`) and one that would go to another session (another profile's in its pane).
+   * Claude sessions only: another agent (pi) gets each in a prompt of its own, as before.
+   */
+  function alongside(
+    entry: ScheduleEntry,
+    item: Item,
+    ready: ScheduleEntry[],
+    items: Item[],
+    profileIdOf: (key: string) => string | undefined,
+  ): ScheduleEntry[] {
+    if (!joins(entry) || (item.agent !== undefined && item.agent !== 'claude')) return []
+    const minute = Math.floor(entry.next / 60_000)
+    let size = String(entry.text).length
+    const more: ScheduleEntry[] = []
+    for (const e of ready) {
+      const joined =
+        e !== entry &&
+        joins(e) &&
+        Math.floor(e.next / 60_000) === minute &&
+        !!e.idle === !!entry.idle &&
+        !(e.noWake === true && item.sleeping) &&
+        !flying.has(e.key) &&
+        delivered.get(e.id) !== e.next &&
+        workdeskDue(e) &&
+        targetOf(e, items, profileIdOf).item?.key === item.key
+      if (!joined) continue
+      size += String(e.text).length + 1
+      if (size > JOINED_MAX) break
+      more.push(e)
+    }
+    return more
+  }
+
+  /**
+   * `other`: why it does not go to the session now in its pane (another profile's), '' for none.
+   * `more`: reminders that go with it as one prompt, a line each (alongside); claimed, sent, held
+   * and logged each on its own, as `entry` is.
+   */
+  async function run(
+    entry: ScheduleEntry,
+    item: Item | undefined,
+    other: string,
+    more: ScheduleEntry[] = [],
+  ): Promise<void> {
     if (entry.kind === 'restart') return restart(entry, item)
     if (entry.kind === 'sleep') return sleep(entry, item)
     const receipt = entry.receipt ? verifyReport(entry) : null // Before even waking a session.
@@ -187,15 +429,21 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
     // typing would answer it.
     const held = item && !item.sleeping && (item.status === 'blocked' || (entry.idle && item.status === 'working'))
     let why = !item ? other || 'gone' : held ? (item.status === 'blocked' ? 'dialog' : 'busy') : ''
+    // All of them wait together, so they are tried together again.
+    let batch = [entry, ...more]
     if (item && !why) {
-      if (!claim(entry.id, now)) return
-      if (item.key !== entry.key) {
-        // Followed into the session that took its pane: the card and the log say the new one, the
-        // prompt the one it was set for.
-        const movedFrom = entry.movedFrom ?? { key: entry.key, name: entry.name ?? '' }
-        entry = { ...entry, key: item.key, name: item.name, movedFrom }
-        updateEntry(entry.id, e => ({ ...e, key: item.key, name: item.name, movedFrom: e.movedFrom ?? movedFrom }))
-      }
+      batch = batch.filter(e => claim(e.id, now))
+      // Followed into the session that took its pane: the card and the log say the new one, the
+      // prompt the one it was set for.
+      batch = batch.map(e => {
+        if (e.key === item.key) return e
+        const movedFrom = e.movedFrom ?? { key: e.key, name: e.name ?? '' }
+        updateEntry(e.id, s => ({ ...s, key: item.key, name: item.name, movedFrom: s.movedFrom ?? movedFrom }))
+        return { ...e, key: item.key, name: item.name, movedFrom }
+      })
+      const first = batch[0]
+      if (!first) return
+      entry = first
       let r: Awaited<ReturnType<typeof send>> = { ok: true }
       if (item.sleeping) {
         waking++
@@ -204,8 +452,14 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
           deps.wake.forget()
         })
         // Cancelled while the session woke up: nothing to send.
-        if (r.ok && !getEntry(entry.id)) return
-        if (waitsForWake(item, r)) return hold(entry, now)
+        if (r.ok) batch = batch.filter(e => getEntry(e.id))
+        const left = batch[0]
+        if (!left) return
+        entry = left
+        if (waitsForWake(item, r)) {
+          for (const e of batch) hold(e, now)
+          return
+        }
       }
       if (r.ok && entry.receipt) {
         const state = beginReport(entry)
@@ -215,11 +469,24 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
           return
         }
       }
+      // A decision's default (#487), checked again right before it is typed (a wake takes a while):
+      // an answer meanwhile drops it, one on its way holds it. Such an entry goes on its own.
+      if (r.ok && entry.decision !== undefined) {
+        const open = defaultDue(entry, cfg, Date.now())
+        if (open === 'drop') {
+          removeEntry(entry.id, 'cancelled')
+          logRun(record(entry, Date.now(), 'cancelled', 'answered'))
+          return
+        }
+        if (open === 'wait') return hold(entry, now)
+      }
       if (r.ok) {
         try {
           // Woken in another pane (a pi session whose own was gone, #178): the message goes there.
           const pane = r.ok && r.pane ? r.pane : item.pane
-          r = await send(deps, { ...item, sleeping: false, pane }, promptOf(entry, Date.now()), {
+          const at = Date.now()
+          const text = batch.map(e => promptOf(e, at)).join('\n')
+          r = await send(deps, { ...item, sleeping: false, pane }, text, {
             free: !!entry.idle,
             draft: true,
             // Woken just now: herdr may name it in its pane a few seconds later (#267).
@@ -240,14 +507,81 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
           return
         }
       }
-      if (r.ok) return sent(entry)
+      if (r.ok) {
+        for (const e of batch) sent(e)
+        return
+      }
       why = whyNot(r)
     }
-    wait(entry, now, why, !item)
+    for (const e of batch) wait(e, now, why, !item)
+  }
+
+  /**
+   * A pane named by the user's name-for-folder script (#307, adapters/name-for-cwd.ts) gets that
+   * name back after a restart's wake, which leaves it without one. No script, no folder, no name
+   * printed, or herdr failing: nothing, as before.
+   */
+  async function nameAgain(item: Item): Promise<void> {
+    const { pane, cwd } = item
+    if (!pane || !cwd) return
+    const script = nameScript()
+    if (!script) return
+    const name = await nameForCwd(script, cwd)
+    if (!name) return
+    await herdr(['agent', 'rename', pane, name]).catch(err =>
+      log(`restart ${item.name}: ${pane} not named ${name}: ${messageOf(err)}`),
+    )
   }
 
   const whyNot = (r: { draft?: boolean; dialog?: boolean; busy?: boolean; error: string }): string =>
     r.draft ? 'draft' : r.dialog ? 'dialog' : r.busy ? 'busy' : r.error
+
+  /**
+   * A plain reminder for another device's session, sent through its node, which types it into its
+   * own herdr (waking it unless `noWake`). A restart, a sleep or a call's results is the node's own
+   * scheduler's to run: held here as for a session not on this board. The request's id is the run's,
+   * so a run sent twice is typed once (core/message-gate.ts on the node). Returns whether the entry
+   * finished (sent or ended), so another queued entry for the same session can go next.
+   */
+  async function viaNode(entry: ScheduleEntry, via: RemoteDelivery, device: string): Promise<boolean> {
+    const now = Date.now()
+    if ((entry.kind && entry.kind !== 'telegram') || entry.receipt) {
+      wait(entry, now, 'gone', true)
+      return false
+    }
+    if (!claim(entry.id, now)) return false
+    const r = await via.send(entry.key, promptOf(entry, Date.now()), {
+      requestId: `${entry.id}-${entry.next}`,
+      idle: !!entry.idle,
+      noWake: entry.noWake === true,
+      ...(entry.kind === 'telegram' && { draft: true }),
+    })
+    if (r.ok) {
+      sent(entry)
+      return true
+    }
+    if (r.offline) {
+      holdNode(entry, now)
+      heldDevices.add(device)
+      return false
+    }
+    if (r.end) {
+      endRemote(entry, now, r.error)
+      return true
+    }
+    if (r.gone && entry.why === NODE_OFFLINE_WHY) {
+      endRemote(entry, now, 'gone')
+      return true
+    }
+    if (r.asleep) {
+      untilAwake(entry, now)
+      return false
+    }
+    // Offline hold time never counts against scheduleWaitMin once the node is back.
+    const base = entry.why === NODE_OFFLINE_WHY ? { ...entry, tried: undefined } : entry
+    wait(base, now, r.gone ? 'gone' : whyNot(r), !!r.gone)
+    return false
+  }
 
   /**
    * A restart, as far as it can go now (see the top of the file). Each step is written to the
@@ -315,6 +649,7 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
       // Woken in a new tab when its pane was closed as it went to sleep (#204): the note goes there.
       item = { ...item, sleeping: false, ...(woke.pane && { pane: woke.pane }) }
       await new Promise(resolve => setTimeout(resolve, settleMs()))
+      await nameAgain(item)
       if (stopped || !getEntry(entry.id)) return
     }
     const r = await send(deps, item, promptOf(entry, Date.now()), { free: true, draft: true })
@@ -427,6 +762,8 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
   function sent(entry: ScheduleEntry, result = 'sent', why?: string): void {
     const now = Date.now()
     if (entry.receipt) settleReport(entry, 'sent')
+    // A default typed in is recorded as the default's (services/decisions.ts recordDefault).
+    if (entry.decision !== undefined) recordDefault(entry, now, log)
     delivered.set(entry.id, entry.next)
     finish(entry, now)
     logRun(record(entry, now, result, why))
@@ -498,6 +835,9 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
       ...record(entry, now, entry.cron && drop ? 'dropped' : 'missed', why),
       ...(entry.cron && drop && { n: goneRuns }),
     })
+    if (drop && Array.isArray(entry.ownerPosts) && entry.ownerPosts.length && threadsConfig(cfg.threads)) {
+      if (recordOwnerPostFailure(entry, why, now, log)) onChange()
+    }
   }
 
   /**
@@ -512,6 +852,44 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
       why: 'wake',
       claim: undefined,
     }))
+  }
+
+  /**
+   * Waiting for an offline node (#695): tried again on the next tick or when the node comes back,
+   * the wait not counted and the session not marked gone, so it is never missed nor dropped while
+   * the device is away. Records a held notice once per hold transition for owner thread posts (#693).
+   */
+  function holdNode(entry: ScheduleEntry, now: number): boolean {
+    let became = false
+    updateEntry(entry.id, e => {
+      const held = e.claim as { pid: number; at: number } | undefined
+      if (held && held.pid !== process.pid && now - held.at < CLAIM_MS) return undefined
+      became = e.why !== NODE_OFFLINE_WHY
+      return {
+        ...e,
+        pendingSince: e.pendingSince ?? now,
+        tried: now,
+        why: NODE_OFFLINE_WHY,
+        claim: undefined,
+      }
+    })
+    if (became && Array.isArray(entry.ownerPosts) && entry.ownerPosts.length && threadsConfig(cfg.threads)) {
+      if (recordOwnerPostFailure(entry, 'node-offline', now, log)) onChange()
+    }
+    return became
+  }
+
+  /**
+   * End a remote entry immediately as missed (revoked or forgotten device, or session gone from
+   * the node's payload after it returns, #695).
+   */
+  function endRemote(entry: ScheduleEntry, now: number, why: string): void {
+    if (removeEntry(entry.id, 'missed')) {
+      logRun(record(entry, now, 'missed', why))
+      if (Array.isArray(entry.ownerPosts) && entry.ownerPosts.length && threadsConfig(cfg.threads)) {
+        if (recordOwnerPostFailure(entry, why, now, log)) onChange()
+      }
+    }
   }
 
   /**
@@ -548,7 +926,9 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
     const closing = listArchive()
       .filter(r => r.state === 'closing')
       .map(r => r.closeAt)
-    const soonest = Math.min(...[...listEntries().map(e => e.next), ...closing].filter(at => at > now))
+    // A watch's next check counts while watches are on.
+    const checks = watchesConfig(cfg.watches) ? listWatches().map(w => w.next) : []
+    const soonest = Math.min(...[...listEntries().map(e => e.next), ...closing, ...checks].filter(at => at > now))
     plan(Math.min(tickMs(), soonest - now + 50))
   }
   // A new entry, or a session put in the archive, may be due sooner than the next tick.
@@ -572,9 +952,29 @@ export function startScheduler({ deps, onChange = () => {} }: { deps: Deps; onCh
   return {
     stop() {
       stopped = true
+      watches.stop()
       clearTimeout(timer)
       clearTimeout(watchTimer)
       for (const w of watchers) w.close()
+    },
+    pause() {
+      paused = true
+      clearTimeout(timer)
+    },
+    resume() {
+      if (stopped || !paused) return
+      paused = false
+      plan(0)
+    },
+    wakeDevice(device) {
+      if (stopped || !heldDevices.has(device)) return
+      wokenDevices.add(device)
+      plan(0)
+    },
+    wakeDevices() {
+      if (stopped || !heldDevices.size) return
+      for (const device of heldDevices) wokenDevices.add(device)
+      plan(0)
     },
   }
 }

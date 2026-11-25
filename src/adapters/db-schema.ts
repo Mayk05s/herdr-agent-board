@@ -189,6 +189,91 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    version: 6,
+    store: 'workdesk-dialog',
+    // Workdesk dialogue metadata. Owner text is kept outside the Board inbox and thread journal.
+    sql: `
+      CREATE TABLE workdesk_dialog_bindings (
+        task_id INTEGER PRIMARY KEY,
+        assignment_id TEXT NOT NULL UNIQUE,
+        executor TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        sid TEXT NOT NULL,
+        revision INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE workdesk_dialog_cursor (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        cursor INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE workdesk_dialog_events (
+        id INTEGER PRIMARY KEY,
+        board_task_id INTEGER NOT NULL,
+        assignment_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        executor TEXT,
+        board_status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        noticed INTEGER NOT NULL DEFAULT 0
+      ) STRICT;
+      CREATE INDEX workdesk_dialog_pending ON workdesk_dialog_events (board_task_id, assignment_id, id);
+    `,
+  },
+  {
+    version: 7,
+    store: 'threads',
+    // Case files (#488, core/work-cases.ts): a thread's outside reference (a ticket id or a link,
+    // as given) and where the case stands, JSON {text, at, by}. Both NULL until a case writes them,
+    // which only a board with `"threads": { "cases": true }` does. The sessions of a case are its
+    // feed's, read when shown: nothing stored for them.
+    sql: `
+      ALTER TABLE threads ADD COLUMN ref TEXT;
+      ALTER TABLE threads ADD COLUMN state TEXT;
+    `,
+  },
+  {
+    version: 8,
+    store: 'decisions',
+    // Decisions (#487, adapters/decision-store.ts): every `board ask` while `decisions` is on, with
+    // its options (JSON labels), the recommended one (1-based), its default (the --default-after in
+    // ms, when it fires, its schedule entry), Hold, and how it closed: the answer, who gave it
+    // (owner, default, withdrawn), by what (button, text, prompt, default, replaced, cleared) and
+    // when. Nothing reads the table while decisions are off.
+    sql: `
+      CREATE TABLE decisions (
+        id TEXT PRIMARY KEY,
+        session TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        lane TEXT,
+        thread TEXT,
+        question TEXT NOT NULL,
+        options TEXT NOT NULL DEFAULT '[]',
+        recommend INTEGER,
+        default_ms INTEGER,
+        default_at INTEGER,
+        entry TEXT,
+        held INTEGER,
+        asked_at INTEGER NOT NULL,
+        answer TEXT,
+        answered_by TEXT,
+        via TEXT,
+        answered_at INTEGER
+      ) STRICT;
+      CREATE INDEX decisions_open ON decisions (answered_at, asked_at);
+      CREATE INDEX decisions_by_session ON decisions (session, asked_at);
+    `,
+  },
+  {
+    version: 9,
+    store: 'threads',
+    // Verified done (#492, core/work-threads.ts VerifyHead): a thread's verification as its entries
+    // fold it (on or off, acceptance lines, the verifier running, fails in a row, the last verdict),
+    // JSON; NULL for a thread that never had one.
+    sql: `
+      ALTER TABLE threads ADD COLUMN verify TEXT;
+    `,
+  },
 ]
 
 /** The version the code makes a file: the last step's. */

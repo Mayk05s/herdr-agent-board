@@ -1,8 +1,12 @@
 // The board as GET /api/board answers and the event stream pushes it (src/server/board-state.ts
 // builds it; the web board reads it). One type for both sides, so they cannot drift apart.
+import type { AgyLimitWindow, BoardAgyLimits } from './agy-limits.ts'
 import type { BoardArchive } from './archive.ts'
+import type { DecisionsPayload } from './decisions.ts'
 import type { FoldMode } from './fold-mode.ts'
+import type { JournalList } from './journal.ts'
 import type { LimitWindow } from './limits.ts'
+import type { DeviceView, LinkStatus } from './nodes.ts'
 import type { PresenceView } from './presence.ts'
 import type { RemoteView } from './remote.ts'
 import type { ScheduleEntry } from './schedule-rules.ts'
@@ -10,6 +14,8 @@ import type { SetupSummary } from './setup.ts'
 import type { TodosConfig } from './todos.ts'
 import type { ColumnId, Item, Lang, LaunchView } from './types.ts'
 import type { WakeView } from './wake/view.ts'
+import type { WorkdeskPayload } from './workdesk.ts'
+import type { DialogStatus } from './workdesk-dialog.ts'
 
 /** A lane as the page shows it: the configured category or one a session picked. */
 export interface BoardCategory {
@@ -28,6 +34,14 @@ export interface BoardCategory {
 
 /** A color the category editor offers. */
 export type Swatch = { name: string; hex: string }
+
+/** Node housekeeping switches as the board has them (#652, #682): absent while both are off. */
+export interface HousekeepingPayload {
+  memory: boolean
+  tabs: boolean
+}
+
+export type { AgyLimitWindow, BoardAgyLimits }
 
 /** Claude's usage windows from the board's status line or the usagebar cache. */
 export interface BoardLimits {
@@ -80,6 +94,11 @@ export interface BoardPayload {
   stale: boolean
   lastSuccessfulRefreshAt: number | null
   limits: BoardLimits | null
+  /**
+   * Antigravity (Gemini) usage windows (#647), from agy's statusLine cache on this computer or a
+   * node. Omitted when agy is not installed anywhere; null when installed with no reading yet.
+   */
+  agyLimits?: BoardAgyLimits | null
   items: Item[]
   launches: LaunchView[]
   categories: BoardCategory[]
@@ -97,6 +116,8 @@ export interface BoardPayload {
   mokupilot?: boolean
   /** Whether the board can fork a session into a new tab here (services/launch/fork.ts canFork). */
   fork?: boolean
+  /** Codex forks use herdr's Codex launcher independently of the configured Claude launcher. */
+  codexFork?: boolean
   /** Whether the board can ask a session a side question here (services/aside.ts: /btw typed into the session). */
   aside?: boolean
   /** What of the board is not set up on this computer (core/setup.ts); null before the first check. */
@@ -111,6 +132,10 @@ export interface BoardPayload {
   foldWaiting?: FoldMode
   /** Auto-compact's default limit as written (#378, core/compact.ts: `300k`, `60%`), '' for off; a board before it sent none. */
   compactDefault?: string
+  /** Continue mid-turn Claude sessions after a restart (#633): absent when on (the default), false when off. */
+  turnResume?: false
+  /** Node housekeeping switches (#652, #682): memory guard and tab sweep; absent while both are off. */
+  housekeeping?: HousekeepingPayload
   /** The remote mode (core/remote.ts), only while it is on. */
   remote?: RemoteView
   /** The user's presence (#172, core/presence.ts), only while config.json turns it on. */
@@ -141,6 +166,19 @@ export interface BoardPayload {
    * many wait on the owner. The threads themselves never ride in the payload.
    */
   threads?: ThreadsPayload
+  /** Watches are on (#486, config.json's `watches`), for Settings' switch (#596): absent while off. */
+  watches?: true
+  /** The away journal's strip and the last return (#489), only while config.json has `journal`. */
+  journal?: JournalPayload
+  /**
+   * Decisions (#487), only while config.json turns them on: what waits on the owner across lanes,
+   * in the queue's order, with each question's options, and what went by default since the owner
+   * last opened the panel.
+   */
+  decisions?: DecisionsPayload
+  /** Workdesk queue and last poll, only while the watcher is configured. */
+  workdesk?: WorkdeskPayload
+  workdeskDialog?: DialogStatus
   /**
    * The Remote access view's revision (GET /api/access, local only): it changes when the view does,
    * and the panel fetches the view again then; the view itself never goes out with the board. The
@@ -154,6 +192,8 @@ export interface BoardPayload {
   teamRev?: number
   /** The team's unread messages (#355), only while `team` is on. */
   teamUnread?: number
+  /** What the owner's phone asked and waits for the passkey on this computer (#377), only while some does. */
+  teamWaiting?: number
   /**
    * The Omarchy theme the Terminal style takes its colors from (src/adapters/omarchy.ts): a stamp
    * that changes with it, only on a computer with Omarchy. The page loads omarchy-theme.css again.
@@ -166,6 +206,42 @@ export interface BoardPayload {
   server?: true
   /** The owner's password vault on the board's own server (core/vault.ts): Settings → Passwords opens /vault. */
   vault?: true
+  /**
+   * The devices of config.json's `nodes` in their order, this computer among them (#500): only
+   * while this board is a master. Their items, launches and schedule entries are among the board's
+   * own, each with its `device`.
+   */
+  devices?: BoardDevice[]
+  /**
+   * This computer's name (`COMPUTERNAME || hostname()`), populated on nodes so the master can
+   * match Telegram `X-Herdr-Pane` hints against this device (#701).
+   */
+  machine?: string
+}
+
+/**
+ * A device as the master's payload shows it (#500): its link and its last status as `GET
+ * /api/nodes` has them (core/nodes.ts DeviceView), with what config.json sets for it. The link's
+ * detail stays on this computer (`GET /api/nodes`, `board nodes`): it is what ssh said, and
+ * the payload goes to phones too. `link.heardAt` is cut to the minute, so a ping does not push
+ * the board to every page. `payloadAt`: when its cards were last heard, from the offline
+ * copy while the link has heard none since the board started. `status` (this computer's own for
+ * `local`) is the last one whose shown figures moved (core/nodes.ts statusShown): its other
+ * fields (`at`, free disk, launches) may be older than `GET /api/nodes`'s.
+ */
+export interface BoardDevice extends DeviceView {
+  /** The link's state, without its detail; `heardAt` to the minute. */
+  link: Omit<LinkStatus, 'detail'> | null
+  paused: boolean
+  drain: boolean
+  /** A sync gives it no secret (#604, `nodes.devices.<id>.giveSecrets: false`); absent, it gives them. */
+  giveSecrets?: false
+  /** Whether this device is opted in to the MokuPilot node bridge (#730); absent when off. */
+  pilotBridge?: true
+  /** The thresholds placement holds it to; null until the board writes them from its first status. */
+  maxSessions: number | null
+  minFreeMemMb: number | null
+  maxLoad: number | null
 }
 
 /** What the board's payload says of the backup (#233). */
@@ -184,6 +260,17 @@ export interface TimePayload {
   problems?: boolean
 }
 
+/**
+ * The away journal in the payload (#489): the "While you were away" strip of the last return until
+ * the owner dismisses it, and that return's absence, which the toolbar's "Since 23:56" reopens.
+ */
+export interface JournalPayload {
+  strip: (JournalList & { from: number; to: number }) | null
+  last: { from: number; to: number } | null
+  /** On in config.json, but journal.db did not open: what went wrong (Settings shows it, #596). */
+  error?: string
+}
+
 /** What the board's payload says of threads (#379). */
 export interface ThreadsPayload {
   rev: number
@@ -194,6 +281,10 @@ export interface ThreadsPayload {
   agents?: false
   /** Kept on this board also with Team on (`share: false`, #410): absent while they may be shared. */
   share?: false
+  /** Case files are on (`threads.cases`, #488), for Settings' switch (#596): absent while off. */
+  cases?: true
+  /** Verified done is on (`threads.verify`, #492), for Settings' switch (#596): absent while off. */
+  verify?: true
 }
 
 /** What the board's payload says of the calendar (#328). */

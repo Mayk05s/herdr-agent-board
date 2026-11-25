@@ -90,6 +90,7 @@
   --gray: var(--t-dim);
   --red: var(--t-red);
   --accent: var(--t-accent);
+  --brand-accent: var(--t-purple);
   --teal: var(--t-cyan);
   --pink: var(--t-red);
   --yellow: var(--t-amber);
@@ -290,8 +291,12 @@
 :root[data-look="terminal"] .card .task-label { font-size: inherit; font-weight: 400; }
 :root[data-look="terminal"] .card .task { margin-top: 2px; font-size: 12.5px; line-height: 1.45; }
 :root[data-look="terminal"] .now { gap: 1ch; margin-top: 3px; font-size: 12px; }
+:root[data-look="terminal"] .now.bg-task.stuck { padding: 0; border-radius: 0; background: none; }
+:root[data-look="terminal"] .now.bg-task.stuck svg,
+:root[data-look="terminal"] .now.bg-task.stuck .tool { color: var(--t-amber); }
+:root[data-look="terminal"] .card-meter { margin-top: 2px; font-size: 12px; line-height: 1.45; }
 :root[data-look="terminal"] .now .tool { font-weight: 700; }
-:root[data-look="terminal"] .ask { margin-top: 3px; padding: 0; border-radius: 0; background: none; font-size: 12.5px; line-height: 1.45; }
+:root[data-look="terminal"] .ask { margin-top: 3px; padding: 0; border: 0; border-radius: 0; background: none; font-size: 12.5px; line-height: 1.45; }
 :root[data-look="terminal"] .ask b { font-weight: 700; }
 /* An ask to do in its browser: one line as well. */
 :root[data-look="terminal"] .desk-asking .ask-q { -webkit-line-clamp: 1; }
@@ -546,6 +551,10 @@
 :root[data-look="terminal"] .arch-return:hover:not(:disabled) { background: none; box-shadow: inset 0 0 0 1px var(--accent); }
 :root[data-look="terminal"] .arch-row.returning .arch-return { background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
 :root[data-look="terminal"] .arch-tidy { border-radius: var(--radius); }
+:root[data-look="terminal"] .arch-parked { border-radius: var(--radius); }
+:root[data-look="terminal"] .arch-move:not([data-confirm]),
+:root[data-look="terminal"] .arch-move:not([data-confirm]):hover:not(:disabled):not(:has(select:disabled)) { background: none; box-shadow: inset 0 0 0 1px var(--accent); }
+:root[data-look="terminal"] .arch-parked-cron { background: none; }
 :root[data-look="terminal"] .drop-archive { border-radius: var(--radius); }
 :root[data-look="terminal"] .drop-archive.over { background: var(--bg); box-shadow: 0 0 0 2px var(--accent); color: var(--accent); }
 :root[data-look="terminal"] .drop-archive.blocked.over { background: var(--bg); box-shadow: 0 0 0 2px var(--red); color: var(--red); }
@@ -565,8 +574,11 @@
 :root[data-look="terminal"] .ql-hit:hover { background: none; box-shadow: inset 0 0 0 1px var(--t-dim); }
 :root[data-look="terminal"] .ql-search input { border-radius: 4px; background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
 :root[data-look="terminal"] .ql-search input:focus { box-shadow: inset 0 0 0 1px var(--accent); }
-:root[data-look="terminal"] .backup-body .path-add { border-radius: 4px; background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
-:root[data-look="terminal"] .backup-body .path-add:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+/* Settings' text fields (fields.css, #283, #287): outlined, as the search field is, not filled. */
+:root[data-look="terminal"] .path-add:not(.access-input),
+:root[data-look="terminal"] .draft-id { border-radius: 4px; background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
+:root[data-look="terminal"] .path-add:not(.access-input):focus,
+:root[data-look="terminal"] .draft-id:focus { box-shadow: inset 0 0 0 1px var(--accent); }
 :root[data-look="terminal"] .st,
 :root[data-look="terminal"] .st-N { background: none; box-shadow: none; }
 :root[data-look="terminal"] .st-M { color: var(--orange); }
@@ -641,6 +653,10 @@
 :root[data-look="terminal"] .wt-body[data-wide] .wt-filter { background: none; }
 :root[data-look="terminal"] .wt-body .mini { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
 :root[data-look="terminal"] .wt-body .mini.primary { background: none; box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+/* Case files (#488, cases.css): a case's head framed by a line instead of a fill, its holder's mark square. */
+:root[data-look="terminal"] .wt-case { border-radius: 0; background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
+:root[data-look="terminal"] .wt-case-holds { border-radius: 0; }
+
 /* Shared threads (#394, threads.css): the Share pill and a topic's thread pill outlined, the
    offer and an agent's request as rules on the left, the picker framed. */
 :root[data-look="terminal"] .wt-share-pill, :root[data-look="terminal"] .wt-topic-pill { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
@@ -651,3 +667,74 @@
 :root[data-look="terminal"] .wt-share-pick { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
 :root[data-look="terminal"] .wt-share-to select { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
 :root[data-look="terminal"] .team-body .wt-topic .mini, :root[data-look="terminal"] .wt-share .mini, :root[data-look="terminal"] .wt-out .mini { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
+/* The slash command list of the message box (#191): square, no glass. */
+:root[data-look="terminal"] .slash-menu { border-radius: var(--radius); background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
+:root[data-look="terminal"] .slash-option { border-radius: 0; }
+
+/* ---------------------------------------------------------------- the away journal (#489) */
+/* Its strip (journal.css): outlines on the bare background, monospace, no fills. */
+:root[data-look="terminal"] .away-strip {
+  border: 1px solid var(--t-edge);
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  font-family: var(--mono);
+}
+:root[data-look="terminal"] .away-title,
+:root[data-look="terminal"] .away-open,
+:root[data-look="terminal"] .away-note { font-family: var(--mono); color: var(--t-text); }
+:root[data-look="terminal"] .away-line,
+:root[data-look="terminal"] .away-lane,
+:root[data-look="terminal"] .away-time { color: var(--t-dim); }
+:root[data-look="terminal"] .away-kind { background: none; padding: 0; border-radius: 0; }
+:root[data-look="terminal"] .away-error .away-kind { --kind: var(--t-red); }
+:root[data-look="terminal"] .away-open:hover { background: none; text-decoration: underline; }
+
+/* Decisions (#487, decisions.css): the option, Hold and Send buttons and the answer field outlined,
+   the recommended option in the accent, square rows and lane tags. */
+:root[data-look="terminal"] .dec-choice .mini, :root[data-look="terminal"] .dec-board .mini, :root[data-look="terminal"] .dec-own .mini, :root[data-look="terminal"] .dec-own input { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
+:root[data-look="terminal"] .dec-option.recommended { box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); }
+:root[data-look="terminal"] .dec-row, :root[data-look="terminal"] .dec-lane, :root[data-look="terminal"] .dec-thread { border-radius: var(--radius); }
+
+/* Hybrid B+C header, navigation rail and Settings panel (#651): outlined, monospace, zero fills. */
+:root[data-look="terminal"] .nav-rail { background: var(--bg); border-right-color: var(--t-edge); }
+:root[data-look="terminal"] .rail-item { border-radius: var(--radius); color: var(--label-2); font-weight: 400; }
+:root[data-look="terminal"] .rail-item:hover { background: none; color: var(--label); box-shadow: inset 0 0 0 1px var(--t-dim); }
+:root[data-look="terminal"] .rail-item.on { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 700; }
+:root[data-look="terminal"] .tb-top { background: var(--bg); border-bottom-color: var(--t-edge); }
+:root[data-look="terminal"] .toolbar-filters { background: var(--bg); border-bottom-color: var(--t-edge); }
+:root[data-look="terminal"] .tb-btn, :root[data-look="terminal"] .status-control { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); color: var(--label-2); font-weight: 400; }
+:root[data-look="terminal"] .tb-btn:hover:not(:disabled), :root[data-look="terminal"] .status-control:hover:not(:disabled) { background: none; color: var(--label); box-shadow: inset 0 0 0 1px var(--t-dim); }
+:root[data-look="terminal"] .tb-btn.tb-primary { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 700; }
+:root[data-look="terminal"] .toolbar #next-attention.triage { background: none; border-color: var(--orange); color: var(--orange); }
+:root[data-look="terminal"] .lane-tab { font-weight: 400; }
+:root[data-look="terminal"] .lane-tab.on { color: var(--accent); font-weight: 700; }
+:root[data-look="terminal"] .lane-tab.on::after { background: var(--accent); }
+:root[data-look="terminal"] .set-nav { background: var(--bg); border-right-color: var(--t-edge); }
+:root[data-look="terminal"] .set-tab.on { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 700; }
+:root[data-look="terminal"] .set-group { border-color: var(--t-edge); border-radius: var(--radius); background: var(--bg); }
+:root[data-look="terminal"] .set-seg { border-color: var(--t-edge); border-radius: var(--radius); background: none; }
+:root[data-look="terminal"] .set-seg-opt.on { background: none; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 700; }
+:root[data-look="terminal"] .set-switch { border-radius: var(--radius); background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
+:root[data-look="terminal"] .set-switch.on { background: none; box-shadow: inset 0 0 0 1px var(--accent); }
+:root[data-look="terminal"] .set-switch::after { border-radius: 2px; background: var(--label-2); box-shadow: none; }
+:root[data-look="terminal"] .set-switch.on::after { background: var(--accent); }
+:root[data-look="terminal"] .sheet-back { border-radius: var(--radius); }
+:root[data-look="terminal"] .sheet-back:hover { background: none; box-shadow: inset 0 0 0 1px var(--accent); }
+:root[data-look="terminal"] .set-verify-row,
+:root[data-look="terminal"] .set-verify-sec { background: var(--bg); border-top-color: var(--t-edge); }
+:root[data-look="terminal"] .set-verify-kept,
+:root[data-look="terminal"] .set-input,
+:root[data-look="terminal"] .set-clear,
+:root[data-look="terminal"] .set-verify-btn { border-radius: var(--radius); border-color: var(--t-edge); background: none; }
+:root[data-look="terminal"] .set-input:focus-visible { outline: 0; border-color: var(--accent); }
+:root[data-look="terminal"] .devices-title { border-radius: var(--radius); }
+:root[data-look="terminal"] .devices-title:hover:not(:disabled) { background: none; box-shadow: inset 0 0 0 1px var(--t-dim); }
+:root[data-look="terminal"] .devices-title:focus-visible { background: none; box-shadow: inset 0 0 0 1px var(--accent); }
+:root[data-look="terminal"] .devices-title-input { border-radius: var(--radius); border-color: var(--accent); background: var(--bg); box-shadow: none; font-family: var(--font); font-weight: 700; }
+
+/* TodoWrite checklist (#637): 1px hairline at card bottom, monochrome sheet bar. */
+:root[data-look="terminal"] .card-todo-track { height: 1px; border-radius: 0 0 var(--radius) var(--radius); background: transparent; }
+:root[data-look="terminal"] .card-todo-fill { background: var(--accent); opacity: 0.75; }
+:root[data-look="terminal"] #sheet .sheet-card .checklist-bar { border-radius: 0; background: none; box-shadow: inset 0 0 0 1px var(--t-edge); }
+:root[data-look="terminal"] #sheet .sheet-card .checklist-bar-fill { background: var(--accent); }

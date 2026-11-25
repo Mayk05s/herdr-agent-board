@@ -190,6 +190,25 @@ test('`board secret request` waits for the owner and prints what came of it; --n
   assert.equal(lines[0], 'tok · file · fields: token')
 })
 
+test('#459: `board secret` reads no flag after a lone --; before it they still count', async () => {
+  const { cfg } = setUp()
+  const lines: string[] = []
+  const ctx = { cfg, session: me, out: (l: string) => lines.push(l), pollMs: 20 }
+  assert.equal(await secretCmd(['request', '--title', 'x', '--sink', 'tok', '--', '--no-wait'], ctx), 1)
+  assert.match(lines.at(-1) ?? '', /^usage: unexpected: --no-wait$/m)
+  assert.equal(await secretCmd(['request', '--title', 'x', '--', '--sink', 'tok'], ctx), 1)
+  assert.match(lines.at(-1) ?? '', /^usage: unexpected: --sink tok$/m)
+  assert.equal(requestsOf(readCard('s1')?.secrets).length, 0)
+  assert.equal(await secretCmd(['request', '--title', 'x', '--sink', 'tok', '--no-wait', '--'], ctx), 2)
+  const id = /pending · ([0-9a-f]{12})/.exec(lines.at(-1) ?? '')?.[1] ?? ''
+  assert.ok(id)
+  // The id after the --; a --wait there is a word, so status answers at once.
+  assert.equal(await secretCmd(['status', '--', id], ctx), 2)
+  assert.equal(await secretCmd(['status', id, '--', '--wait'], ctx), 2)
+  assert.equal(await secretCmd(['cancel', '--', id], ctx), 0)
+  assert.equal(lines.at(-1), `cancelled · ${id} · tok`)
+})
+
 test('a pane-keyed session, a name with spaces and another alphabet, a value with % and Cyrillic: as any other', async () => {
   const { home, cfg } = setUp()
   const pane = { key: 'pane-wP:p8Y', name: 'Сессия с пробелом' }
@@ -493,4 +512,46 @@ test('with sinks in config.json the store is a sink only where one says kind sto
   })
   assert.ok(asked.ok)
   assert.equal(formOf(both, SID, asked.request.id)?.sinkTitle, 'Board')
+})
+
+// #275: an agent that asks and cancels in a loop would push the audit's real lines out.
+test('asks are limited per card in a while, settled or not, and the audit keeps five old files', () => {
+  const { cfg } = setUp()
+  const now = Date.parse('2026-11-20T10:00:00Z')
+  for (let i = 0; i < 10; i++) {
+    const r = ask(cfg, now + i * 1000)
+    assert.ok(cancelSecret(me.key, r.id, now + i * 1000 + 500))
+  }
+  const refused = askSecret(
+    cfg,
+    me,
+    { title: 'Token', sink: 'tok', params: {}, fields: [], expiresMs: 60_000 },
+    now + 20_000,
+  )
+  assert.deepEqual(refused, { ok: false, error: t('secret.err.askedMany', { n: 10, minutes: 10 }) })
+  // another card is its own, and the first may ask again once the while is past
+  const other = askSecret(
+    cfg,
+    { key: 's2', name: 'Two' },
+    { title: 'Token', sink: 'tok', params: {}, fields: [], expiresMs: 60_000 },
+    now + 20_000,
+  )
+  assert.ok(other.ok)
+  ask(cfg, now + 10 * 60_000 + 1000)
+
+  // a full log moves to .1, the older ones one place on, the sixth gone
+  const file = auditFile()
+  writeFileSync(file, 'x'.repeat((1 << 20) + 1))
+  for (let n = 1; n <= 5; n++) writeFileSync(`${file}.${n}`, `old ${n}`)
+  ask(cfg, now + 20 * 60_000)
+  assert.deepEqual(
+    [2, 3, 4, 5].map(n => readFileSync(`${file}.${n}`, 'utf8')),
+    ['old 1', 'old 2', 'old 3', 'old 4'],
+  )
+  assert.equal(readFileSync(`${file}.1`, 'utf8').length, (1 << 20) + 1)
+  assert.equal(existsSync(`${file}.6`), false)
+  assert.deepEqual(
+    audit().map(x => x.op),
+    ['asked'],
+  )
 })

@@ -1,5 +1,6 @@
 // Compiled to an executable (see fake-ssh-bin.ts) and used as both BOARD_SSH_BIN_PATH and
-// BOARD_SSH_KEYGEN_BIN_PATH: an argument list with `-R` is ssh, any other ssh-keygen. It contacts
+// BOARD_SSH_KEYGEN_BIN_PATH: an argument list with `-R` is ssh, one with `-L` a node link's ssh,
+// any other ssh-keygen. It contacts
 // no server and never runs the real ones. Every call is appended to FAKE_SSH_LOG as a JSON line
 // (its argv), and each ssh's pid to `<FAKE_SSH_LOG>.pids`, one a line; FAKE_SSH_STATE (a JSON
 // file, missing = {}) picks the answers:
@@ -20,6 +21,15 @@
 // there. It listens before it says the forward is taken. A port still taken (a stray fake about to
 // be ended) is tried again for 2 s; after that the forward goes on without it.
 //
+// A node link's line (`-L 127.0.0.1:<local>:127.0.0.1:<port>`, adapters/node-ssh.ts) is a real
+// local forward: it listens on 127.0.0.1:<local> and passes each connection on to 127.0.0.1:<port>
+// on this computer, which stands for the node. The same modes: forward does that; hostkey exits 255
+// as ssh does for a changed server key, and so does a quoted UserKnownHostsFile that pins another
+// key for the host (accept-new pins one on the first connection); publickey exits 255 for a refused
+// key; refuse takes each connection and closes it, as a server whose permitopen does not allow the
+// port; hang stays up silent. exitAfterMs drops it after that long. A local port another program
+// holds: ssh's bind error, 255. Its pid goes to `<FAKE_SSH_LOG>.pids` too.
+//
 // The admin's line (-T and no -R; core/server-admin.ts) is a server of its own, `admin` in the state:
 //   { uid?: number,                                 0: root (default 1000)
 //     sudo?: 'nopasswd' | 'password' | 'requiretty' | 'notSudoer',   default nopasswd
@@ -34,7 +44,12 @@
 //     run?: { lines: string[], dropAfter?: number } a launch (or the board's install or its removal) prints these, cut after dropAfter (exit 255)
 //     board?: string[],                             what the round that reads the install prints between its
 //                                                   `@@facts 1` and `@@end` (none: nothing installed)
-//     wrong?: string[] }                            a wrong password's lines instead of the flavour's (a sudo in another language)
+//     wrong?: string[],                             a wrong password's lines instead of the flavour's (a sudo in another language)
+//     root?: { R: string, dir: string } }           "Add a server" (#509): the node's scripts (upload, look, apply, undo,
+//                                                   clean) run with sh on this fake root (fake-root.ts), their paths
+//                                                   rewritten into it (fake-root-prep.ts), a packed run unpacked, the
+//                                                   archive on stdin; their lines with the root's folder taken out
+//                                                   (FAKE_SH: the sh to run them with, else the PATH's)
 // No line for its server key in the quoted UserKnownHostsFile: `Host key verification failed.`, 255;
 // with StrictHostKeyChecking=accept-new the key is pinned then (another key for the host there:
 // refused). The login's password is asked as ssh 8.4+ asks it with SSH_ASKPASS_REQUIRE=force: the
@@ -52,8 +67,10 @@
 // `sudo` (path B's check of sudo's password before its pack) exits 0 once sudo took it.
 // `hang` stays up silent.
 import { createHmac } from 'node:crypto'
-import { appendFileSync, existsSync, readFileSync, writeFileSync, writeSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs'
+import { connect, createServer } from 'node:net'
 import { dirname, join } from 'node:path'
+import { nodeKind, prepScript, relayKind, unpackNodeRun } from './fake-root-prep.ts'
 
 type Mode = 'forward' | 'refuse' | 'publickey' | 'hostkey' | 'hang'
 type Admin = {
@@ -67,10 +84,11 @@ type Admin = {
   run?: { lines: string[]; dropAfter?: number }
   board?: string[]
   wrong?: string[]
+  root?: { R: string; dir: string }
 }
 type State = {
   keygen?: 'unprotected' | 'passphrase'
-  ssh?: { mode?: Mode; seq?: Mode[]; exitAfterMs?: number; proxyPort?: number; domain?: string }
+  ssh?: { mode?: Mode; seq?: Mode[]; exitAfterMs?: number; proxyPort?: number; domain?: string; unixForward?: boolean }
   admin?: Admin
   sshVersion?: string
 }
@@ -88,7 +106,7 @@ const args = process.argv.slice(2)
 const logPath = process.env.FAKE_SSH_LOG
 const statePath = process.env.FAKE_SSH_STATE
 if (logPath) appendFileSync(logPath, `${JSON.stringify(args)}\n`)
-if (logPath && args.includes('-R')) appendFileSync(`${logPath}.pids`, `${process.pid}\n`)
+if (logPath && (args.includes('-R') || args.includes('-L'))) appendFileSync(`${logPath}.pids`, `${process.pid}\n`)
 const state: State = statePath && existsSync(statePath) ? (JSON.parse(readFileSync(statePath, 'utf8')) as State) : {}
 
 const say = (...lines: string[]): void => {
@@ -122,8 +140,12 @@ function keygen(): void {
       end(1)
     }
     try {
+      const comment = argAfter('-C') ?? ''
+      const pub = comment.startsWith('agent-board relay enrol')
+        ? 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKEENROLKEY0000000000000000000'
+        : PUBLIC
       writeFileSync(file, PRIVATE)
-      writeFileSync(`${file}.pub`, `${PUBLIC} ${argAfter('-C') ?? ''}\n`)
+      writeFileSync(`${file}.pub`, `${pub} ${comment}\n`)
     } catch (err) {
       say(`Saving key "${file}" failed: ${(err as Error).message}`)
       end(1)
@@ -272,12 +294,113 @@ async function ssh(): Promise<void> {
   }
   const proxyPort = state.ssh?.proxyPort
   if (proxyPort) await proxy(proxyPort, state.ssh?.domain ?? '', target, port)
+  if (state.ssh?.unixForward && socket.startsWith('/')) {
+    mkdirSync(dirname(socket), { recursive: true })
+    rmSync(socket, { force: true })
+    const unixSrv = createServer(client => {
+      const peer = connect(Number(port), target)
+      client.pipe(peer)
+      peer.pipe(client)
+      client.on('error', () => peer.destroy())
+      peer.on('error', () => client.destroy())
+    })
+    const ok = await new Promise<boolean>(resolve => {
+      unixSrv.once('error', () => resolve(false))
+      unixSrv.listen(socket, () => resolve(true))
+    })
+    if (!ok) {
+      if (verbose) say(`debug1: remote forward failure for: listen ${socket}:-2, connect ${target}:${port}`)
+      say(`Error: remote port forwarding failed for listen path ${socket}`)
+      end(255)
+    }
+    const clean = () => {
+      try {
+        unixSrv.close()
+      } catch {}
+    }
+    process.once('SIGTERM', clean)
+    process.once('SIGINT', clean)
+  }
   if (verbose)
     say(
       `debug1: remote forward success for: listen ${socket}:-2, connect ${target}:${port}`,
       'debug1: forwarding_success: all expected forwarding replies received',
     )
   stayUp()
+}
+
+/** A line in the quoted known_hosts names the host with a key that is not its own. */
+function otherHostKey(): boolean {
+  const file = knownHosts()
+  if (!file || !existsSync(file)) return false
+  return readFileSync(file, 'utf8')
+    .split(/\r?\n/)
+    .some(l => l.startsWith(`${HOST} `) && l !== HOST_LINE)
+}
+
+/** A node link's ssh: a local forward (TCP or unix socket), its connections passed on to the target. */
+async function localForward(): Promise<void> {
+  const verbose = args.includes('-v')
+  const fwd = argAfter('-L') ?? ''
+  // -L 127.0.0.1:<local>:127.0.0.1:<port> OR -L 127.0.0.1:<local>:<unixSocket>
+  const tcp = /^([^:]+):(\d+):([^:]+):(\d+)$/.exec(fwd)
+  const unix = tcp ? null : /^([^:]+):(\d+):(\/.+)$/.exec(fwd)
+  const lhost = tcp?.[1] ?? unix?.[1] ?? ''
+  const lport = tcp?.[2] ?? unix?.[2] ?? ''
+  const rhost = tcp?.[3] ?? ''
+  const rport = tcp?.[4] ?? ''
+  const unixSocket = unix?.[3] ?? ''
+  const now = mode()
+  if (now === 'hang') {
+    setInterval(() => {}, 1 << 30)
+    return
+  }
+  if (verbose) say('OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2')
+  if (now === 'hostkey' || otherHostKey()) {
+    say('@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@')
+    say('@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @')
+    say('Host key verification failed.')
+    end(255)
+  }
+  pinHostKey(verbose)
+  if (now === 'publickey') {
+    say(`agent-board-link@${HOST}: Permission denied (publickey).`)
+    end(255)
+  }
+  if (verbose) {
+    say(`Authenticated to ${HOST} ([203.0.113.5]:22) using "publickey".`)
+    if (unixSocket) say(`debug1: Local connections to ${lhost}:${lport} forwarded to remote socket ${unixSocket}`)
+    else say(`debug1: Local connections to ${lhost}:${lport} forwarded to remote address ${rhost}:${rport}`)
+  }
+  const server = createServer(socket => {
+    if (now === 'refuse') {
+      say('channel 2: open failed: administratively prohibited: open failed')
+      socket.destroy()
+      return
+    }
+    const peer = unixSocket ? connect(unixSocket) : connect(Number(rport), rhost)
+    socket.pipe(peer)
+    peer.pipe(socket)
+    socket.on('error', () => peer.destroy())
+    peer.on('error', () => socket.destroy())
+  })
+  const listening = await new Promise<boolean>(resolve => {
+    server.once('error', () => resolve(false))
+    server.listen(Number(lport), lhost, () => resolve(true))
+  })
+  if (!listening) {
+    say(`bind [${lhost}]:${lport}: Address already in use`)
+    say(`channel_setup_fwd_listener_tcpip: cannot listen to port: ${lport}`)
+    say('Could not request local forwarding.')
+    end(255)
+  }
+  if (verbose) say(`debug1: Local forwarding listening on ${lhost} port ${lport}.`)
+  const after = state.ssh?.exitAfterMs
+  if (after !== undefined)
+    setTimeout(() => {
+      say(`Connection to ${HOST} closed by remote host.`)
+      end(255)
+    }, after)
 }
 
 /** What sudo (Debian 13, 1.9.16p2) and sudo-rs (Ubuntu 26.04, 0.2.13) print, as the spike recorded it. */
@@ -399,7 +522,9 @@ async function admin(): Promise<void> {
   const user = target.slice(0, target.indexOf('@'))
   if (a.publickey) await passwordLogin(a, target)
   // a stdin the board left open keeps this waiting, as it would keep sudo -S
-  const input = await Bun.stdin.text()
+  // as bytes: the node's plugin archive comes this way (#509)
+  const bytes = Buffer.from(await Bun.stdin.arrayBuffer())
+  const input = bytes.toString('utf8')
   const m =
     /^(env LC_ALL=C sudo -n -- |env LC_ALL=C sudo -k -S -p '' -- )?sh -c 'eval "\$\(echo ([A-Za-z0-9+/=]+) \| base64 -d\)"'$/.exec(
       args.at(-1) ?? '',
@@ -431,8 +556,15 @@ async function admin(): Promise<void> {
     out(...sudoSays.filter(Boolean).map(l => `@@sudo ${l}`), `@@flavor ${words.version}`)
     return end(0)
   }
+  const node = a.root ? (nodeKind(script) ?? relayKind(script)) : null
+  // the archive goes up, and its folder goes, as the admin: no sudo
+  const asAdmin = node === 'upload' || node === 'clean'
   const wanted =
-    mode === 'root' ? '' : mode === 'nopasswd' ? 'env LC_ALL=C sudo -n -- ' : "env LC_ALL=C sudo -k -S -p '' -- "
+    mode === 'root' || asAdmin
+      ? ''
+      : mode === 'nopasswd'
+        ? 'env LC_ALL=C sudo -n -- '
+        : "env LC_ALL=C sudo -k -S -p '' -- "
   if (prefix !== wanted) return unexpected()
   if (prefix.includes('sudo -k -S')) {
     if (logPath) appendFileSync(`${logPath}.stdin`, `${JSON.stringify(input)}\n`)
@@ -452,6 +584,7 @@ async function admin(): Promise<void> {
     }
     say(...words.right)
   }
+  if (node && a.root) return onRoot(a.root, node, script, bytes)
   const print = (name: string): void => {
     const path = join(a.fixture ?? '', name)
     if (existsSync(path)) writeAll(readFileSync(path, 'utf8'))
@@ -491,7 +624,30 @@ async function admin(): Promise<void> {
   }
 }
 
+/** A node script run on the fake root as its server would run it; its lines with the root's folder taken out. */
+function onRoot(root: { R: string; dir: string }, kind: string, script: string, input: Buffer): never {
+  const body = kind === 'apply' || kind === 'undo' ? unpackNodeRun(script) : script
+  if (body === null) {
+    say('fake: a node run that is not packed')
+    return end(2)
+  }
+  const file = join(root.dir, `ssh-${process.pid}-${Date.now()}.sh`)
+  writeFileSync(file, prepScript(root.R, body))
+  // FAKE_SH: the test's own sh (a sandbox's PATH reaches only Bun)
+  const r = Bun.spawnSync([process.env.FAKE_SH ?? Bun.which('dash') ?? Bun.which('sh') ?? 'sh', file], {
+    env: { ...process.env, FAKE: root.R, SUDO_USER: 'admin', REAL_BUN: process.env.REAL_BUN ?? 'bun' },
+    stdin: kind === 'upload' ? input : 'ignore',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  writeAll(r.stdout.toString().replaceAll(root.R, ''))
+  const err = r.stderr.toString()
+  if (err) writeSync(2, err.replaceAll(root.R, ''))
+  return end(r.exitCode ?? 255)
+}
+
 if (args.includes('-R')) await ssh()
+else if (args.includes('-L')) await localForward()
 else if (args.includes('-V')) {
   say(state.sshVersion ?? 'OpenSSH_for_Windows_9.5p2, LibreSSL 3.8.2')
   end(0)

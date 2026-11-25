@@ -19,6 +19,7 @@ import type { Item } from '../../../../src/core/types.ts'
 import type { SessionDetail } from '../../api/client.ts'
 import { type ComposerControls, useComposer } from '../../hooks/useComposer.ts'
 import type { SheetPick } from '../../hooks/useContextMenus.ts'
+import { useDecisions } from '../../hooks/useDecisions.ts'
 import { useFileDrop } from '../../hooks/useFileDrop.ts'
 import { useGoToSession } from '../../hooks/useGoToSession.ts'
 import type { HelpersUi } from '../../hooks/useHelpers.ts'
@@ -31,6 +32,7 @@ import { useSheetDensity } from '../../hooks/useSheetDensity.ts'
 import { useT } from '../../i18n/I18nProvider.tsx'
 import { asksInBrowser, inTurn } from '../../models/card.ts'
 import { ConversationScroll } from '../../models/conversation-scroll.ts'
+import { nodeLook } from '../../models/devices.ts'
 import { helpersChip } from '../../models/helper-model.ts'
 import { restartPending } from '../../models/restart.ts'
 import { noteQueue } from '../../models/settle.ts'
@@ -48,6 +50,8 @@ import { termButton } from '../../models/terminal.ts'
 import { useBoardContext } from '../../state/BoardProvider.tsx'
 import type { BoardUi } from '../../state/board-ui.ts'
 import { classNames } from '../class-names.ts'
+import { DecisionButtons } from '../decisions/DecisionButtons.tsx'
+import { DecisionRecord } from '../decisions/DecisionRecord.tsx'
 import { HelpersStrip } from '../helpers/HelpersStrip.tsx'
 import { CheckGlyph, ScreenGlyph } from '../icons.tsx'
 import { Panel } from '../panel/Panel.tsx'
@@ -275,6 +279,7 @@ export function Sheet(slots: SheetSlots) {
         <SheetHead
           item={shown.item}
           missing={sessionMissing(shown.key, !!itemOf(shown.key), detail.value.status)}
+          spend={shown.key !== null && detail.value.key === shown.key ? detail.value.data?.spend : null}
           onRename={name => open && onRename?.(open, name)}
           onRenameWorkspace={onRenameWorkspace && (name => open && onRenameWorkspace(open, name))}
           card={{
@@ -367,7 +372,7 @@ export interface SheetViewProps {
 export function SheetView(props: SheetViewProps) {
   const { open, item, detail, form, composer, buttons, compact = false } = props
   const t = useT()
-  const { data, connected, canMutate, canEdit } = useBoardContext()
+  const { data, connected, canMutate, canEdit, now } = useBoardContext()
   // A redraw of the conversation keeps the focus on what opens the same thing (a helper's line).
   const keepFocus = useKeepFocus()
   const onBoard = (key: string | null) => !!key && !!data?.items.some(i => i.key === key)
@@ -384,6 +389,8 @@ export function SheetView(props: SheetViewProps) {
       turn: !!openItem && inTurn(openItem),
       restarting: !!open && restartPending(schedules, open),
       archiveBlocked: !!archiveBlock(openItem, schedules),
+      // A session of an offline device (#502); nothing for this computer's.
+      ...(openItem?.device && { unreachable: nodeLook(openItem, data?.devices, now, t)?.why ?? '' }),
     },
     t,
   )
@@ -432,6 +439,8 @@ export function SheetView(props: SheetViewProps) {
               </button>
             </div>
             <Screen screen={detail.data?.screen ?? ''} form={hasForm} asking={asking} />
+            {/* Decisions (#487): the session's closed questions, while the board has them on. */}
+            {data?.decisions && <DecisionRecord item={item} />}
             <div className="section-title">{t('thread.title')}</div>
             <div className="thread">
               <Conversation
@@ -449,7 +458,9 @@ export function SheetView(props: SheetViewProps) {
         composer={composer}
         item={item}
         availability={availability}
-        buttons={item ? headButtons(item, t, !!data?.mokupilot, schedules, !!data?.fork) : NO_HEAD_BUTTONS}
+        buttons={
+          item ? headButtons(item, t, !!data?.mokupilot, schedules, !!data?.fork, !!data?.codexFork) : NO_HEAD_BUTTONS
+        }
         term={item ? termButton(item, data, t) : undefined}
         changesHidden={!detail.data?.checkout}
         present={!!openItem && detail.status !== 'missing'}
@@ -477,6 +488,8 @@ export function SheetView(props: SheetViewProps) {
                 onBrowser={inBrowser ? openBrowser : undefined}
               />
             ))}
+        {/* Decisions (#487): the question's options, the default and Hold, under what it asks. */}
+        {!hasForm && asking && item?.decision && <SheetDecision item={item} />}
       </div>
       <HelpersStrip
         helpers={(item && detail.data?.helpers) || []}
@@ -545,6 +558,7 @@ function Conversation({ detail, item, links, composer, onResize }: ConversationP
     <Waiting
       queued={queued}
       own={own}
+      sessionKey={item.key}
       onRetry={composer.outbox.retry}
       onEdit={composer.outbox.edit}
       onSendNow={sendNow}
@@ -568,6 +582,26 @@ function Conversation({ detail, item, links, composer, onResize }: ConversationP
       <Thread conversation={conversation} item={item} links={thread} />
       {foot}
     </>
+  )
+}
+
+/** A question's options in the sheet (#487). */
+function SheetDecision({ item }: { item: Item }) {
+  const decisions = useDecisions()
+  const d = item.decision
+  if (!d) return null
+  return (
+    <DecisionButtons
+      decisions={decisions}
+      choice={{
+        sessionKey: item.key,
+        id: d.id,
+        options: d.options,
+        recommend: d.recommend,
+        defaultAt: d.defaultAt,
+        held: d.held !== undefined,
+      }}
+    />
   )
 }
 

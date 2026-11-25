@@ -57,6 +57,15 @@ export const TeamIcon = () => (
   </Icon>
 )
 
+/** A clock with its hand turned back: what changed since the owner left (#489). */
+export const JournalIcon = () => (
+  <Icon>
+    <path d="M3.6 10a6.4 6.4 0 1 0 1.9-4.5" />
+    <path d="M3.5 3.5v3h3" />
+    <path d="M10 6.5V10l2.5 1.5" />
+  </Icon>
+)
+
 /** Threads (#392): a list whose lines carry a status dot. */
 export const ThreadsIcon = () => (
   <Icon>
@@ -67,10 +76,24 @@ export const ThreadsIcon = () => (
   </Icon>
 )
 
+/** Decisions (#487): a fork in the path, one way marked. */
+export const DecisionsIcon = () => (
+  <Icon>
+    <path d="M10 17v-6.5M10 10.5 5.5 6M10 10.5 14.5 6" />
+    <path d="M4 7.6V4.5h3.1M16 7.6V4.5h-3.1" />
+  </Icon>
+)
+
 export const TimeIcon = () => (
   <Icon>
     <circle cx="10" cy="10" r="6.5" />
     <path d="M10 6.4V10l2.6 1.6" />
+  </Icon>
+)
+
+export const SpendIcon = () => (
+  <Icon>
+    <path d="M4.5 15.5v-4M10 15.5v-10M15.5 15.5v-7" />
   </Icon>
 )
 
@@ -218,6 +241,13 @@ export const CheckIcon = () => (
 export const ChevIcon = () => (
   <Icon>
     <path d="m8 5 5 5-5 5" />
+  </Icon>
+)
+
+/** A back control in a panel header (#679). */
+export const ChevLeftIcon = () => (
+  <Icon>
+    <path d="m12 5-5 5 5 5" />
   </Icon>
 )
 
@@ -500,5 +530,68 @@ export const ForkIcon = () => (
     <circle cx="14" cy="4.5" r="1.8" />
     <circle cx="10" cy="15.5" r="1.8" />
     <path d="M6 6.3v.9a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3v-.9M10 10.2v3.5" />
+  </Icon>
+)
+
+// Navigation rail and Settings panel icons (#651).
+
+export const BoardIcon = () => (
+  <Icon>
+    <rect x="3" y="3.5" width="14" height="13" rx="2" />
+    <path d="M7.7 3.5v13M12.3 3.5v13" />
+  </Icon>
+)
+
+export const SidebarIcon = () => (
+  <Icon>
+    <rect x="3.2" y="3.8" width="13.6" height="12.4" rx="2" />
+    <path d="M7.8 3.8v12.4" />
+  </Icon>
+)
+
+export const MenuIcon = () => (
+  <Icon>
+    <path d="M3.5 6h13M3.5 10h13M3.5 14h13" />
+  </Icon>
+)
+
+export const SlidersIcon = () => (
+  <Icon>
+    <path d="M3.5 6h13M3.5 14h13" />
+    <circle cx="7.5" cy="6" r="1.8" />
+    <circle cx="12.5" cy="14" r="1.8" />
+  </Icon>
+)
+
+export const CpuIcon = () => (
+  <Icon>
+    <rect x="5.5" y="5.5" width="9" height="9" rx="1.6" />
+    <path d="M8 3.2v2.3m4-2.3v2.3m-4 9v2.3m4-2.3v2.3M3.2 8h2.3m-2.3 4h2.3m9-4h2.3m-2.3 4h2.3" />
+  </Icon>
+)
+
+export const LayersIcon = () => (
+  <Icon>
+    <path d="M10 3.8 16.5 7.2 10 10.6 3.5 7.2Z" />
+    <path d="M3.5 10.5 10 13.9l6.5-3.4M3.5 13.5 10 16.9l6.5-3.4" />
+  </Icon>
+)
+
+export const PlugIcon = () => (
+  <Icon>
+    <path d="M7.5 3.5v3.5m5-3.5v3.5M5.5 7h9v2.8a4.5 4.5 0 0 1-9 0Z" />
+    <path d="M10 14.3v2.5" />
+  </Icon>
+)
+
+export const ShieldIcon = () => (
+  <Icon>
+    <path d="M10 3.2 16 5.6v4.6c0 3.4-2.4 5.9-6 6.8-3.6-.9-6-3.4-6-6.8V5.6Z" />
+  </Icon>
+)
+
+export const PencilIcon = () => (
+  <Icon>
+    <path d="M13.8 3.6a1.8 1.8 0 0 1 2.6 2.6l-8.5 8.5-3.6.9.9-3.6Z" />
   </Icon>
 )

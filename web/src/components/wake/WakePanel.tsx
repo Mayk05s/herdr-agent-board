@@ -13,7 +13,7 @@
 import type { Switched, WakeSettingsView, WakeView } from '../../../../src/core/wake/view.ts'
 import { useWake, type WakeActions } from '../../hooks/useWake.ts'
 import { useT } from '../../i18n/I18nProvider.tsx'
-import { remotePage } from '../../models/remote-page.ts'
+import { adminHere } from '../../models/remote-page.ts'
 import { offersWakeSettings } from '../../models/settings-menu.ts'
 import {
   excludeEdited,
@@ -31,17 +31,18 @@ import {
   withPending,
 } from '../../models/wake.ts'
 import { useBoardContext } from '../../state/BoardProvider.tsx'
-import { Panel } from '../panel/Panel.tsx'
+import { Panel, type PanelBack } from '../panel/Panel.tsx'
 
 export interface WakePanelProps {
   open: boolean
   onClose(): void
+  back?: PanelBack | undefined
 }
 
-export function WakePanel({ open, onClose }: WakePanelProps) {
+export function WakePanel({ open, onClose, back }: WakePanelProps) {
   const t = useT()
   const { data, canEdit, now } = useBoardContext()
-  const phone = !offersWakeSettings(remotePage(), data)
+  const phone = !offersWakeSettings(!adminHere(), data)
   const wake = useWake(open && !phone)
   const { view, settings } = withPending(isWakeView(data?.wake) ? data.wake : undefined, wake.settings, wake.pending)
   if (!view) return null
@@ -49,6 +50,7 @@ export function WakePanel({ open, onClose }: WakePanelProps) {
     <Panel
       id="wake-sheet"
       kind="wake"
+      back={back}
       open={open}
       onClose={onClose}
       title={

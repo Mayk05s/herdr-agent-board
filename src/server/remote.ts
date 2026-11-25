@@ -21,8 +21,8 @@
 // address from serve, the token in a cookie, and the board's page for a phone's browser.
 // A device's open streams end when it is unpaired, on both.
 import { hostname } from 'node:os'
-import { isRecord } from '../adapters/json-store.ts'
 import { type Caller, serveStatus, tailscaleStatus, whois } from '../adapters/tailscale.ts'
+import type { AdminEdge } from '../core/links.ts'
 import {
   clearCookie,
   cookieToken,
@@ -37,7 +37,8 @@ import {
 import {
   allowedLogin,
   bearerOf,
-  DESK_REMOTE_OPS,
+  isOwnerAdminDevice,
+  isOwnerAdminRoute,
   isOwnerLogin,
   type PwaView,
   REMOTE_API,
@@ -54,7 +55,7 @@ import { vaultPath } from '../core/vault.ts'
 import { threadsConfig } from '../core/work-threads.ts'
 import type { Remote } from '../services/remote.ts'
 import { dispatch, type GuardState, json, peerOf, type Route, readBody } from './http.ts'
-import { decoded, endsWhenGone, remoteRefusal } from './streams.ts'
+import { adminOpOf, decoded, deskOpRefusal, endsWhenGone, remoteRefusal } from './streams.ts'
 
 export interface Hello {
   board: 'agent-board'
@@ -102,8 +103,15 @@ export interface RemoteListenerOptions {
   page: Route
   remote: Remote
   log: (text: string) => void
+  frozen?: () => boolean
   /** What the page shows changed. */
   onChange: () => void
+  /** Extra admin route resolver (e.g. /api/nodes, /api/nodes/setup) used only when `ownerAdmin` is authorised (#694). */
+  adminRoutes?: (path: string) => Route[] | null
+  /** Preflight check that the audit store is writable before executing a remote admin mutation (#694). */
+  onAdminAuditCheck?: () => boolean
+  /** Record each admin action unlocked by `remote.ownerAdmin` in the edge log (#694). */
+  onAdminAction?: (entry: Omit<AdminEdge, 'seq'>) => void
 }
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
@@ -218,6 +226,8 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
       if (req.method === 'GET' && raw === '/api/hello') {
         if (!fromServe) return json(200, hello())
         const known = token ? o.remote.verify(token, who) : null
+        const ownerDevice = !!known && !known.desk && isOwnerLogin(who.login, owner)
+        const ownerAdmin = !!known && isOwnerAdminDevice(known, who.login, owner) && rc().ownerAdmin
         return json(200, {
           ...hello(),
           paired: !!known,
@@ -227,10 +237,9 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
           // The Team panel (#355): only for the owner's own phone, while the team is on; else hello is as it was.
           ...(known && teamOwnerOf(known, who) && { team: true }),
           // Threads (#392): the owner's own phone, while threads are on; else hello is as it was.
-          ...(known &&
-            !known.desk &&
-            isOwnerLogin(who.login, owner) &&
-            threadsConfig(o.cfg.threads) && { threads: true }),
+          ...(ownerDevice && threadsConfig(o.cfg.threads) && { threads: true }),
+          // Headless master admin (#694): only for the owner's own non-desk browser when ownerAdmin is on.
+          ...(ownerAdmin && { ownerAdmin: true }),
         })
       }
       if (req.method === 'POST' && raw === '/api/remote/pair') {
@@ -271,26 +280,50 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
       // computer is refused in both spellings, or an encoded letter (/api/fs/%6Fpen) would get by.
       const path = decoded(raw)
       if (path === null) return json(400, { error: 'path' })
+      const ownerDevice = !device.desk && isOwnerLogin(who.login, owner)
+      const ownerAdmin = isOwnerAdminDevice(device, who.login, owner) && rc().ownerAdmin
       const refused = remoteRefusal(raw, path, {
         desk: !!device.desk,
         teamOwner: teamOwnerOf(device, who),
-        owner: !device.desk && isOwnerLogin(who.login, owner),
+        owner: ownerDevice,
+        ownerAdmin,
       })
       if (refused) return refused
-      if (req.method === 'POST' && raw === '/api/remote') {
-        // A body that is not a JSON object (null, a string, a broken or oversized one) is no op
-        // this desk may run: refused like any other, never answered with a 500 and its message.
-        const body = await readBody(req.clone()).catch(() => null)
-        const op = isRecord(body) ? body.op : undefined
-        if (!DESK_REMOTE_OPS.has(op)) return json(403, { error: 'local' })
+      // Only a desk gets this far with /api/remote unless ownerAdmin is on: the ops a desk may run.
+      if (device.desk) {
+        const op = await deskOpRefusal(req, raw)
+        if (op) return op
       }
       if (req.method === 'GET' && raw === '/api/peers') return json(200, { peers: await peers() })
       // The board's page is for the computer's own browser; a phone has its app.
       if (!raw.startsWith('/api/') && !raw.startsWith('/uploads/')) return json(404, { error: 'not found' })
-      const guards = fromServe ? { ...o.guards, origins: [pwaOrigin] } : o.guards
-      return endsWhenGone(await dispatch(o.routes, req, url, path, guards, () => peerOf(srv, req)), gone =>
-        o.remote.watch(device.id, gone),
-      )
+      if (o.frozen?.() && req.method !== 'GET' && req.method !== 'HEAD') {
+        return json(503, { error: 'handover-frozen', message: 'master handover in progress; writes are frozen' })
+      }
+      const guards = fromServe ? { ...o.guards, origins: [pwaOrigin], remote: true } : { ...o.guards, remote: true }
+      const selected = ownerAdmin ? (o.adminRoutes?.(path) ?? o.routes) : o.routes
+      const logAdmin = ownerAdmin && isOwnerAdminRoute(req.method, raw, path, teamConfig(o.cfg.team) !== null)
+      if (logAdmin && o.onAdminAuditCheck && !o.onAdminAuditCheck()) return json(503, { ok: false, error: 'audit' })
+      const op = logAdmin ? await adminOpOf(req) : undefined
+      let res: Response | undefined
+      try {
+        res = await dispatch(selected, req, url, path, guards, () => peerOf(srv, req))
+        return endsWhenGone(res, gone => o.remote.watch(device.id, gone))
+      } finally {
+        if (logAdmin) {
+          o.onAdminAction?.({
+            kind: 'admin',
+            at: Date.now(),
+            method: req.method,
+            path: path.slice(0, 200),
+            ...(op && { op }),
+            status: res?.status ?? 500,
+            via,
+            who: `${who.login} (${device.device}, ${device.id})`,
+            from: address || 'unknown',
+          })
+        }
+      }
     } catch (err) {
       o.log(`remote ${req.method} ${url ? url.pathname : ''}: ${messageOf(err)}`)
       return json(500, { error: messageOf(err) })
@@ -463,7 +496,8 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
       void sync()
     },
     view() {
-      if (!rc().on) return null
+      const conf = rc()
+      if (!conf.on) return null
       const { pending, devices } = o.remote
       return {
         on: true,
@@ -472,6 +506,7 @@ export function createRemoteListener(o: RemoteListenerOptions): RemoteListener {
         pending: pending().map(({ status, ...r }) => r),
         devices: devices().map(({ tokenHash, ...d }) => d),
         pwa: pwaView(),
+        ...(conf.ownerAdmin && { ownerAdmin: true as const }),
       }
     },
     hello,

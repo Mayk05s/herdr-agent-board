@@ -6,7 +6,8 @@
 // asleep in "Waiting" fold, for every board; on the local board, Remote access…; on a page
 // signed in through the owner's domain, Sign out; Presence (#172), the board's, for every board;
 // Secrets…, Backup… and Time tracking… on the local board and on the board's own server; Server…
-// on the board's own server's page only.
+// on the board's own server's page only; on the local board's page Watches, Decisions, Away
+// journal, and under Threads Case files and Verified done (#596).
 // The items are models/settings-menu.ts.
 import { useEffect, useState } from 'react'
 import type { FoldMode } from '../../../src/core/fold-mode.ts'
@@ -14,7 +15,7 @@ import { LANGUAGES, translator } from '../../../src/core/i18n/translator.ts'
 import type { PresenceMode } from '../../../src/core/presence.ts'
 import { type TodoMode, todoModeOf } from '../../../src/core/todos.ts'
 import type { Translator } from '../../../src/core/types.ts'
-import type { ThreadMode } from '../../../src/core/work-threads.ts'
+import type { ThreadMode, VerifySettingsPatch } from '../../../src/core/work-threads.ts'
 import { ApiError, api, errorText, isReply, postJson, replyOf } from '../api/client.ts'
 import type { MenuEngine, MenuSource } from '../components/menu/menu-engine.ts'
 import { useLanguage } from '../i18n/I18nProvider.tsx'
@@ -22,15 +23,18 @@ import { CARD_TEXT_KEY, cardTextNow, setCardText } from '../models/card-text.ts'
 import { LOOK_KEY, lookNow, setLook } from '../models/look.ts'
 import { type Dock, isDock } from '../models/panel-layout.ts'
 import { offersProfiles } from '../models/profiles.ts'
-import { keptAuth, remotePage, UNPAIRED } from '../models/remote-page.ts'
+import { adminHere, keptAuth, ownerAdminPage, remotePage, UNPAIRED } from '../models/remote-page.ts'
 import { offersServer } from '../models/server-state.ts'
 import {
+  type FeatureSwitch,
+  featuresNow,
   offersAccess,
   offersBackup,
   offersMokupilot,
   offersSecrets,
   offersTimeSettings,
   offersVault,
+  type SettingsNow,
   settingPicked,
   settingsMenu,
   threadsNow,
@@ -91,6 +95,12 @@ export interface SettingsDeps {
   /** The local board's page or the board's own server's: Backup… is offered (#233). */
   backup?(): boolean
   openBackup?(): void
+  /** The local board's page: Updates… is offered (#617). */
+  updates?(): boolean
+  openUpdates?(): void
+  /** The local board's page: Housekeeping… is offered (#652). */
+  housekeeping?(): boolean
+  openHousekeeping?(): void
   /** The local board's page or the board's own server's: Time tracking… is offered (#237). */
   timeSettings?(): boolean
   openTimeSettings?(): void
@@ -106,6 +116,12 @@ export interface SettingsDeps {
   /** The local board's page with the payload's teamRev (#231): Team… is offered. */
   team?(): boolean
   openTeam?(): void
+  /**
+   * The local page (#510): Devices… is offered, on a board without `nodes` too, where it holds Add a
+   * server alone (#509).
+   */
+  devices?(): boolean
+  openDevices?(): void
   /** This page signed in through the owner's domain: Sign out is offered. */
   signOut?(): boolean
   endLogin?(): void
@@ -127,13 +143,42 @@ export interface SettingsDeps {
   /** The board on another device: Paths on this computer… is offered. */
   localPaths?(): boolean
   openLocalPaths?(): void
+  /** Watches, decisions, the away journal on (#596); none: no item. */
+  watches?(): boolean | undefined
+  decisions?(): boolean | undefined
+  /** A decision's default may answer it; none: no choice. */
+  decisionsDefaults?(): boolean | undefined
+  journal?(): boolean | undefined
+  chooseFeature?(body: FeatureSetting): void
+  /** Under Threads: case files and verified done on (#596); none: no item. */
+  threadsCases?(): boolean | undefined
+  threadsVerify?(): boolean | undefined
+  /** What Off would leave behind and the journal's error (#596). */
+  featureExtras?(): Pick<SettingsNow, 'watchesRunning' | 'defaultsRunning' | 'journalError'>
 }
 
-/** What Settings → Threads asks the board for (POST /api/threads-settings, #410). */
-export type ThreadsSetting = { mode: ThreadMode } | { share: boolean }
+/** What Settings → Threads asks the board for (POST /api/threads-settings, #410; case files and verified done, #596, #680). */
+export type ThreadsSetting =
+  | { mode: ThreadMode }
+  | { share: boolean }
+  | { cases: boolean }
+  | { verify: boolean }
+  | { verifySettings: VerifySettingsPatch }
+
+/** What Settings → Watches, Decisions or Away journal asks the board for (POST /api/feature-settings, #596). */
+export type FeatureSetting =
+  | { [K in FeatureSwitch]: Record<K, boolean> }[FeatureSwitch]
+  | { decisionsDefaults: boolean }
 
 /** What Settings → Presence asks the board for (POST /api/presence { op: 'settings', … }). */
 export type PresenceSetting = { on: false } | { on: true; mode?: PresenceMode; idleMinutes?: number }
+
+/**
+ * Whether Settings offers Devices…: on this computer's own page, or on an authorised remote
+ * owner-admin session (#694), with or without `nodes` (a board adds its first server there, #509);
+ * never on any other remote page.
+ */
+export const offersDevices = (remote: boolean, ownerAdmin = false): boolean => !remote || ownerAdmin
 
 /** The menu out of the gear (`keyboard`: opened from the keyboard, the first item lit). */
 export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyboard: boolean) => void {
@@ -157,11 +202,14 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
       access: deps.access?.() ?? false,
       secrets: deps.secrets?.() ?? false,
       backup: deps.backup?.() ?? false,
+      updates: deps.updates?.() ?? false,
+      housekeeping: deps.housekeeping?.() ?? false,
       timeSettings: deps.timeSettings?.() ?? false,
       vault: deps.vault?.() ?? false,
       server: deps.server?.() ?? false,
       calendarSettings: deps.calendarSettings?.() ?? false,
       team: deps.team?.() ?? false,
+      devices: deps.devices?.() ?? false,
       signOut: deps.signOut?.() ?? false,
       presence: deps.presence?.(),
       idleMinutes: deps.idleMinutes?.(),
@@ -170,6 +218,13 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
       threadsShare: deps.threadsShare?.(),
       compact: deps.compact?.(),
       localPaths: deps.localPaths?.() ?? false,
+      watches: deps.watches?.(),
+      decisions: deps.decisions?.(),
+      decisionsDefaults: deps.decisionsDefaults?.(),
+      journal: deps.journal?.(),
+      threadsCases: deps.threadsCases?.(),
+      threadsVerify: deps.threadsVerify?.(),
+      ...deps.featureExtras?.(),
     })
     const source: MenuSource = keyboard ? 'keyboard' : deps.coarse() ? 'touch' : 'mouse'
     deps.menu.open(items, {
@@ -195,11 +250,14 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
         else if (pick?.kind === 'access') deps.openAccess?.()
         else if (pick?.kind === 'secrets') deps.openSecrets?.()
         else if (pick?.kind === 'backup') deps.openBackup?.()
+        else if (pick?.kind === 'updates') deps.openUpdates?.()
+        else if (pick?.kind === 'housekeeping') deps.openHousekeeping?.()
         else if (pick?.kind === 'timeSettings') deps.openTimeSettings?.()
         else if (pick?.kind === 'vault') deps.openVault?.()
         else if (pick?.kind === 'server') deps.openServer?.()
         else if (pick?.kind === 'calendarSettings') deps.openCalendarSettings?.()
         else if (pick?.kind === 'team') deps.openTeam?.()
+        else if (pick?.kind === 'devices') deps.openDevices?.()
         else if (pick?.kind === 'signout') deps.endLogin?.()
         else if (pick?.kind === 'presence')
           deps.choosePresence?.(pick.value === 'none' ? { on: false } : { on: true, mode: pick.value })
@@ -207,6 +265,11 @@ export function settingsMenuFrom(deps: SettingsDeps): (button: HTMLElement, keyb
         else if (pick?.kind === 'todos') deps.chooseTodos?.(pick.value)
         else if (pick?.kind === 'threads') deps.chooseThreads?.({ mode: pick.value })
         else if (pick?.kind === 'threadsShare') deps.chooseThreads?.({ share: pick.value })
+        else if (pick?.kind === 'threadsCases') deps.chooseThreads?.({ cases: pick.value })
+        else if (pick?.kind === 'threadsVerify') deps.chooseThreads?.({ verify: pick.value })
+        else if (pick?.kind === 'feature')
+          deps.chooseFeature?.({ [pick.feature]: pick.value } as Record<FeatureSwitch, boolean>)
+        else if (pick?.kind === 'decisionsDefaults') deps.chooseFeature?.({ decisionsDefaults: pick.value })
         else if (pick?.kind === 'compact') deps.chooseCompact?.(pick.value)
         else if (pick?.kind === 'localPaths') deps.openLocalPaths?.()
       },
@@ -279,6 +342,26 @@ export async function chooseCompact(
   if (!canEdit) return toast(t('live.off'), true)
   try {
     await save({ compactAt: at })
+  } catch (err) {
+    toast(errorText(err, t), true)
+  }
+}
+
+/** Continue mid-turn Claude sessions after a restart (#633, config.json's `turnResume`). */
+export async function chooseTurnResume(
+  on: boolean,
+  {
+    t,
+    canEdit,
+    save,
+    toast,
+  }: Pick<LanguageDeps, 't' | 'canEdit' | 'toast'> & {
+    save(body: { turnResume: boolean }): Promise<unknown>
+  },
+): Promise<void> {
+  if (!canEdit) return toast(t('live.off'), true)
+  try {
+    await save({ turnResume: on })
   } catch (err) {
     toast(errorText(err, t), true)
   }
@@ -364,7 +447,8 @@ const crossFade = (): ((apply: () => void) => unknown) | undefined =>
  * `openAccess` the Remote access panel, `openMokupilot` the MokuPilot panel, `openSecrets` the
  * Secrets panel, `openBackup` the Backup panel, `openTimeSettings` Time tracking's,
  * `openLocalPaths` Paths on this computer, `openCalendarSettings` the calendar's (#328), `openTeam`
- * the Team panel (#231), `openServer` the board's own server's state.
+ * the Team panel (#231), `openDevices` Settings, Devices (#510), `openUpdates` Updates… (#617),
+ * `openHousekeeping` Housekeeping… (#652), `openServer` the board's own server's state.
  */
 export function useSettingsMenu(
   menu: MenuEngine,
@@ -379,6 +463,9 @@ export function useSettingsMenu(
   openLocalPaths: () => void = () => {},
   openCalendarSettings: () => void = () => {},
   openTeam: () => void = () => {},
+  openDevices: () => void = () => {},
+  openUpdates: () => void = () => {},
+  openHousekeeping: () => void = () => {},
   openServer: () => void = () => {},
 ): SettingsMenu {
   const { t, choose } = useLanguage()
@@ -399,9 +486,16 @@ export function useSettingsMenu(
     openLocalPaths,
     openCalendarSettings,
     openTeam,
+    openDevices,
+    openUpdates,
+    openHousekeeping,
     openServer,
   })
   const [expanded, setExpanded] = useState(false)
+  const localFeatures = () => {
+    const data = latest.current.board.data
+    return data && adminHere() ? featuresNow(data) : undefined
+  }
   const [gear] = useState(() => {
     const open = settingsMenuFrom({
       menu,
@@ -467,13 +561,21 @@ export function useSettingsMenu(
       openPhones: () => latest.current.openPhones(),
       mokupilot: () => offersMokupilot(latest.current.board.data),
       openMokupilot: () => latest.current.openMokupilot(),
-      access: () => offersAccess(remotePage(), latest.current.board.data),
+      // Remote access…: the local board's page or remote owner-admin (#694), never the board's own
+      // server. Backup…, Time tracking… (and Sleep and wake…'s switches): there and on the board's own
+      // server through its domain's login. Secrets…: the local board's page and the board's own
+      // server only (the board refuses /api/secrets elsewhere, owner-admin too).
+      access: () => offersAccess(!adminHere(), latest.current.board.data),
       openAccess: () => latest.current.openAccess(),
       secrets: () => offersSecrets(remotePage(), latest.current.board.data),
       openSecrets: () => latest.current.openSecrets(),
-      backup: () => offersBackup(remotePage(), latest.current.board.data),
+      backup: () => offersBackup(!adminHere(), latest.current.board.data),
       openBackup: () => latest.current.openBackup(),
-      timeSettings: () => offersTimeSettings(remotePage(), latest.current.board.data),
+      updates: () => adminHere(),
+      openUpdates: () => latest.current.openUpdates(),
+      housekeeping: () => adminHere(),
+      openHousekeeping: () => latest.current.openHousekeeping(),
+      timeSettings: () => offersTimeSettings(!adminHere(), latest.current.board.data),
       openTimeSettings: () => latest.current.openTimeSettings(),
       vault: () => offersVault(remotePage(), latest.current.board.data),
       // the web vault in a tab of its own (the same tab where a browser keeps it from opening one)
@@ -482,10 +584,12 @@ export function useSettingsMenu(
         if (tab) tab.opener = null
         else window.location.assign('/vault/')
       },
-      calendarSettings: () => !remotePage(),
+      calendarSettings: () => adminHere(),
       openCalendarSettings: () => latest.current.openCalendarSettings(),
       team: () => offersTeam(latest.current.board.data),
       openTeam: () => latest.current.openTeam(),
+      devices: () => offersDevices(remotePage(), ownerAdminPage()),
+      openDevices: () => latest.current.openDevices(),
       server: () => offersServer(remotePage(), latest.current.board.data, keptAuth),
       openServer: () => latest.current.openServer(),
       signOut: () => remotePage() && keptAuth() === 'login',
@@ -518,19 +622,26 @@ export function useSettingsMenu(
         if (!board.canEdit) return board.toast(t('live.off'), true)
         api.post('/api/todos', { op: 'settings', mode }).catch(err => board.toast(errorText(err, t), true))
       },
-      // Threads (#410), on the local board's page: off without the payload's line.
+      // Threads (#410), on the local board's page or remote owner-admin: off without the payload's line.
       threads: () => {
         const data = latest.current.board.data
-        return data && !remotePage() ? threadsNow(data).mode : undefined
+        return data && adminHere() ? threadsNow(data).mode : undefined
       },
       threadsShare: () => {
         const data = latest.current.board.data
-        return data && !remotePage() ? threadsNow(data).share : undefined
+        return data && adminHere() ? threadsNow(data).share : undefined
       },
       chooseThreads: body => {
         const { t, board } = latest.current
         if (!board.canEdit) return board.toast(t('live.off'), true)
-        api.post('/api/threads-settings', body).catch(err => board.toast(errorText(err, t), true))
+        api
+          .post('/api/threads-settings', body)
+          // Made, but the agents' skill was not copied after it: said, as an error.
+          .then(r => {
+            const note = (r as { note?: unknown } | null)?.note
+            if (typeof note === 'string' && note) board.toast(note, true)
+          })
+          .catch(err => board.toast(errorText(err, t), true))
       },
       // An older board sends no default: no Auto-compact item.
       compact: () => latest.current.board.data?.compactDefault,
@@ -545,6 +656,26 @@ export function useSettingsMenu(
       },
       localPaths: remotePage,
       openLocalPaths: () => latest.current.openLocalPaths(),
+      // The feature switches (#596), on the local board's page, as Threads.
+      watches: () => localFeatures()?.watches,
+      decisions: () => localFeatures()?.decisions,
+      decisionsDefaults: () => localFeatures()?.decisionsDefaults,
+      journal: () => localFeatures()?.journal,
+      threadsCases: () => localFeatures()?.threadsCases,
+      threadsVerify: () => localFeatures()?.threadsVerify,
+      featureExtras: () => {
+        const f = localFeatures()
+        return {
+          ...(f?.watchesRunning && { watchesRunning: f.watchesRunning }),
+          ...(f?.defaultsRunning && { defaultsRunning: f.defaultsRunning }),
+          ...(f?.journalError && { journalError: f.journalError }),
+        }
+      },
+      chooseFeature: body => {
+        const { t, board } = latest.current
+        if (!board.canEdit) return board.toast(t('live.off'), true)
+        api.post('/api/feature-settings', body).catch(err => board.toast(errorText(err, t), true))
+      },
     })
     return settingsGear(menu, open, setExpanded)
   })

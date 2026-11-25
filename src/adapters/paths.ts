@@ -6,14 +6,28 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cardStore } from '../core/card-store.ts'
+import { RELAY_SOCKETS_DIR } from '../core/relay-texts.ts'
 
 export const PLUGIN_ID = 'agent-board'
 export const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+/**
+ * The plugin's folder as a node updates it and a master ships it (#590): ROOT, or in a test a
+ * scratch plugin of its own (BOARD_TEST_PLUGIN_ROOT; unset in production), so no test swaps the
+ * checkout it runs from.
+ */
+export const pluginRoot = (): string => process.env.BOARD_TEST_PLUGIN_ROOT || ROOT
 
 export const configDir = (): string =>
   join(process.env.APPDATA || join(homedir(), '.config'), 'herdr', 'plugins', 'config', PLUGIN_ID)
 export const stateDir = (): string =>
   join(process.env.LOCALAPPDATA || join(homedir(), '.local', 'state'), 'herdr', 'plugins', PLUGIN_ID)
+/** The node's own folder in the board's state folder. */
+export const nodeDir = (): string => join(stateDir(), 'node')
+/**
+ * Where the server-side relay sockets live (#512): RELAY_SOCKETS_DIR, or in a test a scratch
+ * sockets folder (BOARD_TEST_RELAY_SOCKETS_DIR; unset in production).
+ */
+export const relaySocketsDir = (): string => process.env.BOARD_TEST_RELAY_SOCKETS_DIR || RELAY_SOCKETS_DIR
 export const cardsDir = (): string => cardStore(process.env, homedir(), process.platform).cards
 // Reminders and repeating pings for sessions (schedule-store.ts), one file per entry.
 export const scheduleDir = (): string => join(stateDir(), 'schedule')
@@ -21,6 +35,7 @@ export const scheduleDir = (): string => join(stateDir(), 'schedule')
 export const archiveDir = (): string => join(stateDir(), 'archive')
 export const boardFile = (): string => join(stateDir(), 'board.json')
 export const uploadsDir = (): string => join(stateDir(), 'uploads')
+export const threadFilesDir = (): string => join(stateDir(), 'thread-files')
 // First messages for a launcher's {messageFile}, there only while the launcher runs.
 export const launchDir = (): string => join(stateDir(), 'launch')
 // From Claude Code's status line (entrypoints/statusline.ts): the account's usage windows, each session's context.
@@ -37,6 +52,8 @@ const fileId = (id: string): string =>
 // in its own file, named apart from it (a profile with the id `latest` included).
 export const usageFileFor = (id: string): string =>
   id === 'default' ? usageFile() : join(stateDir(), `claude-limits-profile-${fileId(id)}.json`)
+// From Antigravity CLI's status line (entrypoints/agy-statusline.ts, #647): Gemini quota windows.
+export const agyUsageFile = (): string => join(stateDir(), 'agy-limits-latest.json')
 export const contextDir = (): string => join(stateDir(), 'context')
 // The shells the board opened (services/terminals.ts), so a board that restarts finds them again.
 export const terminalsFile = (): string => join(stateDir(), 'terminals.json')

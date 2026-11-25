@@ -38,6 +38,8 @@ const prompts = (box: Sandbox): string[] =>
     .filter(a => a[1] === 'prompt')
     .map(a => a[3] as string)
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+/** The start of the current minute: an entry due then is not late (that takes two minutes). */
+const thisMinute = (): number => Math.floor(Date.now() / 60_000) * 60_000
 
 /** Claude's input box as `herdr agent read --ansi` shows it; a suggestion is drawn dim. */
 const RULE = '─'.repeat(40)
@@ -146,6 +148,36 @@ describe('startScheduler', () => {
     assert.deepEqual([...prompts(dialog), ...prompts(draft)], [])
   })
 
+  test("a Codex session: a reminder is not typed over a draft in its composer; Claude's screen read stays Claude's", async () => {
+    const codexHerdr = (box: Sandbox, status: string, text: string): void => {
+      const snapshot = {
+        panes: [{ pane_id: 'p1', agent: 'codex', agent_session: { value: 's1' }, agent_status: status, cwd: box.dir }],
+        tabs: [],
+        workspaces: [],
+      }
+      box.state({
+        'api snapshot': { result: { snapshot } },
+        'agent get': { result: { agent: { agent: 'codex', agent_status: status, agent_session: { value: 's1' } } } },
+        'agent read': { text },
+        'agent prompt': { result: {} },
+      })
+    }
+    const free = await sandbox()
+    codexHerdr(free, 'idle', '\x1b[1m›\x1b[22m \x1b[2mAsk Codex to do anything\x1b[0m\n \x1b[2m? for shortcuts\x1b[0m')
+    put(free, { id: 'cdcd11', text: 'into the empty composer', at: Date.now() - 1000, next: Date.now() - 1000 })
+    await scheduler(free)
+    await until(() => prompts(free).length === 1)
+    assert.deepEqual(prompts(free), ['[board reminder] into the empty composer'])
+
+    const draft = await sandbox()
+    codexHerdr(draft, 'working', '\x1b[1m›\x1b[22m the user types\n \x1b[2m? for shortcuts\x1b[0m')
+    put(draft, { id: 'cdcd12', text: 'not over a draft', at: Date.now() - 1000, next: Date.now() - 1000 })
+    await scheduler(draft)
+    await until(() => read(draft, 'cdcd12')?.why === 'draft')
+    await sleep(400)
+    assert.deepEqual(prompts(draft), [])
+  })
+
   test('--idle: a working session gets it once it is free; one that stays busy has it logged as missed', async () => {
     const box = await sandbox()
     herdrWith(box, 'working')
@@ -173,6 +205,204 @@ describe('startScheduler', () => {
     assert.equal(cron.missed, 1)
     assert.ok(cron.next > Date.now() - 1000)
     assert.equal(cron.pendingSince, undefined)
+  })
+
+  test('reminders due for one session in one minute go as one prompt, a line each (#306)', async () => {
+    const box = await sandbox()
+    herdrWith(box, 'idle')
+    // Due in this minute, so none of them is late (that takes two minutes); one in the minute
+    // before goes on its own.
+    const at = (ms: number) => {
+      const t = thisMinute() + ms
+      return { at: t, next: t, created: t }
+    }
+    put(box, { id: 'abab01', text: 'check the CI run', ...at(0) })
+    put(box, { id: 'abab02', text: 'ping anna about 50% of the sheet', ...at(1) })
+    put(box, { id: 'abab03', text: 'проверить отчёт', from: { key: 's9', name: 'ben atlas' }, ...at(2) })
+    put(box, { id: 'abab04', text: 'the minute before', ...at(-60_000) })
+    await scheduler(box)
+    await until(() => runs(box).length === 4, 12_000)
+    await sleep(400)
+    const [before, joined] = prompts(box)
+    expect(before).toMatch(/^\[board reminder(; .+)?\] the minute before$/)
+    assert.equal(
+      joined,
+      [
+        '[board reminder] check the CI run',
+        '[board reminder] ping anna about 50% of the sheet',
+        '[board reminder from ben atlas] проверить отчёт',
+      ].join('\n'),
+    )
+    assert.equal(prompts(box).length, 2)
+    assert.ok(runs(box).every(r => r.result === 'sent'))
+    assert.deepEqual(
+      runs(box)
+        .map(r => r.id)
+        .sort(),
+      ['abab01', 'abab02', 'abab03', 'abab04'],
+    )
+    for (const id of ['abab01', 'abab02', 'abab03', 'abab04']) assert.equal(read(box, id), null)
+
+    // Two in one minute: one prompt.
+    const two = await sandbox()
+    herdrWith(two, 'idle')
+    put(two, { id: 'acac01', text: 'first', ...at(0) })
+    put(two, { id: 'acac02', text: 'second', ...at(1) })
+    await scheduler(two)
+    await until(() => runs(two).length === 2, 12_000)
+    await sleep(400)
+    assert.deepEqual(prompts(two), ['[board reminder] first\n[board reminder] second'])
+  })
+
+  test('cron entries, --idle ones beside plain ones and another session go on their own (#306)', async () => {
+    const box = await sandbox()
+    twoSessions(box, 's2')
+    const minute = thisMinute()
+    const at = { next: minute, created: minute }
+    put(box, { id: 'adad01', text: 'plain', at: minute, ...at })
+    put(box, { id: 'adad02', text: 'hourly', cron: '* * * * *', ...at })
+    put(box, { id: 'adad03', text: 'when free', idle: true, at: minute, ...at })
+    put(box, { id: 'adad04', key: 's2', name: 'Other', text: 'for the other one', at: minute, ...at })
+    await scheduler(box)
+    await until(() => prompts(box).length === 4 && runs(box).length === 4, 12_000)
+    await sleep(400)
+    const got = prompts(box)
+    assert.equal(got.length, 4)
+    assert.ok(got.every(p => !p.includes('\n')))
+    assert.ok(got.includes('[board reminder] plain'))
+    assert.ok(got.includes('[board reminder] when free'))
+    assert.ok(got.includes('[board reminder] for the other one'))
+    assert.ok(got.some(p => /^\[board schedule adad02: \* \* \* \* \*.*\] hourly$/.test(p)))
+  })
+
+  test('reminders held by a dialog stay together and go as one prompt once it is gone (#306)', async () => {
+    const box = await sandbox()
+    herdrWith(box, 'blocked')
+    const now = Date.now() - 1000
+    put(box, { id: 'aeae01', text: 'one', at: now, next: now, created: now })
+    await scheduler(box)
+    await until(() => read(box, 'aeae01')?.why === 'dialog')
+    // One more comes due while the first waits.
+    put(box, { id: 'aeae02', text: 'two', at: now, next: now, created: now + 1 })
+    await until(() => read(box, 'aeae02')?.why === 'dialog')
+    await sleep(400)
+    herdrWith(box, 'idle')
+    await until(() => runs(box).length === 2, 12_000)
+    await sleep(400)
+    assert.deepEqual(prompts(box), ['[board reminder] one\n[board reminder] two'])
+  })
+
+  test('a restart, a sleep, a call report and a retry-safe report never join a reminder (#306)', async () => {
+    const box = await sandbox()
+    herdrWith(box, 'idle')
+    const minute = thisMinute()
+    const at = (n: number) => ({ at: minute, next: minute, created: minute + n })
+    put(box, { id: 'afaf01', text: 'plain', ...at(0) })
+    put(box, { id: 'afaf02', kind: 'call', text: '# Call with cleo\nShip it.', ...at(1) })
+    put(box, { id: 'afaf03', kind: 'restart', text: 'after the restart', ...at(2) })
+    put(box, { id: 'afaf04', kind: 'sleep', text: '', ...at(3) })
+    put(box, {
+      id: 'afaf05',
+      text: 'a report',
+      receipt: { key: 's1', session: 's1', reportId: 'r1', hash: 'h' },
+      ...at(4),
+    })
+    await scheduler(box)
+    await until(() => prompts(box).length >= 2 && !read(box, 'afaf01') && !read(box, 'afaf02'), 12_000)
+    await sleep(600)
+    assert.equal(prompts(box)[0], '[board reminder] plain')
+    assert.ok(prompts(box).every(p => !p.includes('[board reminder] plain\n')))
+    assert.ok(prompts(box).some(p => p.startsWith('[mokupilot call report]\n# Call with cleo')))
+  })
+
+  test('a sleeping session is woken once for reminders due together; a no-wake one waits (#306)', async () => {
+    const box = await sandbox()
+    box.state({ 'api snapshot': { result: { snapshot: { panes: [], tabs: [], workspaces: [] } } } })
+    let wakes = 0
+    const wake = http.createServer((req, res) => {
+      res.setHeader('content-type', 'application/json')
+      if (req.url === '/sleeping') {
+        return res.end(
+          JSON.stringify(
+            wakes ? [] : [{ session: 's1', pane: 'p1', name: 'Sleepy', slept_at: new Date().toISOString() }],
+          ),
+        )
+      }
+      wakes++
+      herdrWith(box, 'idle')
+      res.end('{"ok":true}')
+    })
+    await new Promise<void>(resolve => wake.listen(0, '127.0.0.1', resolve))
+    try {
+      const minute = thisMinute()
+      const at = (n: number) => ({ at: minute, next: minute, created: minute + n })
+      put(box, { id: 'a9a901', text: 'wake up', ...at(0) })
+      put(box, { id: 'a9a902', text: 'and this', ...at(1) })
+      put(box, {
+        id: 'a9a903',
+        text: 'atlas-12 done',
+        from: { key: 'threads', name: 'threads' },
+        noWake: true,
+        ...at(2),
+      })
+      await scheduler(box, { wakeUrl: `http://127.0.0.1:${(wake.address() as AddressInfo).port}` })
+      await until(() => prompts(box).length === 2, 12_000)
+      await sleep(400)
+      assert.equal(wakes, 1)
+      assert.deepEqual(prompts(box), [
+        '[board reminder] wake up\n[board reminder] and this',
+        '[board reminder from threads] atlas-12 done',
+      ])
+    } finally {
+      await new Promise(resolve => wake.close(resolve))
+    }
+  })
+
+  test('long reminders due together go in more than one prompt, none over the cap (#306)', async () => {
+    const box = await sandbox()
+    herdrWith(box, 'idle')
+    const minute = thisMinute()
+    const long = (c: string) => c.repeat(2000)
+    for (const [i, c] of ['a', 'b', 'c', 'd', 'e'].entries())
+      put(box, { id: `a7a70${i}`, text: long(c), at: minute, next: minute, created: minute + i })
+    await scheduler(box)
+    await until(() => runs(box).length === 5, 12_000)
+    await sleep(400)
+    // 8000 characters of text at most: three of them, then the other two.
+    assert.deepEqual(
+      prompts(box).map(p => p.split('\n').length),
+      [3, 2],
+    )
+  })
+
+  test('a pi session gets each reminder in a prompt of its own, as before (#306)', async () => {
+    const box = await sandbox()
+    const snapshot = {
+      panes: [{ pane_id: 'p1', agent: 'pi', agent_status: 'idle', cwd: box.dir }],
+      tabs: [],
+      workspaces: [],
+    }
+    box.state({
+      'api snapshot': { result: { snapshot } },
+      'agent get': { result: { agent: { agent: 'pi', agent_status: 'idle' } } },
+      'agent read': { text: screen() },
+      'agent prompt': { result: {} },
+    })
+    const minute = thisMinute()
+    put(box, { id: 'a8a801', key: 'pane-p1', name: 'pi one', text: 'first', at: minute, next: minute, created: minute })
+    put(box, {
+      id: 'a8a802',
+      key: 'pane-p1',
+      name: 'pi one',
+      text: 'second',
+      at: minute,
+      next: minute,
+      created: minute + 1,
+    })
+    await scheduler(box)
+    await until(() => runs(box).length === 2, 12_000)
+    await sleep(400)
+    assert.deepEqual(prompts(box), ['[board reminder] first', '[board reminder] second'])
   })
 
   test('text the user left in the input box holds the reminder back until it is gone', async () => {

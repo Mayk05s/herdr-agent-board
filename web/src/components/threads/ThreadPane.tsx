@@ -18,6 +18,7 @@ import {
   isOwnerParty,
   partyLabel,
   STATUS_MENU,
+  stateLines,
   statusColor,
   type ThreadEntryView,
   type ThreadStatus,
@@ -31,7 +32,9 @@ import { AttachButton } from '../team/AttachButton.tsx'
 import { TeamComposer } from '../team/TeamComposer.tsx'
 import { TeamMessage } from '../team/TeamMessage.tsx'
 import { KeyText, MiniRow, StatusDot, statusWord, WhoChip } from './bits.tsx'
+import { CaseHead } from './CaseHead.tsx'
 import { ShareButton, ThreadShare, useShareable } from './ThreadShare.tsx'
+import { ThreadVerify } from './ThreadVerify.tsx'
 
 /** The ops that share, unshare, take or send (#394): the owner's, through the passkey when it is on. */
 const SHARE_OPS = new Set(['share', 'unshare', 'decline-share', 'take', 'decline', 'history', 'send'])
@@ -152,8 +155,10 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
       if (said) toast(said.text, said.error)
       return true
     } catch (err) {
-      // A confirmation window the owner closed is no error.
-      if (!(err instanceof ApiError && err.reply.error === 'cancelled'))
+      // A confirmation window the owner closed is no error. From the owner's phone (#377) it waits
+      // for the passkey on the computer: said as waiting, not as refused.
+      if (err instanceof ApiError && err.reply.error === 'confirm') toast(t('team.err.confirmAway'), false)
+      else if (!(err instanceof ApiError && err.reply.error === 'cancelled'))
         toast(confirmError(err, t) ?? errorText(err, t), true)
       return false
     } finally {
@@ -308,6 +313,7 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
           <ShareButton head={head} busy={busy} onPicking={setPicking} />
         </div>
         <ThreadShare head={head} busy={busy} act={write} picking={picking} onPicking={setPicking} team={team} />
+        <ThreadVerify head={head} />
         {head.waitingOn && (head.status === 'waiting' || head.status === 'owner') && !head.proposed && (
           <p className="wt-summary wt-waiting">
             <KeyText text={head.waitingOn} onOpen={onOpen} />
@@ -318,10 +324,12 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
             <KeyText text={head.summary} onOpen={onOpen} />
           </p>
         )}
+        <CaseHead head={head} sessions={view.case?.sessions} />
         {head.proposed && (
           <div className="wt-proposed">
             <p>
-              <b>{partyLabel(head.proposed.by, t('wt.you'))}</b> {t('wt.proposed', { why: head.proposed.why })}
+              <b>{partyLabel(head.proposed.by, t('wt.you'))}</b>{' '}
+              {t(head.proposed.verify ? 'wt.verify.held' : 'wt.proposed', { why: head.proposed.why })}
             </p>
             <button
               type="button"
@@ -377,9 +385,16 @@ export function ThreadPane({ view, onOpen, onBack }: ThreadPaneProps) {
                   ) : (
                     <>
                       <b>{partyLabel(e.author, t('wt.you'))}</b>{' '}
-                      {t(`wt.did.${item.did}`, { status: statusWord(item.to, t) })}
+                      {t(`wt.did.${item.did}`, {
+                        status: statusWord(item.to, t),
+                        verdict: e.set?.verdict ? t(`wt.verdict.${e.set.verdict}`) : '',
+                      })}
                       {e.set?.summary && item.did !== 'shared' ? ': ' : ''}
                       {e.set?.summary && item.did !== 'shared' && <KeyText text={e.set.summary} onOpen={onOpen} />}
+                      {/* Case files (#488): a state's first lines; the whole of it is in the head. */}
+                      {e.set?.state && item.did !== 'shared'
+                        ? `${e.set.summary ? ' · ' : ': '}${stateLines(e.set.state)}`
+                        : ''}
                     </>
                   )}{' '}
                   <OutMark entry={e} busy={busy} onSend={sendOut} />

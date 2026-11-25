@@ -1,9 +1,12 @@
 // Thin async wrapper over the herdr CLI. HERDR_BIN_PATH hides the socket transport
 // (Unix socket or Windows named pipe), so plugins should call herdr through it.
+
 import { execFile } from 'node:child_process'
 import { isAgentStatus } from '../core/board.ts'
 import type { PaneProcesses } from '../core/board-pane.ts'
+import { CODEX_AGENT, resumedCodexSession } from '../core/codex.ts'
 import type { AgentStatus } from '../core/types.ts'
+import { stableWorkdeskSid, workdeskAgent } from '../core/workdesk-topology.ts'
 import { isRecord } from './json-store.ts'
 
 const BIN = process.env.HERDR_BIN_PATH || 'herdr'
@@ -31,6 +34,7 @@ export interface HerdrWorkspace {
 export interface HerdrTab {
   tab_id: string
   workspace_id: string
+  label?: string
   [key: string]: unknown
 }
 
@@ -42,6 +46,8 @@ export interface HerdrPane {
   agent?: string
   agent_status?: string
   agent_session?: HerdrToken | null
+  /** herdr's agent name (`herdr agent rename`), present on snapshot `agents` entries. */
+  name?: string
   cwd?: string
   label?: string
   terminal_title_stripped?: string
@@ -51,10 +57,26 @@ export interface HerdrPane {
   [key: string]: unknown
 }
 
+/** Native identity as observed in a Herdr pane. Some older snapshots omit provenance fields. */
+export function nativeBoardSid(pane: HerdrPane): string | null {
+  const session = pane.agent_session
+  if (
+    !workdeskAgent(pane.agent) ||
+    !stableWorkdeskSid(session?.value) ||
+    (session.kind !== undefined && session.kind !== 'id') ||
+    (session.agent !== undefined && session.agent !== pane.agent) ||
+    (session.source !== undefined && session.source !== `herdr:${pane.agent}`)
+  )
+    return null
+  return session.value
+}
+
 export interface HerdrSnapshot {
   workspaces: HerdrWorkspace[]
   tabs: HerdrTab[]
   panes: HerdrPane[]
+  /** Live agent entries from `herdr api snapshot` (carries `name` from `herdr agent rename`). */
+  agents?: HerdrPane[]
   focused_pane_id?: string
   [key: string]: unknown
 }
@@ -106,6 +128,7 @@ const PANE_STRINGS = [
   'workspace_id',
   'agent',
   'agent_status',
+  'name',
   'cwd',
   'label',
   'terminal_title_stripped',
@@ -131,7 +154,7 @@ function asWorkspace(v: unknown): HerdrWorkspace | null {
 
 function asTab(v: unknown): HerdrTab | null {
   if (!isRecord(v) || typeof v.tab_id !== 'string' || typeof v.workspace_id !== 'string') return null
-  return { ...v, tab_id: v.tab_id, workspace_id: v.workspace_id }
+  return stringsOnly({ ...v, tab_id: v.tab_id, workspace_id: v.workspace_id }, ['label'])
 }
 
 const listOf = <T>(v: unknown, as: (item: unknown) => T | null): T[] =>
@@ -144,20 +167,51 @@ const listOf = <T>(v: unknown, as: (item: unknown) => T | null): T[] =>
 export function asSnapshot(result: unknown): HerdrSnapshot {
   const snap = isRecord(result) ? result.snapshot : null
   if (!isRecord(snap)) throw new Error('herdr api snapshot: no snapshot in its answer')
+  const { agents, ...rest } = snap
   return stringsOnly(
     {
-      ...snap,
+      ...rest,
       workspaces: listOf(snap.workspaces, asWorkspace),
       tabs: listOf(snap.tabs, asTab),
       panes: listOf(snap.panes, asPane),
+      ...(Array.isArray(agents) && { agents: listOf(agents, asPane) }),
     },
     ['focused_pane_id'],
   )
 }
 
+/** How long what a pane's process said stands before it is asked again. */
+const RESUMED_MS = 10_000
+const resumed = new Map<string, { terminal: string; at: number; session: Promise<string | null> }>()
+
+/**
+ * The session id a Codex pane was resumed with (`codex resume <id>`), read from its foreground
+ * process's argv: after a resume herdr reports no session for the pane, though the rollout is the
+ * same one. Asked only for a Codex pane herdr gives no session, at most once per RESUMED_MS.
+ */
+function resumedSession(pane: string, terminal: string): Promise<string | null> {
+  const hit = resumed.get(pane)
+  if (hit && hit.terminal === terminal && Date.now() - hit.at < RESUMED_MS) return hit.session
+  const session = paneProcesses(pane, 5000)
+    .then(procs => procs?.foreground.map(p => resumedCodexSession(p.args)).find(id => id) ?? null)
+    .catch(() => null)
+  resumed.set(pane, { terminal, at: Date.now(), session })
+  return session
+}
+
+/** A Codex pane herdr knows no session of, given the one it was resumed with; every other pane as it is. */
+async function withResumedSession(pane: HerdrPane): Promise<HerdrPane> {
+  if (pane.agent !== CODEX_AGENT || pane.agent_session?.value) return pane
+  const value = await resumedSession(pane.pane_id, pane.terminal_id ?? '')
+  return value ? { ...pane, agent_session: { value, source: 'board:codex-resume' } } : pane
+}
+
 /** Workspaces, tabs, panes and agents in one call. */
 export async function snapshot(): Promise<HerdrSnapshot> {
-  return asSnapshot(await herdr(['api', 'snapshot']))
+  const snap = asSnapshot(await herdr(['api', 'snapshot']))
+  if (snap.panes.some(p => p.agent === CODEX_AGENT && !p.agent_session?.value))
+    snap.panes = await Promise.all(snap.panes.map(withResumedSession))
+  return snap
 }
 
 /** Every pane in a snapshot, with the terminal it holds (null when herdr did not say). */
@@ -195,7 +249,11 @@ export function asAgent(answer: unknown): HerdrAgent | null {
 
 /** The agent in a pane, or null when the pane has none. */
 export async function agentGet(pane: string, timeoutMs = 30_000): Promise<HerdrAgent | null> {
-  return asAgent(await herdr(['agent', 'get', pane], timeoutMs))
+  const answer = await herdr(['agent', 'get', pane], timeoutMs)
+  const agent = asAgent(answer)
+  if (agent?.kind !== CODEX_AGENT || agent.session) return agent
+  const terminal = isRecord(answer) && isRecord(answer.agent) ? stringAt(answer.agent, 'terminal_id') : null
+  return { ...agent, session: (await resumedSession(pane, terminal ?? '')) ?? null }
 }
 
 const isPid = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0
@@ -371,6 +429,11 @@ export function claudeIntegrationInstall(dir: string, timeoutMs = 30_000): Promi
 /** Codex's own identity hook, in the same CODEX_HOME as the board's Codex hooks. */
 export function codexIntegrationInstall(dir: string, timeoutMs = 30_000): Promise<string> {
   return run(['integration', 'install', 'codex'], timeoutMs, { ...process.env, CODEX_HOME: dir })
+}
+
+/** Antigravity CLI's own identity hook (`herdr integration install antigravity-cli`). */
+export function agyIntegrationInstall(timeoutMs = 30_000): Promise<string> {
+  return run(['integration', 'install', 'antigravity-cli'], timeoutMs)
 }
 
 /** A herdr notification with its "request" sound; what herdr prints is not read. */

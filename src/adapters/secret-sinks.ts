@@ -1,15 +1,20 @@
 // Writing a secret into its sink (#273, core/secrets.ts): a file from a template, a Bitwarden item,
 // a user environment variable, an HTTP call, the board's own store (adapters/secret-store.ts,
 // sealed as Settings → Secrets… seals it). The values come in memory and go nowhere else: a
-// file is written in place, with the user's rights only before anything is in it; Bitwarden and
+// file is written to a new file beside it, with the user's rights only before anything is in it,
+// then renamed over it; Bitwarden and
 // PowerShell get them on stdin, never as an argument, and Bitwarden's session in their env only;
 // an HTTP call goes to the sink's own origin, follows no redirect, and its answer is reduced to a
 // status. A program's failure is said by its step and exit code, never by what it printed (that
 // can echo its input in any escaping); a runtime's error by its name and code.
 // BOARD_BW_BIN_PATH and BOARD_POWERSHELL_BIN_PATH name other binaries (tests).
+import { randomBytes } from 'node:crypto'
 import {
-  chmodSync,
+  type BigIntStats,
   closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -36,7 +41,7 @@ import {
   storePlace,
   storeTarget,
 } from '../core/secrets.ts'
-import { isRecord } from './json-store.ts'
+import { isRecord, renameWithRetry } from './json-store.ts'
 import { type RunResult, run, runTree } from './process.ts'
 import { listSecrets, setSecrets } from './secret-store.ts'
 
@@ -50,6 +55,8 @@ export interface WriteInput {
   bwSession?: string
   /** Who asked: a store secret for the asker's own session keeps its name, shown while the board does not know it. */
   by?: { key: string; name: string }
+  /** A file sink in `env` format: these variables taken out of the file (a node's bundle, #604). */
+  remove?: readonly string[]
 }
 
 export type WriteResult =
@@ -102,7 +109,7 @@ export function envValue(v: string): string | null {
 const ENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/
 
 /** The file's text with the template's variables set: each in place of its first line, its other lines gone, new ones at the end. */
-function envContent(existing: string | null, set: Record<string, string>): string {
+function envContent(existing: string | null, set: Record<string, string>, remove?: readonly string[]): string {
   const eol = existing?.includes('\r\n') ? '\r\n' : '\n'
   const lines = existing === null ? [] : existing.split(/\r?\n/)
   if (lines.at(-1) === '') lines.pop()
@@ -110,6 +117,7 @@ function envContent(existing: string | null, set: Record<string, string>): strin
   const out: string[] = []
   for (const line of lines) {
     const key = ENV_LINE.exec(line)?.[1]
+    if (key !== undefined && remove?.includes(key) && !Object.hasOwn(set, key)) continue
     if (key === undefined || !Object.hasOwn(set, key)) out.push(line)
     else if (!done.has(key)) {
       out.push(`${key}=${set[key]}`)
@@ -170,7 +178,7 @@ function contentOf(sink: FileSink, input: WriteInput, path: string, existing: st
         if (quoted === null) return refuse('secret.err.valueQuotes', { name: key })
         set[key] = quoted
       }
-      return envContent(existing, set)
+      return envContent(existing, set, input.remove)
     }
     default:
       if (once.length && existing !== null) return refuse('secret.err.onceThere', { what: path })
@@ -191,6 +199,56 @@ function oneAtATime<T>(path: string, fn: () => Promise<T>): Promise<T> {
   return run
 }
 
+/**
+ * POSIX opens a file without following a link (ELOOP), and without waiting on a FIFO swapped in;
+ * Windows has neither flag here, and the handle's check stands in.
+ */
+const NO_FOLLOW = (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)
+
+/** Whether two stats are of one file: its device and inode (on Windows the volume and the file id). */
+const sameFile = (a: BigIntStats, b: BigIntStats): boolean => a.dev === b.dev && a.ino === b.ino
+
+/**
+ * The file at `path` as it is now: null when there is none, 'notFile' for a link, a folder or
+ * anything else, else its text, read through a handle that is the plain file lstat saw (a link
+ * swapped in between is refused, not read through).
+ */
+function readPlain(path: string): string | null | 'notFile' {
+  let seen: BigIntStats
+  try {
+    seen = lstatSync(path, { bigint: true })
+  } catch (err) {
+    if ((err as { code?: unknown }).code === 'ENOENT') return null
+    throw err
+  }
+  if (!seen.isFile()) return 'notFile'
+  let fd: number
+  try {
+    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW)
+  } catch (err) {
+    // a link swapped in (FreeBSD says EMLINK); anything else is a failure of its own
+    const code = (err as { code?: unknown }).code
+    if (code === 'ELOOP' || code === 'EMLINK') return 'notFile'
+    throw err
+  }
+  try {
+    const held = fstatSync(fd, { bigint: true })
+    return held.isFile() && sameFile(held, seen) ? readFileSync(fd, 'utf8') : 'notFile'
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Whether the name is still the plain file the handle holds. */
+function holds(path: string, fd: number): boolean {
+  try {
+    const seen = lstatSync(path, { bigint: true })
+    return seen.isFile() && sameFile(seen, fstatSync(fd, { bigint: true }))
+  } catch {
+    return false
+  }
+}
+
 async function writeFile(sink: FileSink, input: WriteInput): Promise<WriteResult> {
   const name = fillText(sink.name, input.params)
   const path = join(sink.folder, name)
@@ -202,33 +260,44 @@ async function writeFile(sink: FileSink, input: WriteInput): Promise<WriteResult
       folder = statSync(sink.folder)
     } catch {}
     if (!folder?.isDirectory()) return refuse('secret.err.noFolder', { folder: sink.folder })
-    let there: ReturnType<typeof lstatSync> | null = null
-    try {
-      there = lstatSync(path)
-    } catch {}
     // a link could point anywhere, and a folder is no file to write
-    if (there && (there.isSymbolicLink() || !there.isFile())) return refuse('secret.err.notFile', { path })
-    // what would be refused is refused before the file's rights change
-    const first = contentOf(sink, input, path, there ? readFileSync(path, 'utf8') : null)
+    const there = readPlain(path)
+    if (there === 'notFile') return refuse('secret.err.notFile', { path })
+    // what would be refused is refused before anything is made
+    const first = contentOf(sink, input, path, there)
     if (typeof first !== 'string') return first
-    // The rights first, while the file is empty or still holds what it held: the value goes into a
-    // file only the user can read. Windows: the user alone, and read back so.
-    const made = !there
-    if (made) closeSync(openSync(path, 'wx', 0o600))
-    const rights = process.platform === 'win32' ? await userOnly(path, !made) : chmodRights(path)
-    if (!rights.ok) {
-      if (made) rmSync(path, { force: true })
-      return refuse('secret.err.rights', { path })
-    }
-    // read again: setting the rights took a moment, and the file is what it is now
-    const content = made ? first : contentOf(sink, input, path, readFileSync(path, 'utf8'))
-    if (typeof content !== 'string') return content
-    const fd = openSync(path, 'w')
+    // The values go into a new file beside it, made by this call alone and only the user's before
+    // anything is in it (Windows: the user alone, and read back so), then renamed over it: a link
+    // put where the file is gets replaced, never written through, and a crash midway leaves the
+    // old file whole (and at worst this one beside it, as private as the file).
+    const temp = join(sink.folder, `.${name}.${randomBytes(6).toString('hex')}.tmp`)
+    const fd = openSync(temp, 'wx', 0o600)
+    let open = true
+    let renamed = false
     try {
+      const rights = process.platform === 'win32' ? await userOnly(temp, false) : fchmodRights(fd)
+      // Windows set the rights by name: the name must still be this handle's file
+      if (!rights.ok || !holds(temp, fd)) return refuse('secret.err.rights', { path })
+      // read again: setting the rights took a moment, and the file is what it is now
+      const now = readPlain(path)
+      if (now === 'notFile') return refuse('secret.err.notFile', { path })
+      const content = contentOf(sink, input, path, now)
+      if (typeof content !== 'string') return content
       writeSync(fd, content)
       fsyncSync(fd)
-    } finally {
+      // Windows: a scanner or an indexer holding either file a moment is waited out briefly
+      renameWithRetry(temp, path)
+      renamed = true
+      // what took the name is the file written here, not one swapped in for it before the rename
+      if (!holds(path, fd)) return refuse('secret.err.notFile', { path })
       closeSync(fd)
+      open = false
+    } finally {
+      if (open) closeSync(fd)
+      if (!renamed)
+        try {
+          rmSync(temp, { force: true })
+        } catch {}
     }
     return { ok: true, target: sink.at ? `${path} › ${sink.at.map(k => fillText(k, input.params)).join(' › ')}` : path }
   })
@@ -257,9 +326,9 @@ async function userOnly(path: string, existed: boolean): Promise<{ ok: boolean }
   return { ok: shown.code === 0 && only }
 }
 
-function chmodRights(path: string): { ok: boolean } {
+function fchmodRights(fd: number): { ok: boolean } {
   try {
-    chmodSync(path, 0o600)
+    fchmodSync(fd, 0o600)
     return { ok: true }
   } catch {
     return { ok: false }
@@ -393,13 +462,19 @@ export function powershellBin(env: Record<string, string | undefined> = process.
 
 // The names and the values come on stdin as JSON, each value as base64 of its UTF-8 (the console's
 // code page never touches it); the script itself holds none of them. A name that `check` lists and
-// the user already has stops it before anything is set.
+// the user already has stops it before anything is set. All are set or none: the old values are
+// read first and put back when one fails, and never leave the script either.
 export const ENV_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
   '$in = [Console]::In.ReadToEnd() | ConvertFrom-Json',
   "$taken = @($in.check | Where-Object { $null -ne [Environment]::GetEnvironmentVariable($_, 'User') })",
   "if ($taken.Count) { 'taken:' + ($taken -join ','); exit 3 }",
-  "foreach ($p in $in.set.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p.Value)), 'User') }",
+  '$old = @{}',
+  "foreach ($p in $in.set.PSObject.Properties) { $old[$p.Name] = [Environment]::GetEnvironmentVariable($p.Name, 'User') }",
+  "try { foreach ($p in $in.set.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p.Value)), 'User') } } " +
+    // PowerShell hands a .NET string parameter $null as '': [NullString]::Value removes one that was not there
+    "catch { foreach ($n in $old.Keys) { try { if ($null -eq $old[$n]) { [Environment]::SetEnvironmentVariable($n, [NullString]::Value, 'User') } " +
+    "else { [Environment]::SetEnvironmentVariable($n, $old[$n], 'User') } } catch {} }; 'failed'; exit 4 }",
   "'ok'",
 ].join('; ')
 

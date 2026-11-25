@@ -41,6 +41,8 @@ export interface RouteContext {
    * on a listener that serves WebSockets (the board's own server's: a desktop's VNC); else absent.
    */
   upgrade?: Upgrade
+  /** Whether this request arrived through a remote listener (Tailscale, serve, tunnel). */
+  remote: boolean
 }
 
 /** A request made a WebSocket (Bun's server.upgrade), with what the socket carries. */
@@ -51,7 +53,7 @@ export type Handler = (req: Request, ctx: RouteContext) => Promise<Response | un
 
 export interface Route {
   /** ANY: whatever the method (main's session block matched before it looked at the method). */
-  method: 'GET' | 'POST' | 'ANY'
+  method: 'GET' | 'POST' | 'PUT' | 'ANY'
   /**
    * A string matches the whole decoded path; a RegExp is tested on the path as it came (encoded),
    * so `([^/]+)` takes a whole key even when the key has a `/`, and its groups are decoded.
@@ -75,6 +77,8 @@ export interface GuardState {
    * Set by the tunnel listener only: on the others every path reads as before.
    */
   ownFiles?: (target: string) => boolean
+  /** True when dispatching from a remote listener (Tailscale, serve, tunnel). */
+  remote?: boolean
 }
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
@@ -190,6 +194,7 @@ export async function dispatch(
       refuse: guard => check(guard, req, url, state),
       ownFile: target => !!state.ownFiles?.(target),
       ...(upgrade && { upgrade }),
+      remote: state.remote === true,
     }
     for (const guard of route.guard ?? []) {
       const refused = ctx.refuse(guard)

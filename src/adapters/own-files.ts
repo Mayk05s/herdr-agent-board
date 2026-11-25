@@ -1,13 +1,13 @@
 // The board's own files on this PC (core/own-files.ts): the folders as real paths, and the check
-// the tunnel listener's routes ask before they read a file by a path the request names. Real paths
-// on both sides, so a link, a junction, another case or an 8.3 short name is seen for what it is.
-import { realpathSync } from 'node:fs'
+// the tunnel listener's routes ask before they read a file by a path the request names, and the one
+// the session route asks of the files a message carries (#401). Real paths on both sides, so a link, a junction, another case or an 8.3 short name is seen for what it is.
+import { realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { isOwnFile, type OwnFolders, oddWindowsPath, underFolder } from '../core/own-files.ts'
 import { tunnelConfig } from '../core/tunnel.ts'
 import type { Config } from '../core/types.ts'
-import { configDir, stateDir, uploadsDir } from './paths.ts'
+import { configDir, stateDir, threadFilesDir, uploadsDir } from './paths.ts'
 
 /** realpathSync.native of the path, or of its nearest existing parent with the rest joined back. */
 export function realOrNearest(path: string): string {
@@ -22,6 +22,38 @@ export function realOrNearest(path: string): string {
       if (up === at) return full
       rest.unshift(basename(at))
       at = up
+    }
+  }
+}
+
+/**
+ * A check of whether a path is a file in the board's uploads, by real paths on both sides: `..`,
+ * a sibling folder whose name only starts the same, a link or junction out of the uploads, another
+ * case or the other separator on win32 are each seen for what they are. Only an absolute path (on
+ * win32 one with its drive, or a UNC path), as the session it is typed into reads it the same way.
+ * On win32 a UNC, device or stream path is refused before any file-system call (one on a UNC path
+ * would reach that server), unless the state folder is itself on a share. The uploads folder is
+ * resolved once, when the check is made.
+ */
+export function uploadsCheck(platform: string = process.platform): (path: string) => boolean {
+  const win = platform === 'win32'
+  const odd = (p: string): boolean => win && oddWindowsPath(p)
+  // a device path (\\?\, \\.\, \??\) or a stream (a colon past the drive), on a share too
+  const device = (p: string): boolean =>
+    win && (/^[\\/]{2}[?.][\\/]|^[\\/]\?\?[\\/]/.test(p) || p.includes(':', /^[A-Za-z]:/.test(p) ? 2 : 0))
+  const uploads = realOrNearest(uploadsDir())
+  const onShare = odd(resolve(uploadsDir())) || odd(uploads)
+  const absolute = (p: string): boolean =>
+    win ? /^[A-Za-z]:[\\/]/.test(p) || (onShare && /^[\\/]{2}/.test(p)) : isAbsolute(p)
+  return path => {
+    if (!absolute(path)) return false
+    const full = resolve(path)
+    if (device(path) || device(full) || (!onShare && (odd(path) || odd(full)))) return false
+    try {
+      const real = realpathSync.native(full)
+      return underFolder(real, uploads, platform) && statSync(real).isFile()
+    } catch {
+      return false
     }
   }
 }
@@ -41,8 +73,8 @@ const same = (a: string, b: string): boolean =>
 
 /**
  * refused: real stateDir(), configDir(), and the key's folder when tunnel.key is set and outside
- * stateDir(); allowed: real uploadsDir(), while it is the state folder's own `uploads` and no link
- * elsewhere. A folder not made yet counts by its resolved path.
+ * stateDir(); allowed: real uploadsDir() and threadFilesDir(), each only while it is the state
+ * folder's own child and no link elsewhere. A folder not made yet counts by its resolved path.
  */
 export function ownFolders(cfg: Config): OwnFolders {
   const state = realOrNearest(stateDir())
@@ -52,8 +84,11 @@ export function ownFolders(cfg: Config): OwnFolders {
     const folder = keyFolder(key)
     if (!underFolder(folder, state, process.platform)) refused.push(folder)
   }
-  const uploads = realOrNearest(uploadsDir())
-  const allowed = same(uploads, join(state, relative(stateDir(), uploadsDir()))) ? [uploads] : []
+  const allowed: string[] = []
+  for (const dir of [uploadsDir(), threadFilesDir()]) {
+    const real = realOrNearest(dir)
+    if (same(real, join(state, relative(stateDir(), dir)))) allowed.push(real)
+  }
   return { refused, allowed }
 }
 

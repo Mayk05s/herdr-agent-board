@@ -12,7 +12,9 @@ import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { tidyList } from '../../src/core/archive.ts'
 import { translator } from '../../src/core/i18n/translator.ts'
+import { projectFolderName } from '../../src/core/resume.ts'
 import type { Item } from '../../src/core/types.ts'
+import { hides } from '../../src/services/archive.ts'
 import { archiveApi, isBoardPayload } from '../../web/src/api/client.ts'
 import { archiveNotes } from '../../web/src/models/archive-view.ts'
 import { unusedPort } from '../support/board-server.ts'
@@ -516,6 +518,81 @@ test('a sleeping session goes too; a pane that shares its tab closes alone; Remo
     await new Promise(resolve => wake.close(resolve))
   }
 }, 30_000)
+
+test('#323: an archived sleeper with no pane stays hidden; a call agent with no pane, or the session in a pane, shows', () => {
+  const rec = { key: S, pane: '', state: 'archived' } as unknown as Parameters<typeof hides>[0]
+  assert.equal(hides(rec, { pane: null, sleeping: true }), true)
+  // MokuPilot going on in it for a call (#326): no pane, not asleep.
+  assert.equal(hides(rec, { pane: null, sleeping: false }), false)
+  assert.equal(hides(rec, { pane: 'wP:p9', sleeping: false }), false)
+  // Archived from its pane: hidden there only, as before.
+  const inPane = { ...rec, pane: 'wP:p1' } as Parameters<typeof hides>[0]
+  assert.equal(hides(inPane, { pane: 'wP:p1', sleeping: false }), true)
+  assert.equal(hides(inPane, { pane: null, sleeping: true }), false)
+})
+
+test('#323: a sleeper whose pane wake closed, archived by name or id, stays archived; resumed by hand elsewhere it is back', async () => {
+  for (const target of ['Probe card', S]) {
+    const box = await sandbox()
+    const dir = project(box)
+    // Its pane gone: wake closed it as it went to sleep (#204), so wake lists it without one.
+    herdrWith(box, dir, { gone: true })
+    let asleep = true
+    const wake = http.createServer((req, res) => {
+      res.setHeader('content-type', 'application/json')
+      const sleeper = { session: S, pane: '', name: 'Probe', workspace: 'Personal', cwd: dir }
+      const at = new Date(Date.now() - 5 * DAY).toISOString()
+      res.end(JSON.stringify(req.url?.startsWith('/sleeping') ? (asleep ? [{ ...sleeper, slept_at: at }] : []) : {}))
+    })
+    await new Promise<void>(resolve => wake.listen(0, '127.0.0.1', resolve))
+    try {
+      const wakeUrl = `http://127.0.0.1:${(wake.address() as AddressInfo).port}`
+      boardConfig(box, { language: 'en', port: 9, wakeUrl, categories: CATEGORIES })
+      const b = await board(box, { wakeUrl })
+      const shown = ((await b.payload()).items as Item[]).find(i => i.key === S)
+      assert.deepEqual([shown?.sleeping, shown?.pane], [true, null])
+      const out = await box.run('cli', {
+        args: ['archive', '--session', target],
+        env: { CLAUDE_CODE_SESSION_ID: OTHER },
+      }).exited
+      assert.equal(out.code, 0, `${out.stdout}${out.stderr}`)
+      assert.match(out.stdout, /^ok · archived Probe card/)
+      await b.refresh()
+      await b.refresh()
+      assert.equal(record(box)?.state, 'archived', target)
+      assert.deepEqual(
+        archiveLog(box).map(l => l.result),
+        ['closed'],
+        target,
+      )
+      assert.equal((await b.items()).includes(S), false, target)
+      // Nothing was closed: it had no pane.
+      assert.equal(
+        calls(box).some(c => /^(tab|pane) close/.test(c)),
+        false,
+      )
+      if (target !== S) continue
+      // Resumed by hand in a pane of its own: it is back, its record settled.
+      asleep = false
+      box.state({
+        'api snapshot': {
+          result: {
+            snapshot: { panes: [FRESH(dir)], tabs: [], workspaces: [{ workspace_id: 'wP', label: 'Personal' }] },
+          },
+        },
+      })
+      await b.refresh()
+      assert.deepEqual(
+        archiveLog(box).map(l => l.result),
+        ['closed', 'returned'],
+      )
+      assert.equal(record(box), null)
+      assert.ok((await b.items()).includes(S))
+    } finally {
+      await new Promise(resolve => wake.close(resolve))
+    }
+  }
+}, 60_000)
 
 test('a sleeper put to sleep without a name of its own closes under the bare 💤 wake gave it (#302)', async () => {
   const box = await sandbox()
@@ -1065,3 +1142,240 @@ test('the page’s own calls (web/src/api/client.ts) against these routes: archi
     globalThis.fetch = realFetch
   }
 }, 60_000)
+
+test('#295: the list carries the parked entries with their due time; the page unschedules one and moves one to a session on the board', async () => {
+  const box = await sandbox()
+  const dir = project(box)
+  // ben, another Claude session on the board, in a tab of its own.
+  const ben = {
+    pane_id: 'wP:p4',
+    tab_id: 'wP:t4',
+    workspace_id: 'wP',
+    agent: 'claude',
+    agent_session: { value: OTHER },
+    agent_status: 'idle',
+    cwd: join(box.dir, 'ben'),
+  }
+  writeFileSync(join(box.cards, `${OTHER}.json`), JSON.stringify({ key: OTHER, name: 'ben', category: 'other' }))
+  herdrWith(box, dir, { extra: [ben] })
+  schedule(box)
+  const b = await board(box, { archiveUndoSec: 0.5 })
+  assert.equal((await b.archive()).body.ok, true)
+  await until(() => record(box)?.state === 'archived', 10_000)
+  // A repeating one whose last run came due while it waited: Return would put it back at its next run.
+  const held = record(box) as Rec
+  const rep = { id: 'fed789', key: S, name: 'Probe', pane: 'wP:p1', next: Date.now() - 3600e3, cron: '0 9 * * *' }
+  // And one whose rule has no run left (30 February): Return drops it, Move cannot take it.
+  const ended = { ...rep, id: 'eee000', cron: '0 0 30 2 *', text: 'never again' }
+  writeFileSync(archiveFile(box), JSON.stringify({ ...held, held: [...held.held, { ...rep, text: 'standup' }, ended] }))
+  await b.refresh()
+  const realFetch = globalThis.fetch
+  const toBoard = (input: string | URL | Request, init?: RequestInit) =>
+    realFetch(typeof input === 'string' && input.startsWith('/') ? `${b.url}${input}` : input, init)
+  globalThis.fetch = Object.assign(toBoard, { preconnect: realFetch.preconnect })
+  try {
+    const t = translator('en')
+    const [rec] = (await archiveApi.list()).records
+    assert.equal(rec?.held, 3)
+    const parked = new Map((rec?.parked ?? []).map(e => [e.id, e]))
+    assert.deepEqual([...parked.keys()].sort(), ['abc123', 'eee000', 'fed789'])
+    assert.equal(parked.get('eee000')?.due, null)
+    assert.equal(parked.get('abc123')?.text, 'check the CI')
+    assert.equal(parked.get('abc123')?.cron, undefined)
+    const due = parked.get('fed789')?.due ?? 0
+    assert.equal(parked.get('fed789')?.cron, '0 9 * * *')
+    assert.ok(due > Date.now() && new Date(due).getHours() === 9, String(due))
+
+    // Only from the board's own page; a wrong op, another session's key, an id no record holds.
+    const send = (body: unknown, headers: Record<string, string>) =>
+      realFetch(`${b.url}/api/archive/held`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+      })
+    const drop = { op: 'drop', key: S, id: 'abc123' }
+    assert.equal((await send(drop, {})).status, 403)
+    assert.equal((await send(drop, { 'x-board': '1', origin: 'http://evil.example' })).status, 403)
+    assert.equal((await send({ ...drop, op: 'nope' }, { 'x-board': '1' })).status, 400)
+    assert.equal((await send({ ...drop, key: OTHER }, { 'x-board': '1' })).status, 404)
+    assert.deepEqual(await archiveApi.held({ op: 'drop', key: S, id: 'nope42' }, t), {
+      ok: false,
+      name: '',
+      error: 'That reminder is not in the archive any more',
+    })
+    assert.equal(record(box)?.held.length, 3)
+
+    // Unschedule: out of the record for good, nothing in the schedule.
+    assert.deepEqual(await archiveApi.held({ op: 'drop', key: S, id: 'ABC123' }, t), { ok: true, name: '', error: '' })
+    assert.deepEqual(
+      record(box)?.held.map(e => e.id),
+      ['fed789', 'eee000'],
+    )
+    assert.equal(existsSync(entryFile(box, 'abc123')), false)
+
+    // Move: to a session not on the board (the archived one itself), refused; to ben, into its schedule.
+    const nowhere = await archiveApi.held({ op: 'move', key: S, id: 'fed789', to: S }, t)
+    assert.deepEqual([nowhere.ok, nowhere.error], [false, 'The session is no longer on the board'])
+    const moved = await archiveApi.held({ op: 'move', key: S, id: 'fed789', to: OTHER }, t)
+    assert.deepEqual(moved, { ok: true, name: 'ben', error: '' })
+    const entry = JSON.parse(readFileSync(entryFile(box, 'fed789'), 'utf8'))
+    assert.deepEqual(
+      [entry.key, entry.name, entry.pane, entry.cwd, entry.next, entry.cron, entry.text, entry.from?.key],
+      [OTHER, 'ben', 'wP:p4', ben.cwd, due, '0 9 * * *', 'standup', S],
+    )
+    assert.deepEqual(
+      record(box)?.held.map(e => e.id),
+      ['eee000'],
+    )
+    // One that runs no more does not move; Unschedule takes it, and the record lists none.
+    const never = await archiveApi.held({ op: 'move', key: S, id: 'eee000', to: OTHER }, t)
+    assert.deepEqual([never.ok, never.error], [false, 'It runs no more: there is nothing to move'])
+    assert.equal(existsSync(entryFile(box, 'eee000')), false)
+    assert.equal((await archiveApi.held({ op: 'drop', key: S, id: 'eee000' }, t)).ok, true)
+    assert.deepEqual(record(box)?.held, [])
+    assert.equal((await archiveApi.list()).records[0]?.parked, undefined)
+    const again = await archiveApi.held({ op: 'move', key: S, id: 'fed789', to: OTHER }, t)
+    assert.equal(again.ok, false)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}, 60_000)
+
+test('Return of a moved Claude session resumes in its target folder before and after local turns (#621)', async () => {
+  const setupMovedArchive = (box: Sandbox, nodeDir: string, recCwd: string, lines: Record<string, unknown>[]) => {
+    const projects = join(box.env.HOME as string, '.claude', 'projects', projectFolderName(nodeDir))
+    mkdirSync(projects, { recursive: true })
+    writeFileSync(join(projects, `${S}.jsonl`), `${lines.map(l => JSON.stringify(l)).join('\n')}\n`)
+    mkdirSync(box.cards, { recursive: true })
+    writeFileSync(join(box.cards, `${S}.json`), JSON.stringify({ key: S, name: 'Probe card', category: 'personal' }))
+    const now = Date.now()
+    mkdirSync(join(stateDir(box), 'archive'), { recursive: true })
+    writeFileSync(
+      archiveFile(box),
+      JSON.stringify({
+        key: S,
+        session: S,
+        name: 'Probe card',
+        category: 'personal',
+        cwd: recCwd,
+        workspace: 'Personal',
+        workspaceId: 'wP',
+        pane: 'wP:p1',
+        state: 'archived',
+        closeAt: now,
+        closedAt: now,
+        archivedAt: now,
+        held: [],
+        profile: 'default',
+      }),
+    )
+    resumable(box, nodeDir)
+  }
+
+  // Subcase A: freshly moved session before any new turn on target (only foreign source cwd in transcript).
+  const boxA = await sandbox()
+  const nodeDirA = join(boxA.dir, 'atlas проект 100%')
+  mkdirSync(nodeDirA, { recursive: true })
+  setupMovedArchive(boxA, nodeDirA, nodeDirA, [
+    {
+      type: 'user',
+      cwd: 'C:\\Work\\atlas',
+      sessionId: S,
+      message: { role: 'user', content: 'from source' },
+      timestamp: new Date().toISOString(),
+    },
+  ])
+  const bA = await board(boxA)
+  try {
+    const rA = await bA.post('/api/archive', { op: 'return', keys: [S] })
+    assert.equal(rA.status, 200, JSON.stringify(rA.body))
+    assert.equal(rA.body.done?.[0]?.resume, true, JSON.stringify(rA.body))
+    await until(() => calls(boxA).some(c => c.startsWith('pane run wP:p9')), 15_000)
+    assert.ok(
+      calls(boxA).includes(`tab create --workspace wP --cwd ${nodeDirA} --label Probe card --no-focus`),
+      calls(boxA).join('\n'),
+    )
+  } finally {
+    bA.proc.kill()
+    await bA.proc.exited
+  }
+
+  // Subcase B: moved session after a local turn, archived while pane was in a subdirectory.
+  const boxB = await sandbox()
+  const nodeDirB = join(boxB.dir, 'atlas проект 100%')
+  const subDirB = join(nodeDirB, 'sub')
+  mkdirSync(subDirB, { recursive: true })
+  setupMovedArchive(boxB, nodeDirB, subDirB, [
+    {
+      type: 'user',
+      cwd: 'C:\\Work\\atlas',
+      sessionId: S,
+      message: { role: 'user', content: 'from source' },
+      timestamp: new Date().toISOString(),
+    },
+    {
+      type: 'user',
+      cwd: nodeDirB,
+      sessionId: S,
+      message: { role: 'user', content: 'on node' },
+      timestamp: new Date().toISOString(),
+    },
+  ])
+  const bB = await board(boxB)
+  try {
+    const rB = await bB.post('/api/archive', { op: 'return', keys: [S] })
+    assert.equal(rB.status, 200, JSON.stringify(rB.body))
+    assert.equal(rB.body.done?.[0]?.resume, true, JSON.stringify(rB.body))
+    await until(() => calls(boxB).some(c => c.startsWith('pane run wP:p9')), 15_000)
+    assert.ok(
+      calls(boxB).includes(`tab create --workspace wP --cwd ${nodeDirB} --label Probe card --no-focus`),
+      calls(boxB).join('\n'),
+    )
+  } finally {
+    bB.proc.kill()
+    await bB.proc.exited
+  }
+}, 60_000)
+
+test('Return of an unmoved Claude session archived from a subdirectory still resumes in its transcript’s first cwd', async () => {
+  const box = await sandbox()
+  const dir = project(box)
+  const sub = join(dir, 'sub')
+  mkdirSync(sub, { recursive: true })
+  const now = Date.now()
+  mkdirSync(join(stateDir(box), 'archive'), { recursive: true })
+  writeFileSync(
+    archiveFile(box),
+    JSON.stringify({
+      key: S,
+      session: S,
+      name: 'Probe card',
+      category: 'personal',
+      cwd: sub,
+      workspace: 'Personal',
+      workspaceId: 'wP',
+      pane: 'wP:p1',
+      state: 'archived',
+      closeAt: now,
+      closedAt: now,
+      archivedAt: now,
+      held: [],
+      profile: 'default',
+    }),
+  )
+  resumable(box, dir)
+  const b = await board(box)
+  try {
+    const r = await b.post('/api/archive', { op: 'return', keys: [S] })
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    assert.equal(r.body.done?.[0]?.resume, true, JSON.stringify(r.body))
+    await until(() => calls(box).some(c => c.startsWith('pane run wP:p9')), 15_000)
+    assert.ok(
+      calls(box).includes(`tab create --workspace wP --cwd ${dir} --label Probe card --no-focus`),
+      calls(box).join('\n'),
+    )
+  } finally {
+    b.proc.kill()
+    await b.proc.exited
+  }
+}, 30_000)

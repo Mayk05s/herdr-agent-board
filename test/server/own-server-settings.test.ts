@@ -155,6 +155,44 @@ describe('remoteRefusal', () => {
   })
 })
 
+describe('remoteRefusal with remote.ownerAdmin (#694) beside the own server', () => {
+  const SECRET_STORE: [string, string][] = [
+    ['/api/secrets', '/api/secrets'],
+    ['/api/%73ecrets', '/api/secrets'],
+    ['/api/secrets/x', '/api/secrets/x'],
+    ['/api/vault/fill', '/api/vault/fill'],
+    ['/vault/', '/vault/'],
+    ['/%76ault/', '/vault/'],
+  ]
+
+  test("owner-admin on a PC (its tunnel's strong login, the owner's own phone): every local route by, as on main; the secret store and the vault still the own server's", async () => {
+    for (const options of [
+      { ownerAdmin: true },
+      { teamOwner: true, owner: true, ownerAdmin: true },
+      { desk: false, teamOwner: true, owner: true, ownerAdmin: true },
+    ]) {
+      for (const [raw, path] of [...SPELLINGS, ...PC_ONLY])
+        expect([raw, options, remoteRefusal(raw, path, options)]).toEqual([raw, options, null])
+      for (const [raw, path] of SECRET_STORE) {
+        const res = remoteRefusal(raw, path, options)
+        expect([raw, options, res?.status, await res?.json()]).toEqual([raw, options, 403, { error: 'local' }])
+      }
+      // what acts on the screen stays refused, owner-admin or not
+      expect(refusedAs(remoteRefusal('/api/fs/open', '/api/fs/open', options))).toBe(403)
+    }
+  })
+
+  test("the board's own server without owner-admin is as it was: Remote access and the rest of what is a PC's refused; with it, all of it by", () => {
+    for (const [raw, path] of PC_ONLY)
+      expect([raw, refusedAs(remoteRefusal(raw, path, { ownServer: true, teamOwner: true, owner: true }))]).toEqual([
+        raw,
+        403,
+      ])
+    for (const [raw, path] of [...SPELLINGS, ...PC_ONLY, ...SECRET_STORE])
+      expect([raw, remoteRefusal(raw, path, { ownServer: true, ownerAdmin: true })]).toEqual([raw, null])
+  })
+})
+
 describe("the board's own server: Backup…, Time tracking… and Sleep and wake… through the domain's login", () => {
   const shared = sharedSandbox()
   let box: Sandbox

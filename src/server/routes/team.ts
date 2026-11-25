@@ -28,7 +28,8 @@
 // sending in the page that asked for 30 minutes: it sends the token back in X-Board-Unlock. GET and
 // POST /api/team/passkeys list, add and remove the passkeys (adding a later one and removing any
 // confirm with one there is), and turn the switch on and off (each confirmed with one, so on needs
-// a passkey there first).
+// a passkey there first). What the owner's phone or the domain asks waits for the owner at the
+// computer instead (#377): the Team panel lists it (GET /api/team/confirm) and opens its window.
 //
 // Channels and welcomes (#355): POST /api/team/send's new thread may carry `members` (the panel's
 // send only, never an agent's post), a channel takes more with POST
@@ -37,9 +38,10 @@
 // on, lanes, allLanes, channels } settles one, its body checked whole before anything changes.
 // Adding a channel's members, and a welcome that widens (Agents on, a lane, every lane: #386, a
 // channel), wait for the passkey as the switches do.
-import { statSync } from 'node:fs'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { isRecord } from '../../adapters/json-store.ts'
+import { uploadsCheck } from '../../adapters/own-files.ts'
 import { uploadsDir } from '../../adapters/paths.ts'
 import {
   audit,
@@ -60,10 +62,11 @@ import { MAX_MEMBERS } from '../../core/team-wire.ts'
 import type { Config } from '../../core/types.ts'
 import { safeName } from '../../core/upload-name.ts'
 import type { TeamConfirm } from '../../services/team-confirm.ts'
-import type { PostTarget, TeamService } from '../../services/team-hub.ts'
+import type { PostFile, PostTarget, TeamService } from '../../services/team-hub.ts'
 import type { TeamRouter } from '../../services/team-router.ts'
 import type { WorkHub } from '../../services/work-hub.ts'
 import { json, type Route } from '../http.ts'
+import { MAX_UPLOAD } from '../uploads.ts'
 import { describeThreadAction, performThreadAction } from './threads.ts'
 
 const isTarget = (v: unknown): v is string => v === TEAM || isPeerId(v)
@@ -194,7 +197,9 @@ function agentsChange(
 /**
  * A file in the board's uploads, as the panel names it for a send (#371): `upload` its place there
  * (`<day>/<saved name>`, as /api/upload answered it) and `name` the name it goes under, by default
- * the saved name without its time. Undefined when the body has none, null when it is no such file.
+ * the saved name without its time. Undefined when the body has none, null when it is no such file:
+ * the file is taken by its real path (#467), so a link or junction in the uploads that points out
+ * of them is refused.
  */
 export function uploadFrom(v: unknown): { path: string; name: string } | null | undefined {
   if (v === undefined) return undefined
@@ -203,13 +208,29 @@ export function uploadFrom(v: unknown): { path: string; name: string } | null | 
   const saved = m?.[2] ?? ''
   if (!m || safeName(saved) !== saved) return null
   const path = join(uploadsDir(), m[1] as string, saved)
-  try {
-    if (!statSync(path).isFile()) return null
-  } catch {
-    return null
-  }
+  if (!uploadsCheck()(path)) return null
   const name = typeof v.name === 'string' ? v.name : saved.replace(/^\d{6}-/, '')
   return checkMeta({ name, type: 'application/octet-stream', size: 0 }) ? { path, name } : null
+}
+
+/**
+ * A send's upload as it is when the send goes (#475): a send held for the passkey goes minutes after
+ * uploadFrom() checked it, so it is checked again here by its real path and read at once from that
+ * path. These bytes go (PostFile.bytes, #415) and the path is not read again, so a link or junction
+ * put in its place while the send waited is refused, not followed; one swapped in during the read
+ * itself is caught by the real path asked again after it. A file over what /api/upload takes is
+ * `file_big` before it is read; `file` when it is no such file now.
+ */
+function uploadNow(file: { path: string; name: string }): PostFile | 'file' | 'file_big' {
+  try {
+    const real = realpathSync.native(file.path)
+    if (!uploadsCheck()(real)) return 'file'
+    if (statSync(real).size > MAX_UPLOAD) return 'file_big'
+    const bytes = new Uint8Array(readFileSync(real))
+    return realpathSync.native(file.path) === real ? { ...file, bytes } : 'file'
+  } catch {
+    return 'file'
+  }
 }
 
 /** A file a session names for its post (#371): an absolute path on this computer; the router checks the rest. */
@@ -240,13 +261,25 @@ export function teamRoutes(
 ): Route[] {
   const lanes = (): Pick<Config, 'categories' | 'team'> => cfg ?? { categories: [] }
 
-  /** Why a gated action may not go now (428 with its confirmation), or null: always null while the switch is off (#367). */
+  /**
+   * Why a gated action may not go now (428 with its confirmation), or null: always null while the
+   * switch is off (#367). Asked from away (#377: the owner's phone, the domain), it waits for the
+   * owner at the computer (GET /api/team/confirm lists it there), and the 428 says so: `where:
+   * 'computer'`.
+   */
   function held(req: Request, action: OwnerAction): Response | null {
     if (!confirm?.required()) return null
     if (unlocks(action) && confirm.unlocked(req.headers.get('x-board-unlock'))) return null
     if (!confirm.safe()) return json(503, { ok: false, error: 'loopback' })
-    const id = confirm.pend(action)
-    return json(428, { ok: false, error: 'confirm', id, confirm: confirm.urlOf(id) })
+    const away = confirm.away(req.url)
+    const id = confirm.pend(action, away)
+    return json(428, {
+      ok: false,
+      error: 'confirm',
+      id,
+      confirm: confirm.urlOf(id),
+      ...(away && { where: 'computer' }),
+    })
   }
 
   /** Does an owner action: at once when it needs no confirmation, or once the window confirmed it. */
@@ -254,7 +287,9 @@ export function teamRoutes(
     if (a.kind.startsWith('thread-'))
       return work ? performThreadAction(work, a) : { status: 409, body: { ok: false, error: 'off' } }
     if (a.kind === 'send') {
-      const r = await team.send(a.to, a.text, a.thread, a.replyTo, a.file)
+      const file = a.file ? uploadNow(a.file) : undefined
+      if (typeof file === 'string') return { status: 400, body: { ok: false, error: file } }
+      const r = await team.send(a.to, a.text, a.thread, a.replyTo, file)
       return { status: r.ok ? 200 : 400, body: { ...r } }
     }
     if (a.kind === 'draft') {
@@ -761,7 +796,8 @@ function welcomeFrom(
  * (403 { error: 'passkey' } with none to confirm with) and { op: 'off' }; either answers 200 at once
  * when the switch already stands that way. GET /api/team/confirm/<id> is what the window shows and the WebAuthn options;
  * POST /api/team/confirm/<id> is its answer, taken only from the window's origin
- * (http://localhost:<port>): a page on 127.0.0.1 is told the localhost address instead.
+ * (http://localhost:<port>): a page on 127.0.0.1 is told the localhost address instead. GET
+ * /api/team/confirm lists what was asked from away and waits for the owner here (#377).
  */
 function confirmRoutes(
   team: TeamService,
@@ -803,6 +839,22 @@ function confirmRoutes(
         } else return json(400, { ok: false, error: 'body' })
         const id = confirm.pend(action)
         return json(428, { ok: false, error: 'confirm', id, confirm: confirm.urlOf(id) })
+      },
+    },
+    {
+      // What was asked from away and waits for the owner here (#377), for the Team panel: each with
+      // the address of its window and what it does, in the board's words. The computer's only
+      // (localOnly; not one of the owner's routes away, core/remote.ts ownerTeam). A program on this
+      // computer can read it, as it can read the threads; doing any of it still takes the passkey.
+      method: 'GET',
+      path: '/api/team/confirm',
+      handle() {
+        if (!team.view()) return undefined
+        return json(200, {
+          waiting: confirm
+            .waiting()
+            .map(w => ({ id: w.id, at: w.at, confirm: confirm.urlOf(w.id), action: describe(w.action) })),
+        })
       },
     },
     {

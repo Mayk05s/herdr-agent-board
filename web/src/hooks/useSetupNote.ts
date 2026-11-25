@@ -5,6 +5,7 @@
 import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from '../api/client.ts'
 import { useT } from '../i18n/I18nProvider.tsx'
+import { pressAway } from '../models/click-away.ts'
 import {
   isSetupReply,
   isSetupSummary,
@@ -202,7 +203,9 @@ export function useSetupNote(): SetupNoteState {
     if (!open) return
     const onPress = (e: PointerEvent): void => {
       const target = e.target instanceof Element ? e.target : null
-      if (!target?.closest('#setup-pop, #setup-note')) close(false)
+      if (target?.closest('#setup-pop, #setup-note')) return
+      pressAway(e, window)
+      close(false)
     }
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return

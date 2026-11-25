@@ -14,6 +14,12 @@ export interface RemoteConfig {
   allow: string[]
   /** The board in a phone's browser, over HTTPS through `tailscale serve` (core/pwa.ts). */
   pwa: PwaConfig
+  /**
+   * Headless master (#694): when true, the owner's own strong login (tunnel password+TOTP or
+   * passkey; or Tailscale non-desk device of the computer's own login) may use localOnly admin
+   * routes over remote listeners. Off by default.
+   */
+  ownerAdmin: boolean
 }
 
 export interface PwaConfig {
@@ -36,15 +42,21 @@ function pwaConfig(value: unknown): PwaConfig {
   return { on: p.on === true, https: isPort(p.https) ? p.https : 443, port: isPort(p.port) ? p.port : null }
 }
 
-/** config.json's `remote`: `true`, or `{ on, port, allow, pwa }`; anything else is off. */
+/** config.json's `remote`: `true`, or `{ on, port, allow, pwa, ownerAdmin }`; anything else is off. */
 export function remoteConfig(value: unknown): RemoteConfig {
-  if (value === true) return { on: true, port: null, allow: [], pwa: PWA_OFF }
-  if (!value || typeof value !== 'object') return { on: false, port: null, allow: [], pwa: PWA_OFF }
+  if (value === true) return { on: true, port: null, allow: [], pwa: PWA_OFF, ownerAdmin: false }
+  if (!value || typeof value !== 'object') return { on: false, port: null, allow: [], pwa: PWA_OFF, ownerAdmin: false }
   const r = value as Record<string, unknown>
   const allow = Array.isArray(r.allow)
     ? [...new Set(r.allow.filter(a => typeof a === 'string' && a.trim()).map(a => String(a).trim().toLowerCase()))]
     : []
-  return { on: r.on === true, port: isPort(r.port) ? r.port : null, allow, pwa: pwaConfig(r.pwa) }
+  return {
+    on: r.on === true,
+    port: isPort(r.port) ? r.port : null,
+    allow,
+    pwa: pwaConfig(r.pwa),
+    ownerAdmin: r.ownerAdmin === true,
+  }
 }
 
 /**
@@ -105,14 +117,18 @@ export const DESK_REMOTE_OPS: ReadonlySet<unknown> = new Set(['approve', 'deny',
  * (#231: /api/team, not /api/peers), and which process the board is and its folder (#356:
  * /api/process), and threads (#392: /api/threads, which the owner's own logins reach,
  * ownerThreads), and Settings → Threads (#410: /api/threads-settings, which writes into the Claude
- * profiles here), and the board's own server's state (/api/system, Settings → Server…). Refused on
- * every remote listener, in both spellings of a path; the backup's, Settings → Time's, wake's and
- * the server's state but on the board's own server through its domain's login (ownServerSettings).
+ * profiles here), Settings → Watches, Decisions and Away journal (#596: /api/feature-settings),
+ * and the board's own server's state (/api/system, Settings → Server…). Refused on every remote
+ * listener, in both spellings of a path; the backup's, Settings → Time's, wake's and the server's
+ * state but on the board's own server through its domain's login (ownServerSettings).
  */
 export const localOnly = (path: string): boolean =>
-  /^\/api\/(remote|access|wake|backup|time-settings|calendar-settings|links\/log|team|process|threads|threads-settings|system)(\/|$)/.test(
+  /^\/api\/(remote|access|wake|backup|time-settings|calendar-settings|links\/log|team|process|threads|threads-settings|feature-settings|self-update|mokupilot\/node-call|housekeeping|system)(\/|$)/.test(
     path,
   )
+
+/** Master device management and setup routes (`/api/nodes`, `/api/nodes/setup`): kept 404 for non-admin remote callers as on main (#694). */
+export const isNodesAdminPath = (path: string): boolean => /^\/api\/nodes(\/|$)/.test(path)
 
 /**
  * Threads (#392, docs/design/threads 5.3): away from the computer, the owner's own logins only (the
@@ -139,6 +155,35 @@ export const ownerTeam = (path: string): boolean => OWNER_TEAM.test(path)
 /** The Tailscale login is the owner's own (the computer's), not one `remote.allow` lets in. */
 export const isOwnerLogin = (login: string | null, owner: string | null): boolean =>
   !!login && !!owner && login.toLowerCase() === owner.toLowerCase()
+
+/** Whether a Tailscale login is a synthetic tagged-node identity (e.g. `tagged-devices`), never a personal owner login. */
+export const isTaggedLogin = (login: string | null | undefined): boolean =>
+  !!login && login.toLowerCase().startsWith('tagged-')
+
+/** Whether a paired Tailscale device belongs to the owner's own login and is not marked as a desk. */
+export const isOwnerAdminDevice = (
+  device: { desk?: boolean | undefined },
+  login: string | null,
+  owner: string | null,
+): boolean => !device.desk && !isTaggedLogin(owner) && !isTaggedLogin(login) && isOwnerLogin(login, owner)
+
+/** Whether a tunnel login is one of the owner's own strong sign-ins (passkey, or password + TOTP while configured). */
+export const isStrongTunnelLogin = (login: { method?: unknown } | null | undefined, accessReady: boolean): boolean =>
+  login?.method === 'passkey' || (login?.method === 'password' && accessReady)
+
+/**
+ * Whether a request reaches a mutating admin route unlocked by `remote.ownerAdmin` (#694) and
+ * should be recorded in the edge log. Read-only GET/HEAD, routes already open to the owner
+ * (`ownerTeam`, `ownerThreads`), and `/api/links/log` are excluded.
+ */
+export function isOwnerAdminRoute(method: string, raw: string, path: string, teamOn: boolean): boolean {
+  if (method === 'GET' || method === 'HEAD') return false
+  if (!(localOnly(raw) || localOnly(path) || isNodesAdminPath(raw) || isNodesAdminPath(path))) return false
+  if (raw === '/api/links/log' || path === '/api/links/log') return false
+  if (teamOn && ownerTeam(raw) && ownerTeam(path)) return false
+  if (ownerThreads(raw) && ownerThreads(path)) return false
+  return true
+}
 
 /**
  * What of localOnly the board's own server opens through its domain's login, where that page is the
@@ -224,6 +269,8 @@ export interface RemoteView {
   devices: Omit<RemoteDevice, 'tokenHash'>[]
   /** The board in a phone's browser (core/pwa.ts). */
   pwa: PwaView
+  /** Headless master admin mode (#694); omitted when false. */
+  ownerAdmin?: true
 }
 
 export interface PwaView {

@@ -167,13 +167,17 @@ async function fakeWake(
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, calls: () => [...calls] }
 }
 
-async function scheduler(box: Sandbox, cfg: Record<string, unknown> = {}) {
-  const proc = box.run('scheduler', {
-    categories: [{ id: 'other', title: 'Other', color: 'gray' }],
-    scheduleTickSec: 0.2,
-    restartSettleSec: 0,
-    ...cfg,
-  })
+async function scheduler(box: Sandbox, cfg: Record<string, unknown> = {}, env: Record<string, string> = {}) {
+  const proc = box.run(
+    'scheduler',
+    {
+      categories: [{ id: 'other', title: 'Other', color: 'gray' }],
+      scheduleTickSec: 0.2,
+      restartSettleSec: 0,
+      ...cfg,
+    },
+    env,
+  )
   await until(() => proc.messages.some(m => (m as { ready?: boolean }).ready))
   return proc
 }
@@ -312,6 +316,76 @@ test('#204: woken in a new tab (its pane closed as it went to sleep), the note g
   )
 })
 
+/**
+ * A name-for-folder script (#307) that writes the folder it was given to `seen` and prints
+ * `name`: a .cmd on Windows, a shell script elsewhere. At `path` without its extension when given.
+ */
+function nameScript(box: Sandbox, name: string, path?: string, exit = 0): { script: string; seen: string } {
+  const seen = join(box.dir, 'name-seen.txt')
+  const win = process.platform === 'win32'
+  const script = (path ?? join(box.dir, 'name-for-cwd')) + (win && !path ? '.cmd' : '')
+  mkdirSync(dirname(script), { recursive: true })
+  writeFileSync(
+    script,
+    win
+      ? `@echo off\r\n<nul set /p="%~1" > "${seen}"\r\n${name ? `echo ${name}` : 'rem nothing'}\r\nexit /b ${exit}\r\n`
+      : `#!/bin/sh\nprintf '%s' "$1" > '${seen}'\n${name ? `echo '${name}'` : ':'}\nexit ${exit}\n`,
+    { mode: 0o755 },
+  )
+  return { script, seen }
+}
+const renames = (box: Sandbox): string[][] => box.calls().filter(a => a[0] === 'agent' && a[1] === 'rename')
+
+test('#307: after the wake, a name-for-folder script names the pane again, before the note', async () => {
+  const box = await sandbox()
+  herdrWith(box, 'idle')
+  const wake = await fakeWake(box)
+  const { script, seen } = nameScript(box, 'atlas-review')
+  put(box, { id: 'aaab01', text: 'go on' })
+  await scheduler(box, { wakeUrl: wake.url }, { BOARD_NAME_FOR_CWD: script })
+  await until(() => runs(box).length === 1, 15_000)
+  assert.deepEqual(renames(box), [['agent', 'rename', 'p1', 'atlas-review']])
+  assert.equal(readFileSync(seen, 'utf8').trim(), box.dir)
+  const order = box.calls().map(a => `${a[0]} ${a[1]}`)
+  assert.ok(order.indexOf('agent rename') < order.indexOf('agent prompt'), JSON.stringify(order))
+  assert.deepEqual(prompts(box), ['[board reminder; restarted as you asked] go on'])
+})
+
+test('#307: a script that prints nothing, fails, or none at all, leaves the pane as it was: no rename', async () => {
+  for (const kind of ['empty', 'fails', 'missing', 'nowhere']) {
+    const box = await sandbox()
+    herdrWith(box, 'idle')
+    const wake = await fakeWake(box)
+    const env =
+      kind === 'empty'
+        ? { BOARD_NAME_FOR_CWD: nameScript(box, '').script }
+        : kind === 'fails'
+          ? { BOARD_NAME_FOR_CWD: nameScript(box, 'cleo-draft', undefined, 1).script }
+          : kind === 'nowhere'
+            ? { BOARD_NAME_FOR_CWD: join(box.dir, 'no-such-script') }
+            : {}
+    put(box, { id: 'aaab02', text: 'go on' })
+    await scheduler(box, { wakeUrl: wake.url }, env)
+    await until(() => runs(box).length === 1, 15_000)
+    assert.deepEqual(renames(box), [], kind)
+    assert.deepEqual(prompts(box), ['[board reminder; restarted as you asked] go on'], kind)
+  }
+})
+
+test.skipIf(process.platform === 'win32')(
+  '#307: the script in its default place, ~/.local/bin/herdr-name-for-cwd',
+  async () => {
+    const box = await sandbox()
+    herdrWith(box, 'idle')
+    const wake = await fakeWake(box)
+    nameScript(box, 'ben-notes', join(box.env.HOME as string, '.local', 'bin', 'herdr-name-for-cwd'))
+    put(box, { id: 'aaab03', text: 'go on' })
+    await scheduler(box, { wakeUrl: wake.url })
+    await until(() => runs(box).length === 1, 15_000)
+    assert.deepEqual(renames(box), [['agent', 'rename', 'p1', 'ben-notes']])
+  },
+)
+
 test('a turn, the user’s draft and background tasks hold a restart back, without counting as tries', async () => {
   const box = await sandbox()
   herdrWith(box, 'working')
@@ -388,7 +462,9 @@ test('herdr-wake refusing three times gives up: the session hears why; one the u
   const wake = await fakeWake(box, { sleep: () => ({ ok: false, error: 'Test is not idle' }) })
   put(box, { id: 'dddd01' })
   await scheduler(box, { wakeUrl: wake.url })
-  await until(() => prompts(box).length === 1)
+  // Three tries and the prompt are 14 herdr calls one after another, each a start of the fake
+  // herdr: about 5 s on a busy Windows, the default wait's whole budget (#131).
+  await until(() => prompts(box).length === 1, 20_000)
   assert.deepEqual(wake.calls(), ['/sleep', '/sleep', '/sleep'])
   assert.match(
     prompts(box)[0] ?? '',
@@ -404,13 +480,13 @@ test('herdr-wake refusing three times gives up: the session hears why; one the u
   })
   put(user, { id: 'dddd02', by: 'user' })
   await scheduler(user, { wakeUrl: wake2.url })
-  await until(() => runs(user).length === 1)
+  await until(() => runs(user).length === 1, 20_000)
   assert.deepEqual([runs(user)[0]?.result, runs(user)[0]?.by], ['failed', 'user'])
   assert.match(String(runs(user)[0]?.why), /stayed up/)
   assert.equal(read(user, 'dddd02'), null)
   await pause(300)
   assert.deepEqual(prompts(user), [])
-})
+}, 60_000)
 
 test('a restart a board left halfway wakes the session it put to sleep, then types the note', async () => {
   const box = await sandbox()

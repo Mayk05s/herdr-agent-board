@@ -37,6 +37,18 @@ export type Cap = (typeof CAPS)[number]
  * field, and reads a shared thread as a topic with status replies.
  */
 export const WORK_CAP = 'work'
+/**
+ * A shared thread's entry with its own time (#564): `work.at`, the time the entry was written,
+ * which the peers order it by (4.3) instead of the time the message was sent. Said with `work`; a
+ * board that says `work` alone gets the field without it, as before.
+ */
+export const WORK_AT_CAP = 'work-at'
+/**
+ * A thread shared again (#569): a board that says it takes the sharer's new share on a thread it
+ * holds from an earlier sharing, instead of dropping it as an entry of an ended one. Said with
+ * `work`; the sharer does not share again with a peer that held the thread and does not say it.
+ */
+export const WORK_RESHARE_CAP = 'work-reshare'
 export const MAX_CAPS = 8
 export const MAX_CAP = 32
 /** The thread with no topic, in a pair or the team; today's flat thread with a peer is its pair's. */
@@ -109,7 +121,10 @@ export interface WorkSet {
   assignee?: WorkParty | null
 }
 
-/** The sender's head after the entry (4.3, rule 3): a board that missed entries takes it. */
+/**
+ * The sender's head after the entry (4.3, rule 3): a board that missed entries takes it. An entry
+ * sent after a later one was sent carries the head of now, its `rev` above the entry's `n` (#561).
+ */
 export interface WorkHead {
   key: string
   title: string
@@ -123,10 +138,12 @@ export interface WorkHead {
  * message's id (a team post's id) is the entry's. `n` the per-thread counter, `auto` the text is
  * the line the board wrote for a peer without `work` (not shown twice), `share` the thread was
  * shared with this message, `unshare` it no longer is, `hist` the message's file is the thread's
- * history (a JSON export, "Send history").
+ * history (a JSON export, "Send history"), `at` the time the entry was written (only to a board
+ * whose caps say WORK_AT_CAP, #564).
  */
 export interface WorkBody {
   n: number
+  at?: number
   type: (typeof WORK_TYPES)[number]
   set?: WorkSet
   head: WorkHead
@@ -286,3 +303,24 @@ export type Frame =
   | { t: 'blob_get'; id: string; at: number }
   | { t: 'blob_data'; id: string; at: number; data: string }
   | { t: 'blob_done'; id: string }
+
+/**
+ * Orders two messages on one UTC timeline by the time written (`ts`, parsed via Date.parse so
+ * offsets, missing milliseconds and non-ISO strings compare as instants rather than text), with
+ * a deterministic locale-independent tie-breaker on `id` and `dir`. Invalid timestamps sort last.
+ */
+export function compareMessageTime(
+  a: { ts: string; id: string; dir?: string },
+  b: { ts: string; id: string; dir?: string },
+): number {
+  const am = Date.parse(a.ts)
+  const bm = Date.parse(b.ts)
+  const aBad = Number.isNaN(am)
+  const bBad = Number.isNaN(bm)
+  if (aBad !== bBad) return aBad ? 1 : -1
+  if (!aBad && am !== bm) return am - bm
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1
+  const ad = a.dir ?? ''
+  const bd = b.dir ?? ''
+  return ad < bd ? -1 : ad > bd ? 1 : 0
+}

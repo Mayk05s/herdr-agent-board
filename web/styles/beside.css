@@ -15,8 +15,8 @@
   --beside-right: calc(var(--room-right, 0px) + max(0px, var(--over-right, 0px) - 12px));
 }
 
-/* The header: the window's width, as with no panel. */
-:root[data-panel-side] .page { margin-left: 0; margin-right: 0; }
+/* The header: the window's width, as with no panel (beside the navigation rail, rail.css). */
+:root[data-panel-side] .page { margin-left: var(--rail-w, 0px); margin-right: 0; }
 :root[data-panel-side] .toolbar-fit { margin-left: 0; margin-right: 0; }
 
 /* The board and its column heads beside the panel; the columns scroll sideways where they do not fit. */

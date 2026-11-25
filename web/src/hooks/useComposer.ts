@@ -20,7 +20,7 @@ import { useSessionActions } from './useSessionActions.ts'
 export interface OutboxControls {
   /** The ones the thread of `key` shows now: on their way, taken but not in its transcript yet, or not sent. */
   waiting(key: string | null): readonly OutboxEntry[]
-  retry(id: string): void
+  retry(id: string, anyway?: boolean): void
   edit(id: string): void
   /** Counts their changes: the thread's foot is drawn anew. */
   version: number
@@ -71,7 +71,7 @@ export function useComposer(
   const t = useT()
   const board = useBoardContext()
   const actions = useSessionActions()
-  const attachments = useAttachments()
+  const attachments = useAttachments(board.ui.open)
   const [text, setText] = useState('')
   const [sending, setSending] = useState<ReadonlySet<string>>(() => new Set())
   const [version, setVersion] = useState(0)
@@ -136,11 +136,13 @@ export function useComposer(
     input: session.input,
     send: () => void session.send(),
     discard: session.discard,
-    addFiles: attachments.add,
+    addFiles: files => {
+      if (latest.current.board.ui.open) attachments.add(files)
+    },
     removeFile: attachments.remove,
     outbox: {
       waiting: key => session.waiting(key, open, openDetail),
-      retry: id => void session.retry(id),
+      retry: (id, anyway) => void session.retry(id, anyway),
       edit: session.edit,
       version,
       foot,

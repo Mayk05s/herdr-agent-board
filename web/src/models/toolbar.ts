@@ -46,7 +46,7 @@ export function attentionCount(visible: Item[], filter: LanePicks, categoryOf: C
   ).length
 }
 
-export type LaneOption = { id: string; title: string; n: number }
+export type LaneOption = { id: string; title: string; n: number; color?: string }
 
 /** The lanes control: "All", then the categories with sessions on show and those picked. */
 export function laneOptions(
@@ -59,7 +59,12 @@ export function laneOptions(
   const used = categories.filter(c => visible.some(i => categoryOf(i) === c.id) || filter.includes(c.id))
   return [
     { id: 'all', title: t('all'), n: visible.length },
-    ...used.map(c => ({ id: c.id, title: c.title, n: visible.filter(i => categoryOf(i) === c.id).length })),
+    ...used.map(c => ({
+      id: c.id,
+      title: c.title,
+      n: visible.filter(i => categoryOf(i) === c.id).length,
+      ...(c.color && { color: c.color }),
+    })),
   ]
 }
 
@@ -135,5 +140,5 @@ export function scheduleBadge(schedules: ScheduleEntry[], now: number): { count:
 /** The tab's title, with how many sessions need the user first. */
 export function documentTitle(items: Item[]): string {
   const me = items.filter(i => i.column === 'me').length
-  return me ? `(${me}) Agent board` : 'Agent board'
+  return me ? `(${me}) MokuBoard` : 'MokuBoard'
 }

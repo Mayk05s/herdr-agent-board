@@ -27,14 +27,16 @@ import {
 } from '../../models/secrets.ts'
 import { useBoardContext } from '../../state/BoardProvider.tsx'
 import { TwoClicks } from '../access/LoginSection.tsx'
-import { Panel } from '../panel/Panel.tsx'
+import { Panel, type PanelBack } from '../panel/Panel.tsx'
 
 export interface SecretsPanelProps {
   open: boolean
   onClose(): void
+  /** Back to the Settings list when opened from it (#679). */
+  back?: PanelBack | undefined
 }
 
-export function SecretsPanel({ open, onClose }: SecretsPanelProps) {
+export function SecretsPanel({ open, onClose, back }: SecretsPanelProps) {
   const t = useT()
   const { now, source } = useSecrets(open)
   const value = useRef<HTMLInputElement>(null)
@@ -48,6 +50,7 @@ export function SecretsPanel({ open, onClose }: SecretsPanelProps) {
       kind="secrets"
       open={open}
       onClose={onClose}
+      back={back}
       title={
         <>
           <h2>{t('secrets.title')}</h2>

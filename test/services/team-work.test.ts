@@ -6,17 +6,21 @@
 // it shares with the sender, and goes to the threads with the event; without the hooks the event is
 // as it was. The hub passes the field on as signed.
 import { afterEach, describe, expect, test } from 'bun:test'
-import { readAllInbox } from '../../src/adapters/team-store.ts'
+import { addDraft, readAllInbox } from '../../src/adapters/team-store.ts'
 import {
   checkMessage,
+  cleanCaps,
   type Envelope,
   generateKey,
+  hasWorkAt,
+  hasWorkReshare,
   type KeyPair,
   type Message,
   OUR_CAPS,
   ourCaps,
   readWork,
   type WorkBody,
+  type WorkPost,
 } from '../../src/core/team.ts'
 import { msgOf, question } from '../hub/harness.ts'
 import { type FakeWs, handshake, type Setup, setup, stopAll, until } from '../support/team-service.ts'
@@ -51,9 +55,16 @@ describe('the field', () => {
       { ...WORK, head: { ...WORK.head, rev: 2 } },
       { ...WORK, head: { ...WORK.head, key: 'Atlas 13' } },
       { ...WORK, head: { ...WORK.head, extra: 1 } },
+      { ...WORK, at: -1 },
+      { ...WORK, at: 1.5 },
+      { ...WORK, at: '1763000000000' },
+      { ...WORK, at: null },
+      { ...WORK, at: Number.MAX_SAFE_INTEGER + 2 },
     ]
     for (const b of bad) expect(readWork(b)).toBeNull()
     expect(readWork({ ...WORK, set: { assignee: null } })?.set).toEqual({ assignee: null })
+    // The entry's own time (#564).
+    expect(readWork({ ...WORK, at: 1763000000000 })).toEqual({ ...WORK, at: 1763000000000 })
   })
 
   test('a board reads work only in a topic; the hub relays it as signed', async () => {
@@ -78,7 +89,16 @@ describe('the field', () => {
   test('the caps: off, what this board said before; on, `work` after them', () => {
     expect(ourCaps({ files: true, work: false })).toEqual(OUR_CAPS)
     expect(ourCaps({ files: false, work: false })).toEqual(OUR_CAPS.filter(c => c !== 'files'))
-    expect(ourCaps({ files: true, work: true })).toEqual([...OUR_CAPS, 'work'])
+    expect(ourCaps({ files: true, work: true })).toEqual([...OUR_CAPS, 'work', 'work-at', 'work-reshare'])
+    // `work-at` counts only with `work` (#564).
+    expect(hasWorkAt({ caps: [...OUR_CAPS, 'work', 'work-at'] })).toBe(true)
+    expect(hasWorkAt({ caps: [...OUR_CAPS, 'work-at'] })).toBe(false)
+    expect(hasWorkAt({ caps: [...OUR_CAPS, 'work'] })).toBe(false)
+    // `work-reshare` too (#569), and the hello stays within the caps a peer reads.
+    expect(hasWorkReshare({ caps: [...OUR_CAPS, 'work', 'work-reshare'] })).toBe(true)
+    expect(hasWorkReshare({ caps: [...OUR_CAPS, 'work-reshare'] })).toBe(false)
+    expect(hasWorkReshare({ caps: [...OUR_CAPS, 'work', 'work-at'] })).toBe(false)
+    expect(cleanCaps(ourCaps({ files: true, work: true }))).toEqual(ourCaps({ files: true, work: true }))
   })
 })
 
@@ -90,10 +110,15 @@ interface World {
   A: KeyPair
   B: KeyPair
   C: KeyPair
-  taken: { from: string; topic: string }[]
+  taken: { from: string; topic: string; share?: boolean }[]
 }
 
-async function world(on: boolean | null, take = true): Promise<World> {
+async function world(
+  on: boolean | null,
+  take = true,
+  benCaps = [...RICH, 'work'],
+  fresh?: (w: WorkPost) => WorkPost,
+): Promise<World> {
   const taken: World['taken'] = []
   const s = setup(
     { hub: 'ws://127.0.0.1:7443', name: 'me' },
@@ -103,9 +128,10 @@ async function world(on: boolean | null, take = true): Promise<World> {
           work: {
             on: () => on,
             mayTake: m => {
-              taken.push({ from: m.from, topic: m.topic })
+              taken.push({ from: m.from, topic: m.topic, ...(m.share && { share: m.share }) })
               return take
             },
+            ...(fresh && { fresh }),
           },
         },
   )
@@ -113,7 +139,7 @@ async function world(on: boolean | null, take = true): Promise<World> {
   s.svc.start()
   const { ws, me } = await handshake(s, [
     { peer: A.pub, name: 'anna', caps: [...RICH, 'work'] },
-    { peer: B.pub, name: 'ben', caps: [...RICH, 'work'] },
+    { peer: B.pub, name: 'ben', caps: benCaps },
     { peer: C.pub, name: 'cleo', caps: RICH },
   ])
   return { s, ws, me, A, B, C, taken }
@@ -140,13 +166,42 @@ describe('the hello', () => {
       const w = await world(on)
       const caps = w.ws.of('hello')[0]?.caps ?? []
       expect(caps.includes('work')).toBe(has)
-      expect(caps).toEqual(has ? [...OUR_CAPS, 'work'] : OUR_CAPS)
+      expect(caps).toEqual(has ? [...OUR_CAPS, 'work', 'work-at', 'work-reshare'] : OUR_CAPS)
       stopAll()
     }
   })
 })
 
 describe('out', () => {
+  test('a held draft goes with the work the hook gives at send time; without the hook, as it was stored (#561)', async () => {
+    for (const renew of [false, true]) {
+      const w = await world(
+        true,
+        true,
+        [...RICH, 'work'],
+        renew ? p => ({ ...p, body: { ...p.body, head: { ...p.body.head, rev: 5 } } }) : undefined,
+      )
+      const id = '00000000-0000-4000-8000-0000000000d1'
+      const thread = { id: TID, title: 'Map the 2019 price columns' }
+      addDraft(
+        {
+          id,
+          to: 'team',
+          text: 'done: 217 rows mapped',
+          createdAt: w.s.clock.now(),
+          thread,
+          work: { id, body: WORK, open: true },
+        },
+        50,
+      )
+      expect(await w.s.svc.sendDraft(id)).toMatchObject({ ok: true })
+      const of = (k: KeyPair) => sent(w.ws).find(m => m.to === k.pub)?.body
+      expect(of(w.B)?.work).toEqual(renew ? { ...WORK, head: { ...WORK.head, rev: 5 } } : WORK)
+      expect(of(w.C)?.work).toBeUndefined()
+      stopAll()
+    }
+  })
+
   test('a team post with an entry: `work` to the boards that keep shared threads, the text to every one, one id', async () => {
     const w = await world(true)
     const id = '00000000-0000-4000-8000-0000000000e1'
@@ -175,6 +230,35 @@ describe('out', () => {
     expect(r2).toEqual({ ok: false, error: 'thread' })
   })
 
+  test("the entry's own time goes only to a board that says `work-at`; one that says `work` alone gets the rest (#564)", async () => {
+    const w = await world(true, true, [...RICH, 'work', 'work-at'])
+    const id = '00000000-0000-4000-8000-0000000000e3'
+    const body = { ...WORK, at: 1763000000000 }
+    const r = await w.s.svc.post(
+      { to: 'team', thread: { id: TID, title: 'Map the 2019 price columns' } },
+      'done: 217 rows mapped',
+      { by: 'ui' },
+      undefined,
+      { id, body, open: true },
+    )
+    expect(r).toMatchObject({ ok: true, id })
+    const of = (k: KeyPair) => sent(w.ws).find(m => m.to === k.pub)?.body
+    expect(of(w.B)?.work).toEqual(body)
+    expect(of(w.A)?.work).toEqual(WORK)
+    expect(of(w.C)?.work).toBeUndefined()
+  })
+
+  test('the roster says which boards take a thread shared again, while this board keeps shared threads (#569)', async () => {
+    for (const on of [true, false]) {
+      const w = await world(on, true, [...RICH, 'work', 'work-reshare'])
+      const of = (k: KeyPair) => w.s.svc.view()?.roster.find(p => p.peer === k.pub)
+      expect(of(w.B)?.reshare).toBe(on ? true : undefined)
+      expect(of(w.A)?.reshare).toBeUndefined()
+      expect(of(w.C)?.reshare).toBeUndefined()
+      stopAll()
+    }
+  })
+
   test('a post without an entry is what it was', async () => {
     const w = await world(true)
     await w.s.svc.post({ to: w.A.pub, thread: { title: 'Lunch' } }, 'noon?', { by: 'ui' })
@@ -196,6 +280,12 @@ describe('in', () => {
     await deliver(w, w.C, { text: 'thanks', thread: ref })
     expect(w.s.inbound.at(-1)?.work).toMatchObject({ text: 'thanks', ref })
     expect(w.s.inbound.at(-1)?.work?.body).toBeUndefined()
+  })
+
+  test('a share is checked as one: the hub client tells the threads it is a share (#569)', async () => {
+    const w = await world(true)
+    await deliver(w, w.A, { text: 'shared as a thread: atlas-13', thread: ref, work: { ...WORK, share: true } })
+    expect(w.taken).toEqual([{ from: w.A.pub, topic: `${w.A.pub}/${TID}`, share: true }])
   })
 
   test('an entry that does not fit, or any while shared threads are off: dropped and acked, never kept', async () => {

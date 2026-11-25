@@ -8,6 +8,7 @@
 // child of <body>; this opens and closes them, lights their items, places each level once it is
 // drawn (attach) and moves it with a spring, and takes the keys and the pointer.
 
+import { byFinger, CLICK_SPEND_MS } from '../../models/click-away.ts'
 import {
   firstIndex,
   isSeparator,
@@ -226,7 +227,7 @@ export class MenuEngine {
     // A press outside closes the menu and is spent on that; a right press opens the next menu.
     const down = (e: PointerEvent) => {
       if (!this.layers.length || this.inside(e.target)) return
-      if (e.button === 0) this.swallowUntil = this.now() + 600
+      if (e.button === 0) this.swallowUntil = this.now() + CLICK_SPEND_MS
       this.clear(e.button !== 0)
     }
     const click = (e: MouseEvent) => {
@@ -384,7 +385,13 @@ export class MenuEngine {
     if (!this.downInside && this.now() - this.openedAt < 350) return
     this.downInside = false
     const i = indexAt(e)
-    if (i >= 0) this.activate(layer, i)
+    if (i < 0) return
+    this.activate(layer, i)
+    // A finger's click comes after its release and is aimed at what is there by then: the menu
+    // the pick took away lets it through to the card under it (#432). It is spent, as a press
+    // outside is; a mouse's goes to the menu it was pressed in, as before. Set after the pick
+    // ran, so a click() the pick makes itself (the sheet's More) still acts.
+    if (byFinger(e.pointerType) && !this.layers.includes(layer)) this.swallowUntil = this.now() + CLICK_SPEND_MS
   }
 
   private openSub(layer: Layer, i: number, focusFirst: boolean): void {

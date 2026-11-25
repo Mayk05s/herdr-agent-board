@@ -28,8 +28,11 @@ import {
   worktreeCreate,
   worktreeOpen,
 } from '../../adapters/herdr.ts'
-import { pause } from '../../adapters/pacing.ts'
+import { readNodeEnv } from '../../adapters/node-env.ts'
+import { knobMs, pause } from '../../adapters/pacing.ts'
 import { run } from '../../adapters/process.ts'
+import { AGY_AGENT } from '../../core/agy.ts'
+import { CODEX_AGENT, isCodexSession } from '../../core/codex.ts'
 import { keyTowardYes, sameFolder, type TrustDialog, trustDialog } from '../../core/dialogs/trust.ts'
 import { t } from '../../core/lang.ts'
 import { launcherError } from '../../core/launch/launcher-command.ts'
@@ -43,16 +46,20 @@ import {
   worktreePath,
 } from '../../core/launch/names.ts'
 import { forkCard } from '../../core/links.ts'
+import { nodeConfig, nodesConfig } from '../../core/nodes.ts'
 import { PI_AGENT } from '../../core/pi.ts'
+import type { LaunchPlace } from '../../core/placement.ts'
 import type { Item, LaunchFailure, LaunchState, LaunchStep } from '../../core/types.ts'
 import type { Deps } from '../deps.ts'
 import { LaunchError, type LaunchEvents, launcherFor, notePane, openInProfile } from './launcher.ts'
-import { claudeRename, inputEmpty, piName, takenNames, typeLine } from './prompt.ts'
+import { agyRename, claudeRename, inputEmpty, piName, screenNow, takenNames, typeLine } from './prompt.ts'
 import type { LaunchRequest } from './request.ts'
 
 /** A launch as the board keeps it while it runs. */
 export interface Launch extends LaunchRequest {
   id: string
+  /** On a node, its profile's env file (#507, launcher.ts LaunchContext). */
+  nodeEnv?: Readonly<Record<string, string>> | null
   /** The id of the session it resumes (Return, from the archive), null for a new one. */
   resume: string | null
   /** The id of the session whose conversation it starts with (a fork), null for none. */
@@ -73,6 +80,12 @@ export interface Launch extends LaunchRequest {
   error: string
   kind: LaunchFailure | ''
   sessionId: string | null
+  /** The id its new session must get (a node's start from its master, #504; a verifier, #492); null: a fresh one. */
+  sessionGiven: string | null
+  /** A verifier's start (#492): under `sessionGiven` or not at all (launcher.ts refuses otherwise). */
+  exactSession?: boolean
+  /** A master's start (#504, services/nodes/placer.ts): where it goes, as its card shows it; absent without `nodes`. */
+  place?: LaunchPlace
   /** The key whose card has its lane. */
   carded: string | null
   rootPane: string | null
@@ -117,6 +130,7 @@ export function newLaunch(
     error: '',
     kind: '',
     sessionId: null,
+    sessionGiven: null,
     carded: null,
     rootPane: null,
     rootTerminal: null,
@@ -141,6 +155,8 @@ export interface LaunchRunner {
 }
 
 const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+/** How long a launch waits for a dialog to be answered in its terminal, as for any dialog on the way up. */
+const DIALOG_WAIT_MS = 15 * 60_000
 const ready = (agent: HerdrAgent | null): boolean => agent?.status === 'idle' || agent?.status === 'done'
 
 /**
@@ -191,9 +207,10 @@ export function launchRunner({
       // A fork's card says whose fork it is, and since when (core/links.ts).
       writeCard(id, {
         category: l.category,
-        profileWant: l.profile,
+        ...(l.codexFork ? { name: l.name } : { profileWant: l.profile }),
         ...(l.model && { modelWant: l.model }),
         ...(l.fork && forkCard(l.fork)),
+        ...(l.parent && !l.fork && !l.resume && { parent: l.parent }),
       })
       l.carded = id
     },
@@ -202,6 +219,9 @@ export function launchRunner({
   const agentSlug = (l: Launch): string => (l.ticketNames ? ticketSlugName(l.name) : slugName(l.name))
 
   async function runLaunch(l: Launch): Promise<void> {
+    // On a node, its profile's env file (#507): each tab, workspace and launcher opened for it gets
+    // those variables. Read on a board with `node` only.
+    if (nodeConfig(deps.cfg.node) !== null) l.nodeEnv = readNodeEnv(l.profile, deps.log)
     // A resumed one has its id and its card already; the card is told the profile it is meant to
     // run in, as for any start.
     if (l.resume) {
@@ -238,8 +258,20 @@ export function launchRunner({
         if (ws.pane) notePane(l, ws.pane, ws.terminal)
       }
     }
-    const launcher = launcherFor(deps.cfg.launch, { resume: !!l.resume, fork: !!l.fork })
+    // With `nodes` the board's own spawn-agent is marked as its child, so it never asks the board back (#505).
+    const launcher = launcherFor(deps.cfg.launch, {
+      resume: !!l.resume,
+      fork: !!l.fork,
+      ...(nodesConfig(deps.cfg.nodes) !== null && { mark: true }),
+      ...(l.codexFork && { codexFork: l.codexFork }),
+      codex: l.agent === CODEX_AGENT,
+    })
     const r = await launcher.start(l, events(l))
+    if (l.codexFork) {
+      if (r.failure) throw r.failure
+      await finishCodexFork(l)
+      return
+    }
     // The agent herdr says came up once a dialog was answered: the board's spawn-agent stops at
     // one before it can say whether its start command started Claude or pi.
     let kind = r.agent
@@ -254,7 +286,7 @@ export function launchRunner({
         // Another dialog holds it: the user answers it in herdr, the board waits and goes on.
         l.state = 'waiting'
         step(l, 'dialog')
-        kind = (await untilReady(l, 15 * 60_000))?.kind || kind
+        kind = (await untilReady(l, DIALOG_WAIT_MS))?.kind || kind
         l.state = 'starting'
       }
       // What the launcher did not get to: herdr's own start named the agent, so /rename and the
@@ -275,12 +307,14 @@ export function launchRunner({
 
   /**
    * The launch's own tab in a workspace herdr opened: the first one when it leaves the env alone,
-   * else a tab of its own with the profile's env (worktree open/create take no --env). A workspace
-   * that was already open keeps its first tab: its pane may hold a session already.
+   * else a tab of its own with the profile's env (worktree open/create take no --env), a node's env
+   * file's variables too (#507). A workspace that was already open keeps its first tab: its pane may
+   * hold a session already.
    */
   async function openLaunchTab(l: Launch, ws: HerdrWorktree, spareRootTab: boolean): Promise<void> {
     l.rootTab = ws.alreadyOpen ? null : ws.tab
-    if (l.configDir === null && !ws.alreadyOpen) {
+    const vars = !!l.nodeEnv && Object.keys(l.nodeEnv).length > 0
+    if (l.configDir === null && !vars && !ws.alreadyOpen) {
       l.rootPane = ws.pane
       l.rootTerminal = ws.terminal
       if (ws.pane) notePane(l, ws.pane, ws.terminal)
@@ -294,6 +328,35 @@ export function launchRunner({
       l.spareRoot = { pane: ws.pane, terminal: ws.terminal }
     }
     notePane(l, opened.pane, opened.terminal)
+  }
+
+  async function finishCodexFork(l: Launch): Promise<void> {
+    const pane = paneOf(l)
+    // A live fork waiting for its hook stays pending, so Retry cannot create a duplicate.
+    l.state = 'waiting'
+    step(l, 'agent')
+    for (;;) {
+      if (l.dismissed || l.closed) throw new LaunchError(t('launch.err.dismissed'), 'other')
+      const agent = await agentNow(l)
+      if (l.dismissed || l.closed) throw new LaunchError(t('launch.err.dismissed'), 'other')
+      if (agent?.kind && (agent.kind !== 'codex' || agent.session?.toLowerCase() === l.fork?.toLowerCase()))
+        throw new LaunchError(t('fork.err.identity'), 'other')
+      if (agent?.kind === 'codex' && agent.session && isCodexSession(agent.session)) {
+        if (!l.sessionId) events(l).session(agent.session)
+        else if (agent.session.toLowerCase() !== l.sessionId.toLowerCase())
+          throw new LaunchError(t('fork.err.identity'), 'other')
+        if (!l.message || ready(agent)) {
+          if (l.message) {
+            step(l, 'message')
+            // Submit once, without --wait. Neither the shell nor the first turn's duration is involved.
+            await herdr(['agent', 'prompt', pane, /^-/.test(l.message) ? ` ${l.message}` : l.message])
+          }
+          l.state = 'starting'
+          return
+        }
+      }
+      await pause(500)
+    }
   }
 
   async function makeWorktree(l: Launch, branch: string, linked: boolean): Promise<void> {
@@ -358,17 +421,35 @@ export function launchRunner({
   async function nameAndBrief(l: Launch, kind: string): Promise<void> {
     const pane = paneOf(l)
     // A resumed session keeps the name it had.
+    let left = false
     if (kind === 'claude' && !l.resume) {
       step(l, 'rename')
       // The name is cosmetic and Claude runs by now: a herdr error here must not mark the launch
       // failed, or a retry would start a second session.
-      await claudeRename(pane, l.name).catch(err => deps.log(`launch ${l.name}: /rename: ${messageOf(err)}`))
+      const renamed = await claudeRename(pane, l.name).catch(err => {
+        deps.log(`launch ${l.name}: /rename: ${messageOf(err)}`)
+        return false
+      })
+      // A /rename Claude did not take may still be in its box: the message would go with it as
+      // one, the name eating it (#479). Asked only when no rename showed; a box herdr cannot show
+      // (null) is taken for empty, as before. A dialog there is waited out first (pastDialog), and
+      // the name tried once more: the one typed while it was up went to the dialog.
+      if (!renamed && l.message) {
+        let box = await pastDialog(l, pane, 'rename')
+        if (box.waited && (await claudeRename(pane, l.name).catch(() => false))) box = { draft: '', waited: true }
+        else if (box.waited) box = await pastDialog(l, pane, 'rename')
+        left = !!box.draft
+      }
     } else if (kind === PI_AGENT && !l.resume) {
       step(l, 'rename')
       await piName(pane, l.name).catch(err => deps.log(`launch ${l.name}: /name: ${messageOf(err)}`))
+    } else if (kind === AGY_AGENT && !l.resume) {
+      step(l, 'rename')
+      await agyRename(pane, l.name).catch(err => deps.log(`launch ${l.name}: /rename: ${messageOf(err)}`))
     }
     if (l.message) {
       step(l, 'message')
+      if (left) throw new LaunchError(t('launch.err.message.draft'), 'message')
       if (!(await typeLine(pane, l.message))) throw new LaunchError(t('launch.err.message.lost'), 'message')
     }
   }
@@ -393,6 +474,37 @@ export function launchRunner({
       if (ready(agent)) return agent
     }
     throw new LaunchError(t(l.dismissed ? 'launch.err.dismissed' : 'launch.err.dialogTimeout'), 'dialog')
+  }
+
+  /**
+   * Asked once the box was found not empty before a name or the first message. A dialog there (one
+   * Claude drew after herdr called it ready: a first-run notice, an upsell, core/dialogs/input-box.ts)
+   * holds the launch as any other dialog does, the card saying so, until it is answered in the
+   * terminal and the box is back; then the launch goes on at `at`. What the box holds then (draft):
+   * '' empty, the text typed in it, null when the screen shows neither a box nor a dialog; waited:
+   * whether a dialog held it.
+   */
+  async function pastDialog(
+    l: Launch,
+    pane: string,
+    at: LaunchStep,
+  ): Promise<{ draft: string | null; waited: boolean }> {
+    let shown = await screenNow(pane)
+    if (shown?.kind !== 'dialog') return { draft: shown ? shown.draft : null, waited: false }
+    l.state = 'waiting'
+    step(l, 'dialog')
+    const deadline = Date.now() + knobMs('BOARD_DIALOG_WAIT_MS', DIALOG_WAIT_MS)
+    // Once it is answered the box takes a moment to be drawn: a screen with neither is waited out too.
+    while (shown?.kind !== 'box') {
+      if (l.dismissed || l.closed || Date.now() >= deadline)
+        throw new LaunchError(t(l.dismissed ? 'launch.err.dismissed' : 'launch.err.dialogTimeout'), 'dialog')
+      await pause(1500)
+      await agentNow(l)
+      shown = await screenNow(pane)
+    }
+    l.state = 'starting'
+    step(l, at)
+    return { draft: shown.draft, waited: true }
   }
 
   /**
@@ -473,8 +585,12 @@ export function launchRunner({
           .catch(err => deps.log(`launch ${l.name}: naming: ${messageOf(err)}`))
     } else if (kind === 'claude') {
       step(l, 'rename')
+      // A box that is not empty may be a dialog Claude drew once herdr called it ready: waited out
+      // when a first message comes after the name. Without one the name alone, which is cosmetic,
+      // holds nothing: it is skipped as before.
+      const empty = (await inputEmpty(pane)) || (!!l.message && (await pastDialog(l, pane, 'rename')).draft === '')
       try {
-        if ((await inputEmpty(pane)) && (await claudeRename(pane, l.name)) && nameAgent) {
+        if (empty && (await claudeRename(pane, l.name)) && nameAgent) {
           const taken = await takenNames()
           await herdr(['agent', 'rename', pane, uniqueSlug(agentSlug(l), taken)])
         }
@@ -493,10 +609,22 @@ export function launchRunner({
       } catch (err) {
         deps.log(`launch ${l.name}: naming: ${messageOf(err)}`)
       }
+    } else if (kind === AGY_AGENT && !l.resume) {
+      step(l, 'rename')
+      try {
+        if ((await agyRename(pane, l.name)) && nameAgent) {
+          const taken = await takenNames()
+          await herdr(['agent', 'rename', pane, uniqueSlug(agentSlug(l), taken)])
+        }
+      } catch (err) {
+        deps.log(`launch ${l.name}: naming: ${messageOf(err)}`)
+      }
     }
     if (l.message) {
       step(l, 'message')
-      if (kind !== PI_AGENT && !(await inputEmpty(pane)))
+      // The second read is of the visible screen (the first one's recent lines are refused while herdr
+      // calls the agent blocked): a box it shows empty there takes the message.
+      if (kind === 'claude' && !(await inputEmpty(pane)) && (await pastDialog(l, pane, 'message')).draft !== '')
         throw new LaunchError(t('launch.err.message.draft'), 'message')
       if (!(await typeLine(pane, l.message))) throw new LaunchError(t('launch.err.message.lost'), 'message')
     }

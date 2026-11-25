@@ -1,13 +1,14 @@
 // What the services need from the outside, built once per process by the entrypoints.
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { type AgyFooterTracker, type AgyHome, createAgyFooterTracker, createAgyHome } from '../adapters/agy-home.ts'
 import type { ClaudeHome } from '../adapters/claude-home.ts'
 import { type CodexHome, createCodexHome } from '../adapters/codex-home.ts'
 import { localFetch } from '../adapters/local-key.ts'
 import { createPiHome, type PiHome } from '../adapters/pi-home.ts'
 import { createProfileHomes, type ProfileHomes } from '../adapters/profile-homes.ts'
 import { findProfileDirs, inheritedProfileDir } from '../adapters/profiles.ts'
-import { wakePiFile, wakeSessionsFile } from '../adapters/wake-files.ts'
+import { wakeAgyFile, wakePiFile, wakeSessionsFile } from '../adapters/wake-files.ts'
 import { onServer } from '../core/on-server.ts'
 import { mergeProfiles, type ProfileSet, profileSet } from '../core/profiles.ts'
 import type { Config } from '../core/types.ts'
@@ -26,6 +27,10 @@ export interface Deps {
   pi: PiHome
   /** Codex rollouts, looked up only for panes herdr reports as codex. */
   codex: CodexHome
+  /** Antigravity CLI transcripts and summaries, looked up only for panes herdr reports as agy. */
+  agy: AgyHome
+  /** Throttled Antigravity CLI footer task tracker, probed only for idle agy panes. */
+  agyFooter?: AgyFooterTracker
   /** The profiles: config.json's merged with the folders found; read again when they change, or after a minute. */
   profiles(): ProfileSet
   /**
@@ -47,6 +52,8 @@ export function defaultDeps(cfg: Config, log: (text: string) => void = () => {})
     homes,
     pi: createPiHome(),
     codex: createCodexHome(),
+    agy: createAgyHome(),
+    agyFooter: createAgyFooterTracker(),
     profiles() {
       // A folder made or removed in the home folder shows within a minute; an edit at once.
       const listed = JSON.stringify(cfg.profiles ?? null)
@@ -69,8 +76,8 @@ export function defaultDeps(cfg: Config, log: (text: string) => void = () => {})
           : sharedBoardWake(mode.url, wakeSessionsFile())
       const old = sharedHerdrWake(cfg.wakeUrl)
       const file = wakeSessionsFile()
-      // pi's sleepers keep their cards too (#178), from wake's pi file beside it.
-      const asleep = !mode.on && (existsSync(file) || existsSync(wakePiFile()))
+      // pi's and agy's sleepers keep their cards too (#178, #631), from wake's files beside it.
+      const asleep = !mode.on && (existsSync(file) || existsSync(wakePiFile()) || existsSync(wakeAgyFile()))
       return asleep ? sharedFileSleepers(old, file) : old
     },
     log,

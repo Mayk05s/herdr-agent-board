@@ -344,10 +344,15 @@ test('the skill install copies is upstream’s, word for word, but for what `boa
   // The board on its own server: wake's key on its port, a CLI's browser login in the agent's own browser, and
   // the owner's secrets (the store and an agent's request, #273), each a line or a section of its own.
   // #380: --model, in the command line, the PowerShell names and a line of its own.
+  // #505: where a worker may run on another device, and what spawn-agent's device= and queued= lines mean.
+  // #628: cross-agent ListAgents/SendMessage (agy MCP + board agents/board send).
   const ours = read(root, 'skills', 'herdr-agents', 'SKILL.md')
     .replace(' [--model <id or alias>]\n```', '\n```')
     .replace(' -Workspace -Model`)', ' -Workspace`)')
     .replace(/- An agent on another model than the profile's default: [^\n]*\n/, '')
+    .replace(/- Where the board has other devices, a worker may run on one of them [^\n]*\n/, '')
+    .replace(/- A line ending in `device=<device> session=<id>` means [^\n]*\n/, '')
+    .replace(/- Other agents \(`agy`, `pi`, Codex\) and other devices: [^\n]*\n/, '')
     .replace(
       ' On the board\'s own server (`board doctor` says "Server mode") add `-H "X-Board-Key: $(cat ~/.local/state/herdr/plugins/agent-board/local-key)"`.',
       '',

@@ -9,7 +9,9 @@ import { useT } from '../../i18n/I18nProvider.tsx'
 import type { Edge } from '../../models/panel-layout.ts'
 import { EDGES, edgeChrome, type PanelChrome } from '../../models/panel-motion.ts'
 import { classNames } from '../class-names.ts'
-import { PanelHead } from './PanelHead.tsx'
+import { type PanelBack, PanelHead } from './PanelHead.tsx'
+
+export type { PanelBack }
 
 export type PanelKind =
   | 'session'
@@ -24,14 +26,20 @@ export type PanelKind =
   | 'secrets'
   | 'todos'
   | 'threads'
+  | 'decisions'
   | 'backup'
+  | 'updates'
+  | 'housekeeping'
   | 'time'
+  | 'spend'
   | 'timeSettings'
   | 'calendar'
   | 'calendarSettings'
   | 'paths'
   | 'team'
   | 'server'
+  | 'devices'
+  | 'settings'
 
 /** Each panel's name for screen readers, and the session sheet's close button id. */
 const KINDS: Record<PanelKind, { label: string; closeId?: string }> = {
@@ -47,19 +55,27 @@ const KINDS: Record<PanelKind, { label: string; closeId?: string }> = {
   secrets: { label: 'secrets.title' },
   todos: { label: 'todo.title' },
   threads: { label: 'wt.title' },
+  decisions: { label: 'dec.title' },
   backup: { label: 'backup.title' },
+  updates: { label: 'selfUpdate.title' },
+  housekeeping: { label: 'hk.title' },
   time: { label: 'time.title' },
+  spend: { label: 'spend.title' },
   timeSettings: { label: 'time.set.title' },
   calendar: { label: 'cal.title' },
   calendarSettings: { label: 'cal.set.title' },
   paths: { label: 'paths.title' },
   team: { label: 'team.title' },
   server: { label: 'sys.title' },
+  devices: { label: 'node.dev.title' },
+  settings: { label: 'set.title' },
 }
 
 interface ShellProps {
   id: string
   kind: PanelKind
+  /** Back control left of the title (#679). */
+  back?: PanelBack | undefined
   /** What goes in the head's `.sheet-title`. */
   title: ReactNode
   /** Buttons of the panel's own in the head, before the place button. */
@@ -117,6 +133,7 @@ export function PanelView(props: PanelViewProps) {
   const {
     id,
     kind,
+    back,
     title,
     tools,
     className,
@@ -147,6 +164,7 @@ export function PanelView(props: PanelViewProps) {
       <div className="sheet-grip" aria-hidden="true" />
       <div className="sheet-inner">
         <PanelHead
+          back={back}
           title={title}
           tools={tools}
           glyph={chrome.glyph}

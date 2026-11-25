@@ -11,6 +11,8 @@ export const TURN = 24
 export const TOP = 8
 /** After a tap that opened it, this much more downward travel than TURN folds it again. */
 export const HOLD = 24
+/** Within this many px of the end of the page the page is at its end (a scroll can stop a fraction short). */
+export const END = 2
 
 export interface ToolbarScroll {
   collapsed: boolean
@@ -25,10 +27,17 @@ export const OPEN: ToolbarScroll = { collapsed: false, ref: 0 }
  * own folding gives the page). Open: it follows the lowest point reached, and folds once the page is
  * past COLLAPSE_AFTER and TURN below that point. Folded: it follows the highest, and opens once the
  * page is TURN above it, or at the top. The same object comes back while nothing changed.
+ *
+ * `end`: the furthest the page scrolls, counted as `y` is (#474). Past it is a phone's rubber band,
+ * which comes back by itself: the page is at its end there. At its end a folded toolbar stays
+ * folded, as the page has gone nowhere the finger took it: the end itself moves up when the
+ * browser's bar hides or a card leaves the bottom lane, and the scroll with it.
  */
-export function toolbarScroll(state: ToolbarScroll, y: number): ToolbarScroll {
+export function toolbarScroll(state: ToolbarScroll, at: number, end = Number.POSITIVE_INFINITY): ToolbarScroll {
+  const y = Math.min(at, end)
   if (y <= TOP) return !state.collapsed && state.ref === y ? state : { collapsed: false, ref: y }
   if (state.collapsed) {
+    if (y >= end - END) return state.ref === y ? state : { collapsed: true, ref: y }
     if (y <= state.ref - TURN) return { collapsed: false, ref: y }
     return y > state.ref ? { collapsed: true, ref: y } : state
   }
@@ -48,15 +57,19 @@ export interface FilterState {
   lanes: readonly string[]
   /** The profile on show, by name; null for all profiles (or no profile switch). */
   profile: string | null
+  /** The device on show, by name (#502); null or absent for all devices (or no device switch). */
+  device?: string | null | undefined
   /** The search text, trimmed. */
   query: string
 }
 
-/** How many filters are on: lanes, profile, search, each one. */
+/** How many filters are on: lanes, profile, device, search, each one. */
 export const filterCount = (f: FilterState): number =>
-  (f.lanes.length ? 1 : 0) + (f.profile ? 1 : 0) + (f.query ? 1 : 0)
+  (f.lanes.length ? 1 : 0) + (f.profile ? 1 : 0) + (f.device ? 1 : 0) + (f.query ? 1 : 0)
 
 /** The filters in words for a button's name: "Alpha, Beta · Work · “text”"; none: the empty string. */
 export function filterText(f: FilterState): string {
-  return [f.lanes.join(', '), f.profile ?? '', f.query ? `“${f.query}”` : ''].filter(Boolean).join(' · ')
+  return [f.lanes.join(', '), f.profile ?? '', f.device ?? '', f.query ? `“${f.query}”` : '']
+    .filter(Boolean)
+    .join(' · ')
 }

@@ -678,6 +678,18 @@ function checkStore(sink: StoreSink, params: Record<string, string>, asked: Secr
   return { ok: true, params: kept, fields }
 }
 
+/**
+ * The fields of a secret the owner gives `sink` with no request (docs/design/nodes 10, item 3: a
+ * node's git credentials, a key an MCP server reads): those its template names, masked, `once` as
+ * the sink says. A sink without a template (Bitwarden, a user variable) and one that takes
+ * parameters need a request to name them.
+ */
+export function givenFields(sink: Sink): RequestCheck {
+  if (!sink.fields || Object.keys(sink.params).length)
+    return { ok: false, error: 'secret.err.given', vars: { sink: sink.id } }
+  return checkRequest(sink, {}, [])
+}
+
 /** What a typed value may not be for this sink and field: a key of the reason, or null. */
 export function valueProblem(sink: Sink, field: string, value: string): string | null {
   if (sink.kind === 'bitwarden') return null
@@ -810,6 +822,9 @@ export const WRITING_MS = 8 * 60_000
 export const MAX_PENDING = 5
 const KEPT_MS = 24 * 3_600_000
 const KEPT_MAX = 20
+/** Asks a card may make in ASK_WINDOW_MS, settled or not (#275): counted from the KEPT_MAX the card keeps. */
+export const MAX_ASKS = Math.min(10, KEPT_MAX)
+export const ASK_WINDOW_MS = 10 * 60_000
 
 /** `30m`, `2h`, `90s`, `1d`: ms, between a minute and a day; null for anything else. */
 export function parseExpires(text: string): number | null {

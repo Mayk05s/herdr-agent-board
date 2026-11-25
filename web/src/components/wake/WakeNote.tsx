@@ -3,7 +3,7 @@
 // opens Settings → Sleep and wake…. Only where that panel can change it (offersWakeSettings: the
 // computer's own page, the board's own server's); never on a phone or through a PC's tunnel.
 import { useT } from '../../i18n/I18nProvider.tsx'
-import { remotePage } from '../../models/remote-page.ts'
+import { adminHere } from '../../models/remote-page.ts'
 import { offersWakeSettings } from '../../models/settings-menu.ts'
 import { isWakeView, noteShown } from '../../models/wake.ts'
 import { useBoardContext } from '../../state/BoardProvider.tsx'
@@ -11,7 +11,7 @@ import { useBoardContext } from '../../state/BoardProvider.tsx'
 export function WakeNote({ onOpen }: { onOpen(): void }) {
   const t = useT()
   const { data, now } = useBoardContext()
-  if (!offersWakeSettings(remotePage(), data) || !noteShown(isWakeView(data?.wake) ? data.wake : undefined, now))
+  if (!offersWakeSettings(!adminHere(), data) || !noteShown(isWakeView(data?.wake) ? data.wake : undefined, now))
     return null
   return (
     <button

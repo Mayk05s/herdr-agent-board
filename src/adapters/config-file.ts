@@ -7,8 +7,11 @@
 import { existsSync, mkdirSync, statSync, watch } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
+import { BG_TASK_STUCK_DEFAULT_MIN, BG_TASK_STUCK_MAX_MIN } from '../core/bg-task.ts'
 import { builtinTitle, DEFAULT_CONFIG, normalizeConfig, validColor } from '../core/categories.ts'
 import { limitText, parseCompactLimit } from '../core/compact.ts'
+import { decisionsConfig } from '../core/decisions.ts'
+import { switched, withField } from '../core/feature-switch.ts'
 import { isFoldMode } from '../core/fold-mode.ts'
 import { LANGUAGES } from '../core/i18n/translator.ts'
 import { t, useLanguage } from '../core/lang.ts'
@@ -26,6 +29,7 @@ import {
   resolveProfileDir,
   shownProfiles,
 } from '../core/profiles.ts'
+import { autoUpdateConfig, isEvery, isTimeOfDay } from '../core/self-update.ts'
 import type { Admin } from '../core/server-admin.ts'
 import type { SetupCase } from '../core/server-plan.ts'
 import { projectKey } from '../core/time.ts'
@@ -33,7 +37,20 @@ import { isTodoMode } from '../core/todos.ts'
 import { fieldProblem, type TunnelField } from '../core/tunnel.ts'
 import type { Category, Config } from '../core/types.ts'
 import { wakeConfig } from '../core/wake/config.ts'
-import { isThreadMode, type ThreadMode, threadsConfig, threadsSetting } from '../core/work-threads.ts'
+import {
+  applyVerifyPatch,
+  isThreadMode,
+  parseVerifyPatch,
+  type ThreadMode,
+  threadsConfig,
+  threadsParts,
+  threadsSetting,
+  VERIFY_LIMIT_MIN,
+  VERIFY_MAX,
+  type VerifySettingsPatch,
+  type VerifySettingsView,
+  verifySettingsOf,
+} from '../core/work-threads.ts'
 import { allCards, writeCard } from './cards.ts'
 import { isRecord, readJson, replaceFile, withLock } from './json-store.ts'
 import { configDir } from './paths.ts'
@@ -90,6 +107,20 @@ function editConfig(change: (raw: Raw) => EditResult): EditResult {
   }
 }
 
+/**
+ * The board's slice a master's bundle carries (#506, docs/design/nodes 7.2): `change` gets the file
+ * as it is (the defaults when there is none) and returns it with the master's keys; written whole
+ * under the lock. A file that does not parse is left as it is, as every edit leaves it.
+ */
+export function editNodeSlice(change: (raw: Raw) => Raw): EditResult {
+  return editConfig(raw => {
+    const next = change(raw)
+    for (const key of Object.keys(raw)) delete raw[key]
+    Object.assign(raw, next)
+    return { ok: true }
+  })
+}
+
 export function loadConfig(): Config {
   const raw = readConfigFile()
   if (!raw && !existsSync(configFile())) {
@@ -109,6 +140,21 @@ export function loadConfig(): Config {
 export function setRemoteOn(on: boolean): EditResult {
   return editConfig(raw => {
     raw.remote = { ...(isRecord(raw.remote) ? raw.remote : {}), on }
+    return { ok: true }
+  })
+}
+
+/**
+ * Turn headless master owner-admin access (core/remote.ts `remote.ownerAdmin`, #694) on or off in
+ * config.json, keeping the rest of `remote`. Off omits the key so default configs stay clean.
+ */
+export function setRemoteOwnerAdmin(on: boolean): EditResult {
+  return editConfig(raw => {
+    const remote: Raw = isRecord(raw.remote) ? { ...raw.remote } : raw.remote === true ? { on: true } : {}
+    if (on) remote.ownerAdmin = true
+    else delete remote.ownerAdmin
+    if (Object.keys(remote).length) raw.remote = remote
+    else delete raw.remote
     return { ok: true }
   })
 }
@@ -243,7 +289,7 @@ export function setServerMode(mode: { domain: string; socket: string } | null): 
   })
 }
 
-/** Change settings in config.json from the web board: { language, foldWaiting }. */
+/** Change settings in config.json from the web board: { language, foldWaiting, compactAt, turnResume, bgTaskStuckMin }. */
 export function editSettings(body: unknown): EditResult {
   return editConfig(raw => {
     const language = isRecord(body) ? body.language : undefined
@@ -269,6 +315,35 @@ export function editSettings(body: unknown): EditResult {
       const next = limit ? { ...rest, at: limitText(limit) } : rest
       if (Object.keys(next).length) raw.compact = next
       else delete raw.compact
+    }
+    // Continue mid-turn Claude sessions after a restart (#633): on by default, false when off.
+    const turnResume = isRecord(body) ? body.turnResume : undefined
+    if (turnResume !== undefined) {
+      if (typeof turnResume !== 'boolean') return { ok: false, error: t('err.turnResume') }
+      const { on: _was, ...rest } = isRecord(raw.turnResume) ? raw.turnResume : {}
+      if (turnResume) {
+        if (Object.keys(rest).length) raw.turnResume = rest
+        else delete raw.turnResume
+      } else {
+        raw.turnResume = Object.keys(rest).length ? { ...rest, on: false } : false
+      }
+    }
+    const bgTaskStuckMin = isRecord(body) ? body.bgTaskStuckMin : undefined
+    if (bgTaskStuckMin !== undefined) {
+      if (bgTaskStuckMin === '' || bgTaskStuckMin === null) {
+        delete raw.bgTaskStuckMin
+      } else if (
+        typeof bgTaskStuckMin !== 'number' ||
+        !Number.isInteger(bgTaskStuckMin) ||
+        bgTaskStuckMin < 0 ||
+        bgTaskStuckMin > BG_TASK_STUCK_MAX_MIN
+      ) {
+        return { ok: false, error: t('err.bgTaskStuckMin', { max: BG_TASK_STUCK_MAX_MIN }) }
+      } else if (bgTaskStuckMin === BG_TASK_STUCK_DEFAULT_MIN) {
+        delete raw.bgTaskStuckMin
+      } else {
+        raw.bgTaskStuckMin = bgTaskStuckMin
+      }
     }
     return { ok: true }
   })
@@ -336,30 +411,213 @@ export function editTodos(body: unknown): EditResult {
 }
 
 /**
- * Threads (#410) from Settings → Threads: { mode?: 'none' | 'mine' | 'agents', share?: boolean }
- * into config.json's `threads` (core/work-threads.ts threadsSetting): none deletes the key (the
- * stored threads stay), mine is `{ agents: false }`, agents `true`, the section's other fields
- * kept. `share` alone is refused while threads are off. `on` says whether they are on after it.
- * The running board picks the change up as any edit (liveConfig).
+ * Read `threads.verify` settings from config.json on disk (or `fallback` when config.json is not on
+ * disk yet), for `GET /api/threads-settings` (#680).
+ */
+export function readThreadsSettings(fallback?: unknown): VerifySettingsView {
+  const raw = readConfigFile()
+  const rawThreads = raw ? raw.threads : fallback
+  const threadsOn = threadsConfig(rawThreads) !== null
+  const rawVerify = isRecord(rawThreads) ? rawThreads.verify : undefined
+  return {
+    threadsOn,
+    verify: {
+      ...verifySettingsOf(rawVerify),
+      defaults: { limitMin: VERIFY_LIMIT_MIN, max: VERIFY_MAX },
+    },
+  }
+}
+
+/**
+ * Threads (#410) from Settings → Threads: { mode?: 'none' | 'mine' | 'agents', share?: boolean,
+ * cases?: boolean, verify?: boolean, verifySettings?: VerifySettingsPatch } into config.json's
+ * `threads` (core/work-threads.ts threadsSetting): none deletes the key (the stored threads stay),
+ * mine is `{ agents: false }`, agents `true`, the section's other fields kept. Case files and
+ * verified done (#596, threadsParts) are `cases` and `verify`, verify's settings kept while it is
+ * off; `verifySettings` (#680) updates or clears individual `threads.verify` fields while keeping
+ * unknown keys and off-state. `share`, `cases`, `verify`, and `verifySettings` without a mode are
+ * refused while threads are off. `on` says whether they are on after it. The running board picks
+ * the change up as any edit (liveConfig).
  */
 export function editThreads(body: unknown): EditResult & { on?: boolean } {
   const b: Raw = isRecord(body) ? body : {}
   const change: { mode?: ThreadMode; share?: boolean } = {}
+  const parts: { cases?: boolean; verify?: boolean } = {}
   if (isThreadMode(b.mode)) change.mode = b.mode
   else if (b.mode !== undefined) return { ok: false, error: t('thread.err.mode') }
   if (typeof b.share === 'boolean') change.share = b.share
   else if (b.share !== undefined) return { ok: false, error: t('thread.err.mode') }
-  if (change.mode === undefined && change.share === undefined) return { ok: false, error: t('thread.err.mode') }
+  for (const part of ['cases', 'verify'] as const) {
+    if (typeof b[part] === 'boolean') parts[part] = b[part]
+    else if (b[part] !== undefined) return { ok: false, error: t('thread.err.mode') }
+  }
+  let verifyPatch: VerifySettingsPatch | undefined
+  if (b.verifySettings !== undefined) {
+    const parsed = parseVerifyPatch(b.verifySettings)
+    if (!parsed.ok) return { ok: false, error: t(`verify.err.${parsed.field}`) }
+    verifyPatch = parsed.patch
+  }
+  const touched = change.mode !== undefined || change.share !== undefined
+  if (!touched && parts.cases === undefined && parts.verify === undefined && verifyPatch === undefined)
+    return { ok: false, error: t('thread.err.mode') }
   let on = false
   const r = editConfig(raw => {
     if (change.mode === undefined && !threadsConfig(raw.threads)) return { ok: false, error: t('thread.err.off') }
-    const next = threadsSetting(raw.threads, change)
+    let next = touched ? threadsSetting(raw.threads, change) : raw.threads
+    if (next !== undefined) {
+      if (verifyPatch !== undefined) {
+        if (parts.cases !== undefined) next = threadsParts(next, { cases: parts.cases })
+        next = applyVerifyPatch(next, verifyPatch, parts.verify)
+      } else if (parts.cases !== undefined || parts.verify !== undefined) {
+        next = threadsParts(next, parts)
+      }
+    }
     if (next === undefined) delete raw.threads
     else raw.threads = next
     on = threadsConfig(next) !== null
     return { ok: true }
   })
   return r.ok ? { ok: true, on } : r
+}
+
+/** The switches `editFeatures` takes (#596). */
+export const FEATURE_SWITCHES = ['watches', 'decisions', 'decisionsDefaults', 'journal'] as const
+
+/**
+ * Watches (#486), decisions (#487) and the away journal (#489) from Settings (#596): { watches?,
+ * decisions?, decisionsDefaults?, journal? }, each a boolean, into config.json's key of that name
+ * (core/feature-switch.ts switched): on is `true` or the section as it was, off takes the key out or
+ * keeps the section's own fields (`returnMinutes`, `defaults`) under `"on": false`. Defaults not
+ * allowed is `decisions.defaults: false`, allowed takes it out; refused while decisions are off. A
+ * value of the wrong kind, or none given, refuses the whole edit and nothing is written. The running
+ * board picks the change up as any edit (liveConfig).
+ */
+export function editFeatures(body: unknown): EditResult {
+  const b: Raw = isRecord(body) ? body : {}
+  const given = FEATURE_SWITCHES.filter(k => b[k] !== undefined)
+  if (!given.length || given.some(k => typeof b[k] !== 'boolean')) return { ok: false, error: t('feature.err.setting') }
+  return editConfig(raw => {
+    for (const key of ['watches', 'decisions', 'journal'] as const) {
+      if (typeof b[key] !== 'boolean') continue
+      const next = switched(raw[key], b[key])
+      if (next === undefined) delete raw[key]
+      else raw[key] = next
+    }
+    if (typeof b.decisionsDefaults === 'boolean') {
+      if (!decisionsConfig(raw.decisions)) return { ok: false, error: t('feature.err.decisionsOff') }
+      raw.decisions = withField(raw.decisions, 'defaults', b.decisionsDefaults ? undefined : false)
+    }
+    return { ok: true }
+  })
+}
+
+/**
+ * The board's update of itself from git (#617, core/self-update.ts), from Settings → Updates…: { on?,
+ * every?, at? } into config.json's `autoUpdate`. On and off as the feature switches go (#596): on is
+ * `true` or the section, off keeps `every` and `at` under `"on": false` and takes the key out
+ * when there are none. A value of the wrong kind refuses the whole edit.
+ */
+export function editAutoUpdate(body: unknown): EditResult {
+  const b: Raw = isRecord(body) ? body : {}
+  const bad =
+    (b.on !== undefined && typeof b.on !== 'boolean') ||
+    (b.every !== undefined && !isEvery(b.every)) ||
+    (b.at !== undefined && !isTimeOfDay(b.at)) ||
+    (b.on === undefined && b.every === undefined && b.at === undefined)
+  if (bad) return { ok: false, error: t('selfUpdate.err.setting') }
+  return editConfig(raw => {
+    const on = typeof b.on === 'boolean' ? b.on : autoUpdateConfig(raw.autoUpdate).on
+    const { on: _was, ...own }: Raw = isRecord(raw.autoUpdate) ? raw.autoUpdate : {}
+    if (b.every !== undefined) own.every = b.every
+    if (b.at !== undefined) own.at = b.at
+    const fields = Object.keys(own).length > 0
+    if (on) raw.autoUpdate = fields ? own : true
+    else if (fields) raw.autoUpdate = { ...own, on: false }
+    else delete raw.autoUpdate
+    return { ok: true }
+  })
+}
+
+/**
+ * Node housekeeping (#652, core/housekeeping.ts), from Settings → Housekeeping…:
+ * `{ memory?: { on?, warnMb?, actionMb?, exclude? }, tabs?: { on?, idleMinutes?, intervalMin?, mokutabPort? } }`.
+ * Off by default; a value of the wrong type refuses the whole edit and writes nothing.
+ */
+export function editHousekeeping(body: unknown): EditResult {
+  const b: Raw = isRecord(body) ? body : {}
+  const memIn = b.memory === undefined ? null : isRecord(b.memory) ? b.memory : false
+  const tabsIn = b.tabs === undefined ? null : isRecord(b.tabs) ? b.tabs : false
+  if (memIn === false || tabsIn === false || (!memIn && !tabsIn))
+    return { ok: false, error: 'housekeeping: invalid settings' }
+  const optInt = (v: unknown, min: number, max: number): boolean =>
+    v === undefined || v === null || (typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max)
+  if (memIn) {
+    if (
+      (memIn.on !== undefined && typeof memIn.on !== 'boolean') ||
+      !optInt(memIn.warnMb, 256, 1_048_576) ||
+      !optInt(memIn.actionMb, 256, 1_048_576) ||
+      (memIn.notifyTo !== undefined && memIn.notifyTo !== null && typeof memIn.notifyTo !== 'string') ||
+      (memIn.exclude !== undefined &&
+        (!Array.isArray(memIn.exclude) || !memIn.exclude.every(x => typeof x === 'string')))
+    )
+      return { ok: false, error: 'housekeeping: invalid memory guard settings' }
+    if (typeof memIn.warnMb === 'number' && typeof memIn.actionMb === 'number' && memIn.warnMb < memIn.actionMb)
+      return { ok: false, error: 'housekeeping: warning threshold must be at least the action threshold' }
+  }
+  if (tabsIn) {
+    if (
+      (tabsIn.on !== undefined && typeof tabsIn.on !== 'boolean') ||
+      !optInt(tabsIn.idleMinutes, 5, 10_080) ||
+      !optInt(tabsIn.intervalMin, 5, 1440) ||
+      !optInt(tabsIn.mokutabPort, 1, 65535)
+    )
+      return { ok: false, error: 'housekeeping: invalid tab sweep settings' }
+  }
+  return editConfig(raw => {
+    const prev: Raw = isRecord(raw.housekeeping) ? structuredClone(raw.housekeeping) : {}
+    if (memIn) {
+      const m: Raw = isRecord(prev.memory) ? { ...prev.memory } : {}
+      if (typeof memIn.on === 'boolean') {
+        if (memIn.on) m.on = true
+        else delete m.on
+      }
+      if (memIn.warnMb === null) delete m.warnMb
+      else if (typeof memIn.warnMb === 'number') m.warnMb = memIn.warnMb
+      if (memIn.actionMb === null) delete m.actionMb
+      else if (typeof memIn.actionMb === 'number') m.actionMb = memIn.actionMb
+      if (memIn.notifyTo === null) delete m.notifyTo
+      else if (typeof memIn.notifyTo === 'string') {
+        const clean = memIn.notifyTo.trim().slice(0, 120)
+        if (clean) m.notifyTo = clean
+        else delete m.notifyTo
+      }
+      if (Array.isArray(memIn.exclude)) {
+        const clean = memIn.exclude.map(x => String(x).trim()).filter(Boolean)
+        if (clean.length) m.exclude = clean
+        else delete m.exclude
+      }
+      if (Object.keys(m).length) prev.memory = m
+      else delete prev.memory
+    }
+    if (tabsIn) {
+      const tb: Raw = isRecord(prev.tabs) ? { ...prev.tabs } : {}
+      if (typeof tabsIn.on === 'boolean') {
+        if (tabsIn.on) tb.on = true
+        else delete tb.on
+      }
+      if (tabsIn.idleMinutes === null) delete tb.idleMinutes
+      else if (typeof tabsIn.idleMinutes === 'number') tb.idleMinutes = tabsIn.idleMinutes
+      if (tabsIn.intervalMin === null) delete tb.intervalMin
+      else if (typeof tabsIn.intervalMin === 'number') tb.intervalMin = tabsIn.intervalMin
+      if (tabsIn.mokutabPort === null) delete tb.mokutabPort
+      else if (typeof tabsIn.mokutabPort === 'number') tb.mokutabPort = tabsIn.mokutabPort
+      if (Object.keys(tb).length) prev.tabs = tb
+      else delete prev.tabs
+    }
+    if (Object.keys(prev).length) raw.housekeeping = prev
+    else delete raw.housekeeping
+    return { ok: true }
+  })
 }
 
 /**
@@ -843,6 +1101,38 @@ export function saveFoundProfiles(inheritedDir: string, home: string = homedir()
     if (configBusy(err)) return false
     throw err
   }
+}
+
+/**
+ * Change config.json's `nodes` (#496): `change` gets the section as it is on disk and says whether
+ * it changed it; nothing is written when it did not. A file that does not parse is refused and
+ * left as it is (#167), as every edit here; so is a file without `nodes`, which this never adds.
+ */
+export function editNodes(change: (nodes: Record<string, unknown>) => boolean): EditResult {
+  let changed = false
+  const r = editConfig(raw => {
+    if (!isRecord(raw.nodes)) return { ok: false, error: 'nodes' }
+    changed = change(raw.nodes)
+    return changed ? { ok: true } : { ok: false, error: 'unchanged' }
+  })
+  return r.ok || (!r.ok && r.error === 'unchanged') ? { ok: true } : r
+}
+
+/**
+ * Change config.json's `nodes`, making the section when there is none (#509): "Add a server" on a
+ * board without devices makes it a master. `change` gets the section (an empty one when there was
+ * none, `had` false) and says whether it changed it; nothing is written when it did not. A file
+ * that does not parse is refused and left as it is, as every edit here.
+ */
+export function editNodesAdding(change: (nodes: Record<string, unknown>, had: boolean) => boolean): EditResult {
+  const r = editConfig(raw => {
+    const had = isRecord(raw.nodes)
+    const nodes: Record<string, unknown> = had ? (raw.nodes as Record<string, unknown>) : {}
+    if (!change(nodes, had)) return { ok: false, error: 'unchanged' }
+    raw.nodes = nodes
+    return { ok: true }
+  })
+  return r.ok || (!r.ok && r.error === 'unchanged') ? { ok: true } : r
 }
 
 /** A config edit that must go through, for a caller with no answer of its own to give: a refusal thrown, its words the message. */

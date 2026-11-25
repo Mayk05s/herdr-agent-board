@@ -6,11 +6,13 @@
 // session, another dialog, or a question already answered; anything unexpected stops it and the
 // user is told where it stopped.
 
+import { createHash } from 'node:crypto'
 import { readCard } from '../adapters/cards.ts'
 import { agentGet, herdr, herdrText } from '../adapters/herdr.ts'
 import { isRecord } from '../adapters/json-store.ts'
+import { CODEX_AGENT, isCodexItem } from '../core/codex.ts'
 import { inputDraft } from '../core/dialogs/input-box.ts'
-import { piEditor } from '../core/dialogs/pi-dialogs.ts'
+import { piAbove, piEditor } from '../core/dialogs/pi-dialogs.ts'
 import type { FormQuestion } from '../core/dialogs/question-form.ts'
 import {
   type AnswerPick,
@@ -66,7 +68,7 @@ export interface Step {
 /** `step` is set unless herdr failed (reason 'herdr'), which sets `why` instead. */
 export interface DriveFailure {
   ok: false
-  reason: 'changed' | 'stuck' | 'cut' | 'review' | 'unconfirmed' | 'herdr'
+  reason: 'changed' | 'stuck' | 'cut' | 'review' | 'unconfirmed' | 'same' | 'herdr'
   step?: Step
   why?: string
   screen: string
@@ -95,7 +97,7 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
 /** A step that did not end as expected: why, the step, and the screen it ended on. */
 class Stop extends Error {
   constructor(
-    readonly reason: 'changed' | 'stuck' | 'cut' | 'review' | 'unconfirmed',
+    readonly reason: 'changed' | 'stuck' | 'cut' | 'review' | 'unconfirmed' | 'same',
     readonly step: Step,
     readonly screen = '',
   ) {
@@ -184,6 +186,12 @@ const PI_SCREEN: Reader = { parse: screen => parseDialog(screen, PI_AGENT), idle
  * transcript has the answer (io.answered, when the caller can tell), or two reads in a row show
  * the agent's input box with no dialog, or a whole other dialog. `ours(dialog)`: the dialog is
  * still the one answered. Throws Stop('unconfirmed') after `timeout` ms.
+ *
+ * With `again` (pi's dialogs, #153), the same dialog back on the screen counts too, once the screen
+ * shows the answer went in: one read of the agent's input box in between, or `again`
+ * holds for the dialog as drawn now (its cursor or field not as the keys left it, the
+ * conversation above it moved on). A session that asks the same thing again at once draws a
+ * dialog with the same fingerprint. Still the same dialog at the end: Stop('same').
  */
 async function settled(
   io: DriveIO,
@@ -191,16 +199,21 @@ async function settled(
   step: Step,
   { timeout = 5000, every = 100 }: Timing = {},
   { parse, idle }: Reader = CLAUDE_SCREEN,
+  again?: (d: Dialog, screen: string) => boolean,
 ): Promise<void> {
   const end = Date.now() + timeout
   let streak = 0
+  let between = false
   for (;;) {
     if (io.answered && (await io.answered())) return
     const screen = await io.read()
     const d = parse(screen)
-    streak = !ours(d) && (d || idle(screen)) ? streak + 1 : 0
+    if (again && d && ours(d) && (between || again(d, screen))) return
+    const other = !ours(d) && !!(d || idle(screen))
+    between ||= !d && idle(screen)
+    streak = other ? streak + 1 : 0
     if (streak >= 2) return
-    if (Date.now() > end) throw new Stop('unconfirmed', step, screen)
+    if (Date.now() > end) throw new Stop(again && ours(d) ? 'same' : 'unconfirmed', step, screen)
     await sleep(every)
   }
 }
@@ -411,6 +424,12 @@ export async function drivePermission({
   }
 }
 
+/** The conversation above pi's dialog is not what it was (`before`: piAbove of the screen before the key). */
+function movedOn(before: string | null, screen: string): boolean {
+  const above = piAbove(screen)
+  return before !== null && above !== null && above !== before
+}
+
 /**
  * Picks option `n` of pi's menu whose fingerprint the user saw: no digit picks there, so the
  * cursor goes one row at a time, and every key waits for the screen to show the same menu with
@@ -441,8 +460,17 @@ export async function driveSelect({
       d = await until(io, x => ours(x) && x.cursor === to, step, timing, PI_SCREEN.parse)
       at = to
     }
+    const before = piAbove(seen.screen)
     await io.keys('enter')
-    await settled(io, ours, step, timing, PI_SCREEN)
+    // The same menu again: the cursor where pi puts it on a new menu, or the conversation moved on.
+    await settled(
+      io,
+      ours,
+      step,
+      timing,
+      PI_SCREEN,
+      (x, screen) => (x.kind === 'select' && x.cursor !== n) || movedOn(before, screen),
+    )
     return { ok: true }
   } catch (err) {
     return err instanceof Stop ? stopped(err, seen) : broken(err, seen)
@@ -484,8 +512,17 @@ export async function driveInput({
     }
     await io.text(text)
     await until(io, x => ours(x) && fieldHolds(x.value, text), step, timing, PI_SCREEN.parse)
+    const before = piAbove(seen.screen)
     await io.keys('enter')
-    await settled(io, ours, step, timing, PI_SCREEN)
+    // The same input again: its field without the text, or the conversation moved on.
+    await settled(
+      io,
+      ours,
+      step,
+      timing,
+      PI_SCREEN,
+      (x, screen) => (x.kind === 'input' && !fieldHolds(x.value, text)) || movedOn(before, screen),
+    )
     return { ok: true }
   } catch (err) {
     return err instanceof Stop ? stopped(err, seen) : broken(err, seen)
@@ -551,9 +588,11 @@ function failure(item: Item, r: DriveFailure): AnswerResult {
         ? t('err.qa.review', { name })
         : r.reason === 'unconfirmed'
           ? t('err.qa.unconfirmed', { name })
-          : r.reason === 'cut'
-            ? t('err.qa.cut', { name, step })
-            : t('err.qa.stuck', { name, step })
+          : r.reason === 'same'
+            ? t('err.qa.same', { name })
+            : r.reason === 'cut'
+              ? t('err.qa.cut', { name, step })
+              : t('err.qa.stuck', { name, step })
   return { ok: false, error, stopped: r.sent > 0, screen: tail(r.screen) }
 }
 
@@ -625,8 +664,75 @@ export async function answerPermission(
   const n = Number(body.option)
   if (!Number.isInteger(n) || n < 1 || n > 9 || typeof body.fingerprint !== 'string')
     return { ok: false, error: t('err.qa.invalid') }
+  if (isCodexItem(item)) {
+    const identity = await codexApprovalIdentity(item)
+    if (!identity) return { ok: false, gone: true, error: t('err.qa.notWaiting', { name: item.name }) }
+    const r = await driveCodexPermission(
+      body.fingerprint,
+      n,
+      io,
+      identity,
+      async () => (await codexApprovalIdentity(item)) === identity,
+    )
+    return r.ok ? { ok: true } : failure(item, r)
+  }
   const bad = await checkPane(item)
   if (bad) return bad
   const r = await drivePermission({ fingerprint: body.fingerprint, n, io })
   return r.ok ? { ok: true } : failure(item, r)
+}
+
+/** Herdr's terminal and state transition identify this request even before Codex reports a session ID. */
+export async function codexApprovalIdentity(item: Item): Promise<string | null> {
+  if (!item.pane || item.sleeping) return null
+  try {
+    const result = await herdr(['agent', 'get', item.pane], 5000)
+    const agent = isRecord(result) ? result.agent : null
+    if (
+      !isRecord(agent) ||
+      agent.agent !== CODEX_AGENT ||
+      agent.agent_status !== 'blocked' ||
+      typeof agent.terminal_id !== 'string' ||
+      !Number.isSafeInteger(agent.state_change_seq)
+    )
+      return null
+    const session = isRecord(agent.agent_session) ? agent.agent_session.value : null
+    if ((session ?? null) !== item.session) return null
+    return JSON.stringify([item.pane, agent.terminal_id, agent.state_change_seq, session])
+  } catch {
+    return null
+  }
+}
+
+export const codexApprovalFingerprint = (identity: string, fingerprint: string): string =>
+  createHash('sha256')
+    .update(JSON.stringify([identity, fingerprint]))
+    .digest('hex')
+
+/** Codex's explicit shortcuts approve once or cancel. The persistent approval is never exposed. */
+export async function driveCodexPermission(
+  fingerprint: string,
+  n: number,
+  raw: DriveIO,
+  identity: string,
+  stillCurrent: () => Promise<boolean>,
+): Promise<DriveResult> {
+  const { io, seen } = counted(raw)
+  const parse = (screen: string) => parseDialog(screen, CODEX_AGENT)
+  const ours = (d: Dialog | null): d is PermissionDialog =>
+    d?.kind === 'permission' && codexApprovalFingerprint(identity, d.fingerprint) === fingerprint
+  const step = { what: 'option', n }
+  try {
+    const d = parse(await io.read())
+    if (!ours(d) || !d.options.some(o => o.n === n) || !(await stillCurrent()))
+      return { ok: false, reason: 'changed', step, screen: seen.screen, sent: 0 }
+    await io.keys(n === 1 ? 'y' : 'esc')
+    await settled(io, ours, step, undefined, {
+      parse,
+      idle: screen => !!screen.trim() && !screen.includes('Would you like to run the following command?'),
+    })
+    return { ok: true }
+  } catch (err) {
+    return err instanceof Stop ? stopped(err, seen) : broken(err, seen)
+  }
 }

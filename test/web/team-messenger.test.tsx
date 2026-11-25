@@ -17,6 +17,7 @@ import {
   bubbleTime,
   chatItems,
   deliveryOf,
+  draftWhen,
   firstUnread,
   fullWhen,
   GROUP_MS,
@@ -28,6 +29,7 @@ import {
 import { board, renderInBoard } from './support/board.tsx'
 import { findAll, hasClass, type Node } from './support/markup.ts'
 import { type Host, hostElements } from './support/react-events.ts'
+import { inZone } from './support/zone.ts'
 
 const en = translator('en')
 const ru = translator('ru')
@@ -57,17 +59,6 @@ const mine = (id: string, ts: string, over: Partial<ThreadLine> = {}): ThreadLin
 })
 const days = (lines: ThreadLine[], t = en, now = NOW) =>
   chatItems(lines, { t, now }).flatMap(i => (i.kind === 'day' ? [i.label] : []))
-
-/** In another time zone for the length of `fn`. */
-function inZone<T>(zone: string, fn: () => T): T {
-  const was = process.env.TZ
-  process.env.TZ = zone
-  try {
-    return fn()
-  } finally {
-    process.env.TZ = was ?? 'UTC'
-  }
-}
 
 describe('days and times, on a fixed clock', () => {
   const LINES = [
@@ -114,6 +105,53 @@ describe('days and times, on a fixed clock', () => {
       expect(listWhen('2025-12-31T08:05:00Z', en, NOW)).toBe('Dec 31, 2025')
       expect(listWhen('2026-11-10T08:05:00Z', ru, NOW)).toBe('Вчера')
     })
+  })
+
+  test('a draft’s time (#465): the time today, else the day and the time, so one earlier day’s drafts differ', () => {
+    inZone('UTC', () => {
+      const list = [
+        '2026-11-11T08:05:00Z',
+        '2026-11-10T08:05:00Z',
+        '2026-11-10T18:40:00Z',
+        '2026-11-08T08:05:00Z',
+        '2026-11-05T08:05:00Z',
+        '2026-11-04T08:05:00Z',
+        '2026-10-22T08:05:00Z',
+        '2026-10-22T16:30:00Z',
+        '2025-12-31T08:05:00Z',
+        // A clock a little ahead: tomorrow is the bare time as in the list, further on a date.
+        '2026-11-12T08:05:00Z',
+        '2026-11-13T08:05:00Z',
+      ]
+      expect(list.map(ts => plain(draftWhen(ts, en, NOW)))).toEqual([
+        '8:05 AM',
+        'Yesterday 8:05 AM',
+        'Yesterday 6:40 PM',
+        'Sun 8:05 AM',
+        'Thu 8:05 AM',
+        'Nov 4, 8:05 AM',
+        'Oct 22, 8:05 AM',
+        'Oct 22, 4:30 PM',
+        'Dec 31, 2025, 8:05 AM',
+        '8:05 AM',
+        'Nov 13, 8:05 AM',
+      ])
+      expect(draftWhen('2026-11-10T08:05:00Z', ru, NOW)).toBe('Вчера 8:05')
+      expect(draftWhen('2026-10-22T08:05:00Z', ru, NOW)).toBe('22 окт., 8:05')
+    })
+  })
+
+  test('a draft’s time around midnight goes by the board’s time zone: UTC and Dubai disagree on the day', () => {
+    const pair = (now: string, zone: string) =>
+      inZone(zone, () =>
+        ['2026-11-10T23:50:00Z', '2026-11-11T00:10:00Z'].map(ts => plain(draftWhen(ts, en, Date.parse(now)))),
+      )
+    // Ten minutes past midnight in UTC: the earlier draft was yesterday. In Dubai both are this morning's.
+    expect(pair('2026-11-11T00:20:00Z', 'UTC')).toEqual(['Yesterday 11:50 PM', '12:10 AM'])
+    expect(pair('2026-11-11T00:20:00Z', 'Asia/Dubai')).toEqual(['3:50 AM', '4:10 AM'])
+    // A day later both are yesterday's in UTC, and still told apart by their times.
+    expect(pair('2026-11-12T00:20:00Z', 'UTC')).toEqual(['Tue 11:50 PM', 'Yesterday 12:10 AM'])
+    expect(pair('2026-11-12T00:20:00Z', 'Asia/Dubai')).toEqual(['Yesterday 3:50 AM', 'Yesterday 4:10 AM'])
   })
 })
 
@@ -545,9 +583,7 @@ describe('scrolling', () => {
 
   /** The line the "new messages" line stands before, or null. */
   const lineAfterUnread = (): string | null => {
-    const kids = scroller()?.childNodes ?? []
-    const at = kids.findIndex(k => k instanceof mini.MiniElement && k.hasAttribute('data-unread-line'))
-    const next = at >= 0 ? kids[at + 1] : undefined
+    const next = all('[data-unread-line]')[0]?.nextSibling
     return next instanceof mini.MiniElement ? next.getAttribute('data-line') : null
   }
 
@@ -606,6 +642,19 @@ describe('scrolling', () => {
     page.unmount()
   })
 
+  test('a late incoming message sorted mid-list while scrolled up still increments the jump count (#686)', async () => {
+    const page = mount()
+    sized()
+    page.draw(<TeamBody {...props()} />)
+    await scrollTo(100)
+    expect(button('team-jump')).toBeDefined()
+    // Delivered late with an earlier timestamp than b2 (08:03:00Z), so it lands mid-array.
+    const late = msg('late-1', '2026-11-11T08:01:30Z', { from: BEN, who: 'ben', text: 'late arrival' })
+    page.draw(<TeamBody {...props({ lines: [...CHAT_LINES, late] })} />)
+    expect(button('team-jump')?.textContent).toBe('1')
+    page.unmount()
+  })
+
   test('a click on a quote brings the message answered into view and lights it', () => {
     const page = mount()
     sized()
@@ -642,5 +691,132 @@ describe('the draft, per thread', () => {
     flush(() => d().clear('team/general'))
     expect([d().text('team/general'), d().text(`${ANNA}/general`)]).toEqual(['', 'for anna'])
     page.unmount()
+  })
+})
+
+describe('timeline order, deduplication and day groups (#686)', () => {
+  const CLEO = 'C'.repeat(43)
+
+  test('shuffled messages across days, peers, agents, owner, files and clock formats sort into one timeline with one chip per day', () => {
+    inZone('UTC', () => {
+      const todayNow = Date.parse('2026-11-24T12:00:00Z')
+      const shuffled: ThreadLine[] = [
+        // 15:23 today (with +04:00 offset = 11:23Z)
+        msg('t-1523', '2026-11-24T15:23:00+04:00', { from: BEN, who: 'ben', text: '15:23 ben' }),
+        // Earlier day arriving between today's messages (RFC 2822 format)
+        msg('prev-day', 'Thu, 19 Nov 2026 14:24:00 GMT', { from: CLEO, who: 'cleo', text: 'old message' }),
+        // Agent post at 11:22Z (no fractional seconds)
+        mine('t-1522-agent', '2026-11-24T11:22:00Z', { via: 'agent', agent: 'deploy-bot', text: 'long agent post' }),
+        // File message at 11:21Z
+        msg('t-1521-file', '2026-11-24T11:21:00.000Z', {
+          from: ANNA,
+          who: 'anna',
+          text: '',
+          file: { state: 'ready', name: 'notes.txt', size: 12 },
+        }),
+        // Earlier today message arriving late
+        msg('t-1519', '2026-11-24T11:19:00.000Z', { from: ANNA, who: 'anna', text: '15:19 anna' }),
+        // Another message on Nov 19 arriving at the very end
+        msg('prev-day-2', '2026-11-19T14:25:00.000Z', { from: ANNA, who: 'anna', text: 'old follow-up' }),
+      ]
+      const items = chatItems(shuffled, { t: en, now: todayNow })
+      expect(items.filter(i => i.kind === 'day').map(i => (i as { label: string }).label)).toEqual([
+        'Thursday, November 19',
+        'Today',
+      ])
+      expect(items.filter(i => i.kind === 'msg').map(i => (i as { line: ThreadLine }).line.id)).toEqual([
+        'prev-day',
+        'prev-day-2',
+        't-1519',
+        't-1521-file',
+        't-1522-agent',
+        't-1523',
+      ])
+      expect(firstUnread(shuffled, 1)).toBe('t-1523')
+
+      const nodes = renderInBoard(<TeamBody {...props({ lines: shuffled })} />, board({ now: todayNow }), 'en')
+      const scroller = findAll(nodes, el => hasClass(el, 'team-scroll'))[0]
+      expect(scroller).toBeDefined()
+      if (scroller && scroller.kind === 'element') {
+        // Direct children of .team-scroll are .team-day-group containers, never bare .team-day pills.
+        expect(scroller.children.every(c => c.kind === 'element' && hasClass(c, 'team-day-group'))).toBe(true)
+      }
+      const groups = findAll(nodes, el => hasClass(el, 'team-day-group'))
+      expect(groups.map(g => g.attrs.get('data-day'))).toEqual(['day-2026-11-19', 'day-2026-11-24'])
+      expect(groups.map(g => findAll([g], el => hasClass(el, 'team-msg')).map(m => m.attrs.get('data-line')))).toEqual([
+        ['prev-day', 'prev-day-2'],
+        ['t-1519', 't-1521-file', 't-1522-agent', 't-1523'],
+      ])
+      // Every .team-day chip lives inside its own .team-day-group (one per day, never stacked siblings).
+      expect(findAll(nodes, el => hasClass(el, 'team-day'))).toHaveLength(2)
+    })
+  })
+
+  test('dedupes local echo and hub copy by (dir, id) keeping the settled state, and isolates forged in/out ids', () => {
+    const echo = mine('m1', '2026-11-11T08:01:00Z', { text: 'yes', state: 'queued' })
+    const settled = mine('m1', '2026-11-11T08:01:00Z', { text: 'yes', state: 'acked' })
+    const forgedIn = msg('m1', '2026-11-11T08:02:00Z', { text: 'copied id' })
+    // Settled copy followed by stale queued echo still keeps settled; same-id incoming stays separate.
+    const items = chatItems([settled, echo, forgedIn], { t: en, now: NOW })
+    const rendered = items.filter(i => i.kind === 'msg') as Extract<
+      ReturnType<typeof chatItems>[number],
+      { kind: 'msg' }
+    >[]
+    expect(rendered).toHaveLength(2)
+    expect(rendered[0]?.line).toMatchObject({ dir: 'out', id: 'm1', state: 'acked' })
+    expect(rendered[1]?.line).toMatchObject({ dir: 'in', id: 'm1', text: 'copied id' })
+  })
+
+  test('ties at the exact same UTC instant sort deterministically by id regardless of arrival order', () => {
+    const a = msg('id-a', '2026-11-11T08:00:00.000Z', { from: ANNA, who: 'anna' })
+    const b = msg('id-b', '2026-11-11T12:00:00+04:00', { from: BEN, who: 'ben' })
+    const ids = (list: ThreadLine[]) =>
+      chatItems(list, { t: en, now: NOW })
+        .filter(i => i.kind === 'msg')
+        .map(i => (i as { line: ThreadLine }).line.id)
+    expect(ids([b, a])).toEqual(['id-a', 'id-b'])
+    expect(ids([a, b])).toEqual(['id-a', 'id-b'])
+  })
+
+  test('team.css scopes each sticky day pill inside .team-day-group without relative offsetParent', () => {
+    const css = readFileSync(join(import.meta.dir, '../../web/styles/team.css'), 'utf8')
+    expect(css).toContain('.team-day-group { display: flex; flex-direction: column; min-width: 0; }')
+    expect(css).not.toMatch(/\.team-day-group\s*\{[^}]*position:\s*relative/)
+  })
+
+  test('pair DM, team topic and channel threads keep their headers, members and chronological order', () => {
+    const TOPIC = '0123abcd-4567-49ab-8def-0123456789ab'
+    const CHAN = '89abcdef-0123-4567-89ab-cdef01234567'
+    const pairThread: ThreadView = { ...CHAT, key: `${ANNA}/general`, scope: ANNA, id: 'general', peerName: 'anna' }
+    const topicThread: ThreadView = { ...CHAT, key: `team/${TOPIC}`, id: TOPIC, title: 'Release' }
+    const channelThread: ThreadView = {
+      ...CHAT,
+      key: `team/${CHAN}`,
+      id: CHAN,
+      title: 'Deals',
+      members: [VIEW.me.peer as string, ANNA, BEN],
+    }
+    const shuffled = [
+      msg('m2', '2026-11-11T08:02:00Z', { text: 'second' }),
+      mine('m1', '2026-11-11T08:01:00Z', { text: 'first' }),
+    ]
+    const pairNodes = render(
+      props({ selected: pairThread.key, thread: pairThread, threads: [pairThread], lines: shuffled }),
+    )
+    expect(text(findAll(pairNodes, el => hasClass(el, 'team-thread-title')))).toBe('anna')
+    expect(findAll(pairNodes, el => hasClass(el, 'team-msg')).map(m => m.attrs.get('data-line'))).toEqual(['m1', 'm2'])
+
+    const topicNodes = render(
+      props({ selected: topicThread.key, thread: topicThread, threads: [topicThread], lines: shuffled }),
+    )
+    expect(text(findAll(topicNodes, el => hasClass(el, 'team-thread-title')))).toBe('Release')
+    expect(findAll(topicNodes, el => hasClass(el, 'team-msg')).map(m => m.attrs.get('data-line'))).toEqual(['m1', 'm2'])
+
+    const chanNodes = render(
+      props({ selected: channelThread.key, thread: channelThread, threads: [channelThread], lines: shuffled }),
+    )
+    expect(text(findAll(chanNodes, el => hasClass(el, 'team-thread-title')))).toBe('Deals')
+    expect(text(chanNodes)).toContain('channel with anna, ben')
+    expect(findAll(chanNodes, el => hasClass(el, 'team-msg')).map(m => m.attrs.get('data-line'))).toEqual(['m1', 'm2'])
   })
 })

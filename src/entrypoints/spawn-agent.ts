@@ -6,7 +6,8 @@
 //   spawn-agent --name <Name> --cwd <folder> [--label <tab label>]
 //               [--brief-file <utf-8 file> | --brief <text>] [--workspace <herdr workspace id>]
 //               [--timeout-sec 120] [--session-id <uuid> | --resume <uuid>] [--pane <herdr pane id>]
-//               [--profile <id>] [--model <id or alias>] [--agent claude|pi] [--trust]
+//               [--profile <id>] [--model <id or alias>] [--agent claude|pi|agy|codex] [--trust]
+//               [--effort <level>] [--approval on-request|never] [--sandbox <mode>]   (the last three: codex)
 //   PowerShell-style names work too: -Name, -Cwd, -Label, -BriefFile, -Brief, -Workspace, -TimeoutSec.
 //
 // --resume brings back a session that ended (the board's archive): Claude resumes it by its id, in
@@ -20,6 +21,11 @@
 // prompt) instead of a new tab. --agent pi starts pi instead: `launch.pi` (default: pi) is typed,
 // with no profile start command or arguments (those are Claude's), in the profile's env all the same.
 //
+// --agent codex starts Codex CLI: `launch.codex` (default: codex) typed into a new tab, a new
+// session only (no --resume/--fork/--session-id, no Claude profile, no --trust). --model, --effort,
+// --approval and --sandbox become Codex's own options; none given, Codex runs on its config.toml.
+// config.json's `codexHome` (install.ts --codex-home) becomes CODEX_HOME of the tab.
+//
 // The session starts in the Claude profile of the agent that runs it (its CLAUDE_CONFIG_DIR), or
 // in the one --profile names; the board's own starts pass --config-dir <folder> or --keep-env.
 //
@@ -32,33 +38,192 @@
 // /model into the session would save it as the default of every later one in the profile.
 //
 // Prints "pane=<id> name=<Name> agent=<herdr name>", with " kind=pi" after it when the start
-// command started pi; exits 1 with the reason when it fails. The board reads that line
+// command started pi or --agent codex started Codex; exits 1 with the reason when it fails. The board reads that line
 // (services/launch/launcher.ts).
+//
+// With `nodes` in config.json (#505) a new session is the board's to place, when the board answers
+// (services/launch/spawn-board.ts): it may start here (the same line), on a node ("pane=@<device>:…
+// agent=@<device>:<session> device=<device> session=<id>"), or wait for room ("queued=<launch id>
+// name=<Name> waiting=<device>:<kind>", exit 0). The spawn-agent the board's own launcher runs never
+// asks it back.
+//
+// --thread <key> (case files, #488, services/launch/case-start.ts) starts a fresh session from the
+// case's brief, always on this computer, and gives it the thread; the line ends in " thread=<key>".
 import { homedir } from 'node:os'
+import { dedicatedCodexHome } from '../adapters/codex-home.ts'
 import { loadConfig } from '../adapters/config-file.ts'
+import { cygpath, takeGitBashArgs } from '../adapters/git-bash.ts'
 import { loadProfiles } from '../adapters/profiles.ts'
-import { piCommand } from '../core/launch/agents.ts'
-import { claudeCommand, HELP, parseArgs } from '../core/launch/spawn-args.ts'
-import { spawnAgent } from '../services/launch/spawn-agent.ts'
+import { agyCommand, codexCommand, piCommand } from '../core/launch/agents.ts'
+import {
+  CASES_HELP,
+  claudeCommand,
+  HELP,
+  LAUNCHER_CHILD,
+  parseArgs,
+  type SpawnOptions,
+  spawnLine,
+  withConvertedPaths,
+} from '../core/launch/spawn-args.ts'
+import type { Config } from '../core/types.ts'
+import { paneInfo, spawnAgent } from '../services/launch/spawn-agent.ts'
+
+// Started by the sh shim under Git Bash (core/install-plan.ts GIT_BASH_PATHS, #490): the arguments
+// came as typed, so a brief or a name that starts with / stays itself, and the folder and file
+// options are converted here with Git's cygpath, as Git Bash would have. Neither variable goes on
+// to herdr or what it starts (adapters/git-bash.ts).
+const gitBash = takeGitBashArgs()
+// The board's own launcher marks the spawn-agent it runs: that one starts here, whatever it was
+// given, and nothing it starts inherits the mark.
+const launcherChild = process.env[LAUNCHER_CHILD] !== undefined
+delete process.env[LAUNCHER_CHILD]
+
+/**
+ * On a node (#507), the profile's env file for the new tab. Without `node` in config.json nothing
+ * of it is loaded or read.
+ */
+async function nodeEnvOf(cfg: Config): Promise<Pick<Parameters<typeof spawnAgent>[1] & object, 'nodeEnv'>> {
+  if (cfg.node === undefined || cfg.node === null || cfg.node === false) return {}
+  const { nodeConfig } = await import('../core/nodes.ts')
+  if (nodeConfig(cfg.node) === null) return {}
+  const { readNodeEnv } = await import('../adapters/node-env.ts')
+  return { nodeEnv: profile => readNodeEnv(profile, msg => console.error(`spawn-agent: ${msg}`)) }
+}
+
+/**
+ * Start the session here, in this computer's herdr. `kase` (#488, --thread): told once herdr reports
+ * an agent in the new pane, and once the session is up, its words go after the spawn line.
+ */
+async function startHere(
+  o: SpawnOptions,
+  cfg: Config,
+  kase?: { onAgent(pane: string): void; started(r: { session: string | null; name: string }): string },
+): Promise<void> {
+  const launch = cfg.launch ?? {}
+  const register = o.workdeskWorker
+    ? await (await import('../services/workdesk-workers.ts')).prepareWorkerLaunch(cfg.workdesk)
+    : null
+  const home = homedir()
+  const r = await spawnAgent(o, {
+    ...(o.agent === 'pi'
+      ? { pi: piCommand(launch.pi) }
+      : o.agent === 'agy'
+        ? { agy: agyCommand(launch.agy) }
+        : o.agent === 'codex'
+          ? { codex: codexCommand(launch.codex), codexHome: dedicatedCodexHome() }
+          : { claude: claudeCommand(launch.claude, launch.args) }),
+    log: msg => console.error(`spawn-agent: ${msg}`),
+    profiles: loadProfiles({ home }),
+    env: process.env,
+    home,
+    ticketNames: launch.linkedWorkspaces === true,
+    ...(await nodeEnvOf(cfg)),
+    ...(kase && { onAgent: kase.onAgent }),
+  })
+  if (register) {
+    try {
+      register(r.kind, r.session)
+    } catch (err) {
+      // The worker is already running. Keep the normal success line and avoid a duplicate launch.
+      console.error(
+        `spawn-agent: Workdesk worker in ${r.pane} started, registration failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+  console.log(`${spawnLine(r)}${kase ? kase.started(r) : ''}`)
+}
 
 try {
-  const o = parseArgs(process.argv.slice(2))
+  const parsed = parseArgs(process.argv.slice(2))
+  const o = gitBash && !parsed.help ? withConvertedPaths(parsed, cygpath) : parsed
   if (o.help) {
-    console.log(HELP)
+    // Case files (#488): their option says it needs them on; the config is not read for the help.
+    console.log(`${HELP}\n\n${CASES_HELP}`)
   } else {
-    const launch = loadConfig().launch ?? {}
-    const home = homedir()
-    const r = await spawnAgent(o, {
-      ...(o.agent === 'pi' ? { pi: piCommand(launch.pi) } : { claude: claudeCommand(launch.claude, launch.args) }),
-      log: msg => console.error(`spawn-agent: ${msg}`),
-      profiles: loadProfiles({ home }),
-      env: process.env,
-      home,
-      ticketNames: launch.linkedWorkspaces === true,
-    })
-    console.log(`pane=${r.pane} name=${r.name} agent=${r.agent}${r.kind === 'claude' ? '' : ` kind=${r.kind}`}`)
+    const cfg = loadConfig()
+    // Case files (#488): --thread starts here, never placed, from the case's brief.
+    if (o.thread) await startCase(o, cfg)
+    else {
+      // With `nodes` the board places a new session (#505); without it, nothing of that is loaded.
+      const placed =
+        cfg.nodes !== undefined && cfg.nodes !== null && cfg.nodes !== false && !launcherChild
+          ? await (await import('../services/launch/spawn-board.ts')).askBoard(o, cfg, {
+              profiles: loadProfiles({ home: homedir() }),
+              env: process.env,
+              home: homedir(),
+            })
+          : null
+      if (placed !== null) console.log(placed)
+      else await startHere(o, cfg)
+    }
   }
 } catch (err) {
   console.error(`spawn-agent: ${err instanceof Error ? err.message : String(err)}`)
   process.exitCode = 1
+}
+
+/**
+ * --thread (#488): the case read, as the session that runs spawn-agent (else the owner), before
+ * anything starts; then the session started on this computer, never placed on a node (its folder is
+ * this computer's, and the assignment follows the start). From a node's session it is refused.
+ * Once herdr reports an agent in the new pane (and, after a failure, still does) the session is the
+ * assignee under the minted id, whether or not it finished starting; what is left to do is said on
+ * stderr. No agent, and the case stays with its holder.
+ */
+async function startCase(o: SpawnOptions, cfg: Config): Promise<void> {
+  if (cfg.node !== undefined && cfg.node !== null && cfg.node !== false) {
+    const { nodeConfig } = await import('../core/nodes.ts')
+    if (nodeConfig(cfg.node) !== null)
+      throw new Error("--thread starts a session on the board's own computer: run it there, not from a node's session")
+  }
+  const [{ prepareCaseStart }, { boardResolvers }, { caseCaller }, { collect }, { defaultDeps }] = await Promise.all([
+    import('../services/launch/case-start.ts'),
+    import('../services/case-sessions.ts'),
+    import('../services/launch/case-caller.ts'),
+    import('../services/board.ts'),
+    import('../services/deps.ts'),
+  ])
+  let items: ReturnType<typeof collect> | null = null
+  const kase = await prepareCaseStart(o, {
+    cfg,
+    resolvers: boardResolvers(() => {
+      items ??= collect(defaultDeps(cfg))
+      return items
+    }),
+    actor: await caseCaller(),
+  })
+  for (const note of kase.notes) console.error(`spawn-agent: ${kase.key} ${note}`)
+  let ran: string | null = null
+  try {
+    await startHere(kase.options, cfg, {
+      onAgent: pane => {
+        ran = pane
+      },
+      started: r => {
+        console.error(`spawn-agent: ${kase.assign(r.session, r.name)}`)
+        return ` thread=${kase.key}`
+      },
+    })
+  } catch (err) {
+    // An agent herdr reported in the pane, and still reports when asked again here, runs under the
+    // id it was given, ready or not (a dialog, a slow start, a brief that did not reach): it holds
+    // the case, and the reason below says what is left to do. No agent seen, one gone since (a start
+    // command that failed or exited at once), or its tab closed: no session holds anything, and the
+    // case stays where it was.
+    const message = err instanceof Error ? err.message : String(err)
+    // Asked again now: an agent herdr named once may have exited since (a start that died at once).
+    const still =
+      ran !== null && !/was closed before/i.test(message)
+        ? await paneInfo(ran, 10_000).then(
+            p => !!p.agent,
+            () => false,
+          )
+        : false
+    if (still && ran !== null)
+      console.error(
+        `spawn-agent: ${kase.assign(null, kase.options.name)}; the session runs in ${ran} as ${kase.options.sessionId} but did not finish starting: what is left follows`,
+      )
+    else console.error(`spawn-agent: ${kase.key} stays with ${kase.heldBy}: no session came up to give it to`)
+    throw err
+  }
 }

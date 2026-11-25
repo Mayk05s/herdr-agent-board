@@ -1,0 +1,1000 @@
+// The placer (#504, docs/design/nodes 8): where a new session of this master runs. Around the pure
+// decision (core/placement.ts place) it keeps what the decision needs and does what it says:
+//
+// - The view: config.json's `nodes`, each link's state and last status, this computer's own status
+//   read by the very code a node answers with (services/node/status.ts), the reservations, and each
+//   device's memory gate (gateNext). A status older than 45 s is asked again first, within 1.5 s
+//   (needsFresh). A status whose free memory could not be read is no status for the memory test.
+// - The task: its lane, profile, agent, "Where", whether a person asked, the device that has its
+//   folder, and whether it may leave (core/portable.ts over git's facts, adapters/git.ts; asked only
+//   for a lane that may leave). Its brief's paths in system folders every machine has count as none.
+//   A start that goes as a repository carries the author git gives in its checkout (#611), asked
+//   only once it may leave.
+// - The decision, one at a time: each counts against its device at once (a reservation), so seven
+//   starts in a second do not all see the same room. A reservation lets go when the device's status
+//   counts the session, when the start fails, or after 180 s.
+// - The start. Here: the launch pipeline as without nodes. On a node: the node made current for the
+//   start's profile first (bundle-sync.ts syncIfBehind, 9.2; the card says "syncing the profile to"
+//   it meanwhile, and a node already current costs one small request), then `POST /api/node/launch`
+//   through its link. A sync that does not end well is the turn `bundle`. `full`, `profile`, `repo`
+//   and `bundle` send it to the next device (that one left out, place() asked again); a lost answer
+//   is sent again with the same id, which the node answers with the launch it has; a sync that
+//   drops returns to the queue to be placed again, while a drop after `POST /api/node/launch` was
+//   sent keeps the start pinned to that node (`sent` / `sentAt`) until acknowledged, seen in its
+//   payload, turned away, paused/drained/revoked, or past `SENT_TTL_MS`. One it acknowledged is
+//   the node's and never starts elsewhere; its card here goes once the node shows it.
+// - The queue (adapters/node-queue.ts): a start that waits, or is on its way to a node
+//   (syncing or sent without an acknowledgement yet, #588), is kept on disk in queue.json until
+//   acknowledged, refused, run locally, or cancelled. Tried again when a device's payload moves
+//   (its status asked then), when this computer's awake sessions drop, and every 15 s while
+//   anything waits; an entry that cannot go does not hold back one that can, and a device that
+//   turned it away is asked again only once its status moved. Cancel takes it out.
+//
+// Made by server/app.ts only once `nodes` is on; a board without it never reaches any of this.
+import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { hostname } from 'node:os'
+import { relative, sep } from 'node:path'
+import { branchPushed, checkoutFacts, checkoutIdentity, gitInfo, headCommit } from '../../adapters/git.ts'
+import { createNodeQueue, type NodeQueue, type NodeSource, type QueueEntry } from '../../adapters/node-queue.ts'
+import { knobMs, pace } from '../../adapters/pacing.ts'
+import { ROOT } from '../../adapters/paths.ts'
+import { t } from '../../core/lang.ts'
+import { checkBranch } from '../../core/launch/names.ts'
+import { NODE_API } from '../../core/node-door.ts'
+import { defaultThresholds, LOCAL, type NodeStatus, type NodesConfig, nodeKey, nodesConfig } from '../../core/nodes.ts'
+import {
+  type Blocker,
+  type DeviceState,
+  type DeviceStatus,
+  gateNext,
+  type LaunchPlace,
+  liveReservations,
+  type NodeTurn,
+  needsFresh,
+  type PlacementView,
+  place,
+  type Refusal,
+  type Reservation,
+  reservedOn,
+  type Task,
+  type Verdict,
+} from '../../core/placement.ts'
+import { everyMachineHas, laneLeaves, type Portable, portable, subdirTravels } from '../../core/portable.ts'
+import type { Config, Item } from '../../core/types.ts'
+import type { Launches, LaunchPlacer } from '../launch/launches.ts'
+import type { LaunchRequest } from '../launch/request.ts'
+import { type Launch, newLaunch } from '../launch/run.ts'
+import { REMEMBER_MS } from '../node/launch.ts'
+import { type Clock, realClock } from '../tunnel.ts'
+import type { RemotePart } from './aggregate.ts'
+import type { BundleSync, SyncReport } from './bundle-sync.ts'
+import type { NodeLinks } from './links.ts'
+
+/** The queue is tried again this often while anything waits (8.3; BOARD_NODE_QUEUE_MS in tests). */
+export const QUEUE_MS = 15_000
+/** How long an unacknowledged `sent` pin holds a start to one node: 1 min under the node's REMEMBER_MS (#588). */
+export const SENT_TTL_MS = REMEMBER_MS - 60_000
+/** A lost answer is sent again this many times, this far apart (paced), while the link is up. */
+const RESENDS = 3
+const RESEND_MS = 1000
+/** A node that clones a repository answers when it is done: a big one takes minutes. */
+const LAUNCH_ANSWER_MS = 11 * 60_000
+const TURNS: readonly NodeTurn[] = ['full', 'profile', 'repo', 'bundle']
+
+export interface PlacerOptions {
+  /** The live config. */
+  cfg: Config
+  links: Pick<NodeLinks, 'link' | 'onChange'>
+  /** The devices' part of the payload (services/nodes/aggregate.ts): what each node shows. */
+  remote: () => RemotePart | null
+  launches: Pick<Launches, 'runLocal' | 'adopt' | 'changed'>
+  /** This computer's sessions now. */
+  items: () => Item[]
+  /** This computer's own status, by the code a node answers with (services/node/status.ts). */
+  ownStatus: () => Promise<NodeStatus | null>
+  /** Thresholds config.json does not set, written from a device's first status (config-file.ts editNodes). */
+  fillThresholds?: (device: string, given: ReturnType<typeof defaultThresholds>) => void
+  log(text: string): void
+  /**
+   * The profile bundle (bundle-sync.ts): a node is made current for a start's profile before the
+   * start goes to it (9.2). Absent: no sync, for tests of the decision alone.
+   */
+  bundle?: Pick<BundleSync, 'syncIfBehind'>
+  queue?: NodeQueue
+  clock?: Clock
+  hostName?: string
+  /** This board's commit, asked once; a node takes work only on the same one (6.5). */
+  commit?: () => Promise<string>
+  /** Whether this board's commit is on its way to a device (#590, services/nodes/update.ts). */
+  updating?: (id: string) => boolean
+  /**
+   * The board tells observe() this computer's sessions after each read of herdr: until the first one
+   * the queue is left alone (#593). A board that just started counts no session awake, so this
+   * computer would look empty and a start waiting for room would be started here at once. A new
+   * start needs no such gate: the launch route refuses one while the board's data is stale
+   * (routes/launch.ts, `fresh-data`). Absent: a test that drives the placer alone, where nothing
+   * observes.
+   */
+  awaitsBoard?: boolean
+  /**
+   * git's facts of a folder (adapters/git.ts), handed in so tests can stand in. `identity` absent
+   * from what a test hands in: no identity is asked.
+   */
+  git?: {
+    checkout: typeof checkoutFacts
+    info: typeof gitInfo
+    pushed: typeof branchPushed
+    identity?: typeof checkoutIdentity
+  }
+  exists?: (path: string) => boolean
+}
+
+export interface Placer extends LaunchPlacer {
+  close(): void
+  /**
+   * The device a plain start would go to now (Settings, Devices, #510): a start by hand of `lane`
+   * and `profile` with Claude, from a folder that may leave, held to the same rules as every
+   * start; null while it would wait, or `nodes` is off. Nothing is reserved and nothing is queued.
+   */
+  next(lane: string, profile: string, cfg?: NodesConfig | null): Promise<string | null>
+}
+
+/** One start the placer holds: deciding, on its way to a node, or waiting. */
+interface Held {
+  l: Launch
+  task: Task
+  source: NodeSource | null
+  /**
+   * Devices that turned it away, with when: one is asked again only once a status of it came after
+   * that (its room changed), so a queued start does not knock on a full node at every pass.
+   */
+  left: Map<string, number>
+  busy: boolean
+  gone: boolean
+  /** The node `POST /api/node/launch` was sent to without an acknowledgement yet (#588). */
+  sent: string | null
+  /** When `POST /api/node/launch` was sent to `sent` (ms, #588). */
+  sentAt: number | null
+  /** The node whose profile is being synced before the launch request (#588). */
+  syncing: string | null
+  /**
+   * Last `sent` / `syncing` written to queue.json for this entry, so toQueue avoids redundant
+   * writes yet never leaves stale markers on disk.
+   */
+  diskSent: string | null
+  diskSyncing: string | null
+}
+
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/** A folder below the checkout as a node names it: forward slashes, '' for the checkout itself. */
+function subdirOf(root: string, cwd: string): string | null {
+  const below = relative(root, cwd)
+  if (!below) return ''
+  if (below === '..' || below.startsWith(`..${sep}`)) return null
+  return below.split(sep).join('/')
+}
+
+export function createPlacer(o: PlacerOptions): Placer {
+  const clock = o.clock ?? realClock
+  const host = o.hostName ?? hostname()
+  const queue = o.queue ?? createNodeQueue()
+  const git = o.git ?? { checkout: checkoutFacts, info: gitInfo, pushed: branchPushed, identity: checkoutIdentity }
+  const exists = o.exists ?? existsSync
+  const held = new Map<string, Held>()
+  let reservations: Reservation[] = []
+  /**
+   * Reserved sessions a node shows: `asking` while a status asked after it showed is on its way,
+   * `counted` once one came, which counts it among the node's sessions, so its reservation goes.
+   */
+  const counting = new Map<string, 'asking' | 'counted'>()
+  /** Per device, whether its memory gate is closed, and the status it was last worked out from. */
+  const gates = new Map<string, { closed: boolean; at: number }>()
+  /** Sessions whose start waits on a profile sync: each counts against its device however long that takes. */
+  const syncing = new Set<string>()
+  /** Devices whose missing thresholds were written in this process. */
+  const filled = new Set<string>()
+  let commit: Promise<string> | null = null
+  let deciding: Promise<unknown> = Promise.resolve()
+  let timer: unknown = null
+  let closed = false
+  /** This computer's sessions awake at the last refresh: the queue is tried when that number drops. */
+  let lastAwake = Number.POSITIVE_INFINITY
+  /** Whether the board told this computer's sessions at least once since it started (observe). */
+  let observed = false
+  /** Per device, its last status's own time and when this board first had it (its clock, not the node's). */
+  const seen = new Map<string, { at: number; got: number }>()
+  const asking = new Set<string>()
+
+  const nodes = (): NodesConfig | null => (closed ? null : nodesConfig(o.cfg.nodes, host))
+  const ownCommit = (): Promise<string> => {
+    commit ??= (o.commit ?? (async () => (await headCommit(ROOT).catch(() => null)) ?? ''))()
+    return commit
+  }
+
+  /** Decisions one at a time: each sees the reservations of the one before. */
+  function decided<T>(fn: () => Promise<T>): Promise<T> {
+    const next = deciding.then(fn, fn)
+    deciding = next.catch(() => {})
+    return next
+  }
+
+  /** Whether a device's sessions include one: an item of it, which its status counts (a launch card it does not). */
+  function nodeHasItem(device: string, session: string, part = o.remote()): boolean {
+    if (!part) return false
+    const key = nodeKey(device, session)
+    return part.items.some(i => i.device === device && (i.key === key || i.session === session))
+  }
+
+  /** Whether a device shows a session: its launch, or an item of that session (core/node-items.ts prefixes both). */
+  function nodeShows(device: string, session: string, part = o.remote()): boolean {
+    if (!part) return false
+    const key = nodeKey(device, session)
+    return (
+      part.launches.some(x => x.device === device && x.id === key) ||
+      part.items.some(i => i.device === device && (i.key === key || i.session === session))
+    )
+  }
+
+  /**
+   * The reservations still held: a session this computer shows is counted by its own status, read
+   * fresh at each decision; a node's once a status asked after it showed came (see the link's watch below).
+   */
+  function heldReservations(now: number): Reservation[] {
+    const local = new Set(o.items().map(i => i.session))
+    const counted = new Set<string>()
+    for (const r of reservations) if (syncing.has(r.id)) r.at = now
+    for (const r of reservations)
+      if (r.device === LOCAL ? local.has(r.id) : counting.get(r.id) === 'counted') counted.add(r.id)
+    const live = liveReservations(reservations, now, counted)
+    for (const id of counting.keys()) if (!live.some(r => r.id === id)) counting.delete(id)
+    reservations = live
+    return live
+  }
+
+  const release = (session: string): void => {
+    reservations = reservations.filter(r => r.id !== session)
+    counting.delete(session)
+  }
+
+  /** A node's status as placement reads it; one whose free memory could not be read is none where memory is tested. */
+  function statusFor(s: NodeStatus | null, minFreeMemMb: number | null): DeviceStatus | null {
+    if (!s) return null
+    if (s.memAvailableMb === null && minFreeMemMb !== null) return null
+    return { ...s, memAvailableMb: s.memAvailableMb ?? 0 }
+  }
+
+  /** The thresholds config.json does not set, written once from the device's first status. */
+  function fill(cfg: NodesConfig, id: string, s: NodeStatus): void {
+    if (filled.has(id) || !o.fillThresholds) return
+    const d = cfg.devices[id]
+    if (!d || (d.maxSessions !== null && d.minFreeMemMb !== null && d.maxLoad !== null)) return
+    filled.add(id)
+    try {
+      o.fillThresholds(id, defaultThresholds(s))
+    } catch (err) {
+      o.log(`placer: the thresholds of ${id}: ${messageOf(err)}`)
+    }
+  }
+
+  async function viewOf(cfg: NodesConfig, left: ReadonlyMap<string, number>): Promise<PlacementView> {
+    const now = clock.now()
+    const devices: Record<string, DeviceState> = {}
+    const own = await o.ownStatus().catch(() => null)
+    for (const id of cfg.order) {
+      const settings = cfg.devices[id]
+      let status: NodeStatus | null
+      let online: boolean
+      if (id === LOCAL) {
+        // This computer starts as it always did, whatever its profiles' folders say of a login: an
+        // owner may log in by a key or a token the folder does not show.
+        status = own && { ...own, profiles: own.profiles.map(p => ({ ...p, loggedIn: null })) }
+        online = true
+      } else {
+        const link = o.links.link(id)
+        status = link?.view().status ?? null
+        online = link?.state().state === 'online'
+      }
+      if (status) fill(cfg, id, status)
+      const placed = statusFor(status, settings?.minFreeMemMb ?? null)
+      let gate = gates.get(id) ?? { closed: false, at: 0 }
+      if (placed && placed.at !== gate.at && settings) {
+        gate = { closed: gateNext(settings, placed, gate.closed), at: placed.at }
+        gates.set(id, gate)
+      }
+      if (placed) {
+        // A status's age by this board's clock: a node's own may be off by more than 45 s.
+        let got = seen.get(id)
+        if (got?.at !== placed.at) {
+          got = { at: placed.at, got: now }
+          seen.set(id, got)
+        }
+        placed.at = got.got
+      }
+      // A device that turned this start away is left out, its status still noted above: go() asks it
+      // again once a status of it came after the turn.
+      if (left.has(id)) continue
+      devices[id] = { status: placed, online, reserved: 0, gateClosed: gate.closed }
+      // Revoked (#510): refused from the moment config.json says so, queued starts go on to others.
+      if (settings?.revoked) devices[id].revoked = true
+      if (id !== LOCAL && o.updating?.(id)) devices[id].updating = true
+    }
+    const live = heldReservations(now)
+    for (const [id, d] of Object.entries(devices)) d.reserved = reservedOn(live, id)
+    const order = cfg.order.filter(id => !left.has(id))
+    const kept = Object.fromEntries(Object.entries(cfg.devices).filter(([id]) => !left.has(id)))
+    return {
+      config: { ...cfg, order, devices: kept },
+      master: { api: NODE_API, commit: await ownCommit() },
+      devices,
+    }
+  }
+
+  /** The decision for one start, with the statuses it needs asked first; it counts against its device at once. */
+  function decide(h: Held): Promise<Verdict | null> {
+    return decided(async () => {
+      const cfg = nodes()
+      if (!cfg || h.gone) return null
+      let view = await viewOf(cfg, h.left)
+      const stale = needsFresh(h.task, view, clock.now())
+      if (stale.length) {
+        await Promise.all(stale.map(id => o.links.link(id)?.status()))
+        view = await viewOf(cfg, h.left)
+      }
+      if (h.gone) return null
+      const v = place(h.task, view, clock.now())
+      if ('on' in v) reservations.push({ id: h.l.sessionGiven ?? '', device: v.on, at: clock.now() })
+      return v
+    })
+  }
+
+  // ---------------------------------------------------------------- what a decision does
+
+  const placeOf = (h: Held): LaunchPlace => {
+    h.l.place ??= {}
+    return h.l.place
+  }
+
+  function entryOf(h: Held, wait?: Blocker): QueueEntry {
+    const l = h.l
+    const request: LaunchRequest = {
+      name: l.name,
+      label: l.label,
+      cwd: l.cwd,
+      category: l.category,
+      workspaceId: l.workspaceId,
+      workspaceLabel: l.workspaceLabel,
+      newWorkspace: l.newWorkspace,
+      message: l.message,
+      worktree: l.worktree,
+      profile: l.profile,
+      profileDir: l.profileDir,
+      configDir: l.configDir,
+      ...(l.nodeProfile && { nodeProfile: true as const }),
+      parent: l.parent,
+      profileArgs: l.profileArgs,
+      profileCommand: l.profileCommand,
+      agent: l.agent,
+      model: l.model,
+      ...(l.pin && { pin: l.pin }),
+      ...(l.remote && { remote: l.remote }),
+    }
+    return {
+      id: h.l.id,
+      session: h.l.sessionGiven ?? '',
+      master: nodes()?.id ?? '',
+      at: h.l.startedAt,
+      request: request as unknown as Record<string, unknown>,
+      task: h.task,
+      source: h.source,
+      ...(wait && { wait }),
+      ...(h.sent
+        ? { sent: h.sent, ...(h.sentAt !== null && { sentAt: h.sentAt }) }
+        : h.syncing
+          ? { syncing: h.syncing }
+          : {}),
+      ...(l.exactSession && { exactSession: true as const }),
+    }
+  }
+
+  function keep(h: Held, wait?: Blocker): boolean {
+    try {
+      if (!queue.put(entryOf(h, wait))) return false
+      h.diskSent = h.sent
+      h.diskSyncing = h.sent ? null : h.syncing
+      return true
+    } catch (err) {
+      o.log(`placer: the queue: ${messageOf(err)}`)
+      return false
+    }
+  }
+
+  /** Done with a start: out of the queue's file and the placer. */
+  function letGo(h: Held): void {
+    held.delete(h.l.id)
+    h.diskSent = null
+    h.diskSyncing = null
+    try {
+      queue.remove(h.l.id)
+    } catch (err) {
+      o.log(`placer: the queue: ${messageOf(err)}`)
+    }
+    timerFollows()
+  }
+
+  function runHere(h: Held, v: Extract<Verdict, { on: string }>): void {
+    const p = placeOf(h)
+    delete p.device
+    delete p.wait
+    if (v.home) p.home = v.home
+    h.l.state = 'starting'
+    h.l.step = 'prepare'
+    letGo(h)
+    o.launches.runLocal(h.l)
+  }
+
+  function toQueue(h: Held, wait: Blocker | undefined): void {
+    if (h.gone || closed) return
+    const p = placeOf(h)
+    const syncingNow = h.sent ? null : h.syncing
+    // Waiting already on the same thing: nothing to write.
+    if (
+      h.l.state === 'queued' &&
+      !p.device &&
+      JSON.stringify(p.wait) === JSON.stringify(wait) &&
+      h.diskSent === h.sent &&
+      h.diskSyncing === syncingNow
+    )
+      return
+    delete p.device
+    if (wait) p.wait = wait
+    else delete p.wait
+    const kept = keep(h, wait)
+    if (!kept) {
+      // 50 wait already, or the file cannot be written: refused rather than held where a restart loses it.
+      p.queueFull = true
+      h.l.state = 'failed'
+      h.l.error = ''
+      letGo(h)
+      return
+    }
+    h.l.state = 'queued'
+    h.l.step = 'placing'
+    timerFollows()
+  }
+
+  function refuse(h: Held, r: Refusal): void {
+    placeOf(h).refuse = r
+    h.l.state = 'failed'
+    h.l.error = ''
+    letGo(h)
+  }
+
+  /** What `POST /api/node/launch` carries (6.4). */
+  function bodyOf(h: Held, device: string): unknown {
+    const l = h.l
+    const cfg = nodes()
+    const profile = l.nodeProfile ? l.profile : cfg?.devices[device]?.profiles[l.profile] || l.profile
+    return {
+      id: l.sessionGiven,
+      name: l.name,
+      category: l.category,
+      profile,
+      agent: l.agent,
+      model: l.model ?? '',
+      message: l.message,
+      workspace: l.workspaceLabel,
+      source: h.source,
+      ...(l.exactSession && { exactSession: true }),
+    }
+  }
+
+  /** Turned away by a device: the next one is tried, this one again only once its status moved. */
+  function turn(h: Held, device: string, error: NodeTurn): 'turned' {
+    const p = placeOf(h)
+    release(h.l.sessionGiven ?? '')
+    p.turned = [...(p.turned ?? []).filter(x => x.device !== device), { device, error }]
+    h.left.set(device, clock.now())
+    return 'turned'
+  }
+
+  /**
+   * What a sync that did not end well turns the start away as: a profile the node does not have is
+   * the turn `profile` (its door answers 404 `profile`), anything else `bundle`.
+   */
+  const turnOf = (r: SyncReport): NodeTurn => (r.why === 'node' && r.detail === 'profile' ? 'profile' : 'bundle')
+
+  /**
+   * A sync the link cut off (it is down now, the request reached no node, or found the node offline)
+   * is a lost answer, as in send() below, not the node's refusal: the start goes back to the queue.
+   */
+  const syncLost = (r: SyncReport, device: string): boolean =>
+    o.links.link(device)?.state().state !== 'online' ||
+    r.why === 'offline' ||
+    (r.why === 'node' && (r.detail === 'error' || r.detail === 'node-offline'))
+
+  /** The start on a node: acknowledged, turned away (try the next device), or lost (back to the queue). */
+  async function send(
+    h: Held,
+    device: string,
+    { skipSync = false }: { skipSync?: boolean } = {},
+  ): Promise<'acked' | 'turned' | 'done'> {
+    const session = h.l.sessionGiven ?? ''
+    const p = placeOf(h)
+    p.device = device
+    delete p.wait
+    h.l.state = 'starting'
+    if (o.bundle && !skipSync) {
+      if (h.gone || closed) {
+        if (closed) release(session)
+        return 'done'
+      }
+      // Persist before syncing so a restart mid-sync keeps the start on disk (#588). Best effort:
+      // a queue write error logs and still runs the start as before.
+      h.syncing = device
+      h.sent = null
+      h.sentAt = null
+      keep(h)
+      // The node made current for this profile first (9.2); the start waits as long as the sync
+      // takes, and two starts for one device and profile share one sync (syncIfBehind joins it).
+      h.l.step = 'syncing'
+      o.launches.changed()
+      syncing.add(session)
+      let r: SyncReport
+      try {
+        r = await o.bundle.syncIfBehind(device, h.l.profile, h.l.nodeProfile ? { nodeProfile: true } : undefined)
+      } finally {
+        syncing.delete(session)
+      }
+      if (h.gone || closed) {
+        if (closed) release(session)
+        return 'done'
+      }
+      if (!r.ok) {
+        // Not on its way to that device any more: the card says the board chooses again.
+        h.syncing = null
+        delete p.device
+        h.l.step = 'placing'
+        o.log(
+          `placer: ${h.l.name}: the profile ${h.l.profile} not synced to ${device}: ${r.why}${r.detail ? ` (${r.detail})` : ''}`,
+        )
+        if (!syncLost(r, device)) return turn(h, device, turnOf(r))
+        release(session)
+        toQueue(h, { device, kind: 'offline' })
+        return 'done'
+      }
+      // Counted from now on as a start just decided, until the node shows it.
+      for (const x of reservations) if (x.id === session) x.at = clock.now()
+    }
+    h.l.step = h.source?.kind === 'repo' ? 'cloning' : 'placing'
+    o.launches.changed()
+    const body = JSON.stringify(bodyOf(h, device))
+    for (let tries = 0; tries <= RESENDS && !h.gone && !closed; tries++) {
+      if (tries) await new Promise<void>(r => clock.setTimeout(() => r(), Math.round(RESEND_MS * pace())))
+      if (h.gone || closed) break
+      const link = o.links.link(device)
+      const up = link?.state().state === 'online'
+      if (!link || !up) break
+      // Write-ahead before POST /api/node/launch so an unacknowledged start survives a restart (#588).
+      // Best effort: a queue write error logs and still sends the start.
+      if (h.sent !== device) {
+        h.syncing = null
+        h.sent = device
+        h.sentAt = clock.now()
+        keep(h)
+      }
+      let res: Response
+      try {
+        res = await link.fetch('/api/node/launch', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body,
+          signal: AbortSignal.timeout(LAUNCH_ANSWER_MS),
+        })
+      } catch {
+        continue
+      }
+      if (closed) {
+        release(session)
+        return 'done'
+      }
+      const answer = (await res.json().catch(() => null)) as { error?: unknown; detail?: unknown } | null
+      if (closed) {
+        release(session)
+        return 'done'
+      }
+      if (res.status === 202) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
+        h.l.state = 'done'
+        h.l.doneAt = clock.now()
+        letGo(h)
+        return 'acked'
+      }
+      const error = typeof answer?.error === 'string' ? answer.error : ''
+      if (res.status === 409 && (TURNS as readonly string[]).includes(error)) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
+        return turn(h, device, error as NodeTurn)
+      }
+      // The node's own launch pipeline refused the start: that is its answer, not a lost one. A
+      // token the node no longer takes, or its lockout, is a link that is down, not an answer.
+      if (res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 403 && res.status !== 429) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
+        release(session)
+        h.l.state = 'failed'
+        h.l.error = typeof answer?.detail === 'string' ? answer.detail : error
+        letGo(h)
+        return 'done'
+      }
+      // 5xx, node-offline, a refused token: the answer is lost; the same id again is the same start there.
+    }
+    h.syncing = null
+    release(session)
+    if (!h.gone && !closed) toQueue(h, { device, kind: 'offline' })
+    return 'done'
+  }
+
+  /** Decides a start and does what the decision says, trying the next device while nodes turn it away. */
+  async function go(h: Held): Promise<void> {
+    if (h.busy || h.gone || closed) return
+    h.busy = true
+    const before = JSON.stringify([h.l.state, h.l.step, h.l.place])
+    try {
+      // A device that has the session already took it, whatever answer was lost on the way: it is
+      // that device's, and never started elsewhere.
+      const session = h.l.sessionGiven ?? ''
+      const part = o.remote()
+      const there = part?.devices.find(d => d.id !== LOCAL && nodeShows(d.id, session, part))
+      if (there) {
+        h.sent = null
+        h.sentAt = null
+        h.syncing = null
+        placeOf(h).device = there.id
+        delete placeOf(h).wait
+        h.l.state = 'done'
+        h.l.doneAt = clock.now()
+        letGo(h)
+        return
+      }
+      // A device that turned it away is asked again once a status of it came since.
+      for (const [device, at] of h.left) if ((seen.get(device)?.got ?? 0) > at) h.left.delete(device)
+      if (h.sent) {
+        const sent = h.sent
+        const sentAt = h.sentAt ?? h.l.startedAt
+        const cfg = nodes()
+        if (closed) return
+        if (!cfg) return nodesGone(h)
+        const dev = cfg.devices[sent]
+        if (clock.now() - sentAt >= SENT_TTL_MS || !dev || dev.revoked || dev.paused || dev.drain) {
+          h.sent = null
+          h.sentAt = null
+        } else {
+          const link = o.links.link(sent)
+          if (link?.state().state !== 'online') return toQueue(h, { device: sent, kind: 'offline' })
+          const ok = await decided(async () => {
+            if (closed || h.gone) return false
+            reservations.push({ id: session, device: sent, at: clock.now() })
+            return true
+          })
+          if (!ok) return
+          if ((await send(h, sent, { skipSync: true })) !== 'turned') return
+        }
+      } else if (h.syncing) {
+        const cfg = nodes()
+        if (closed) return
+        if (!cfg) return nodesGone(h)
+        const dev = cfg.devices[h.syncing]
+        const link = o.links.link(h.syncing)
+        if (dev?.link && !dev.revoked && !dev.paused && !dev.drain && link?.state().state === 'connecting')
+          return toQueue(h, { device: h.syncing, kind: 'no-status' })
+        h.syncing = null
+      }
+      for (;;) {
+        const v = await decide(h)
+        if (closed) return
+        if (!v && !h.gone) return nodesGone(h)
+        if (!v || h.gone) {
+          if (v && 'on' in v) release(h.l.sessionGiven ?? '')
+          return
+        }
+        if ('on' in v) {
+          if (v.on === LOCAL) return runHere(h, v)
+          if ((await send(h, v.on)) === 'turned') continue
+          return
+        }
+        if ('wait' in v) return toQueue(h, v.wait)
+        // Every device that could have taken it turned it away now: it waits for one that may.
+        if (h.left.size) return toQueue(h, undefined)
+        return refuse(h, v.refuse)
+      }
+    } catch (err) {
+      o.log(`placer: ${h.l.name}: ${messageOf(err)}`)
+      h.syncing = null
+      release(h.l.sessionGiven ?? '')
+      if (!h.gone && !closed) toQueue(h, undefined)
+    } finally {
+      h.busy = false
+      if (JSON.stringify([h.l.state, h.l.step, h.l.place]) !== before) o.launches.changed()
+    }
+  }
+
+  /** `nodes` left config.json while a start was held: it runs here as without nodes, or not at all for a node's folder. */
+  function nodesGone(h: Held): void {
+    if (h.l.remote) {
+      h.l.state = 'failed'
+      h.l.error = t('launch.err.cwdMissing', { path: h.l.cwd })
+      letGo(h)
+      return
+    }
+    h.l.state = 'starting'
+    h.l.step = 'prepare'
+    letGo(h)
+    o.launches.runLocal(h.l)
+  }
+
+  // ---------------------------------------------------------------- the queue
+
+  const waiting = (): Held[] => [...held.values()].filter(h => h.l.state === 'queued' && !h.busy)
+
+  /**
+   * Every waiting start once, oldest first. Their decisions run one after another (decided), but
+   * none waits for another's start on a node: one that cannot go, or goes slowly, holds back none.
+   */
+  function kick(): void {
+    if (closed || (o.awaitsBoard && !observed)) return
+    for (const h of waiting().sort((a, b) => a.l.startedAt - b.l.startedAt)) void go(h)
+  }
+
+  function timerFollows(): void {
+    const any = [...held.values()].some(h => h.l.state === 'queued')
+    if (any && timer === null && !closed)
+      timer = clock.setInterval(() => kick(), knobMs('BOARD_NODE_QUEUE_MS', QUEUE_MS))
+    else if (!any && timer !== null) {
+      clock.clearInterval(timer)
+      timer = null
+    }
+  }
+
+  // A device's payload moved (a session showed, went to sleep or ended) or its link came up: its
+  // status is asked then. What it says counts the reserved sessions that showed before it was asked,
+  // and the queue is tried with it.
+  function watch(id: string, after = false): void {
+    if (closed || asking.has(id)) return
+    const link = o.links.link(id)
+    if (!link) return
+    // A device heard from for the first time gets the thresholds config.json does not set.
+    const cfg = nodes()
+    const status = link.view().status
+    if (cfg && status) fill(cfg, id, status)
+    else if (cfg && !filled.has(id))
+      void link
+        .status()
+        .then(s => {
+          const now = nodes()
+          if (now && s) fill(now, id, s)
+        })
+        .catch(() => {})
+    const part = o.remote()
+    const showing = reservations.filter(r => r.device === id && !counting.has(r.id) && nodeHasItem(id, r.id, part))
+    // Right after an answer only what showed meanwhile is asked about: the queue had its try.
+    if (!showing.length && (after || !waiting().length)) return
+    for (const r of showing) counting.set(r.id, 'asking')
+    asking.add(id)
+    void link
+      .status()
+      .catch(() => null)
+      .then(status => {
+        asking.delete(id)
+        for (const r of showing)
+          if (status) counting.set(r.id, 'counted')
+          else counting.delete(r.id)
+        // What showed while that status was on its way is asked about again.
+        watch(id, true)
+        kick()
+      })
+  }
+  const off = o.links.onChange(watch)
+
+  // ---------------------------------------------------------------- a start the placer takes
+
+  /** What the task is: its lane may leave, its folder travels in git, its brief names nothing of here. */
+  async function taskOf(
+    l: Launch,
+    byHand: boolean,
+    cfg: NodesConfig,
+  ): Promise<{ task: Task; source: NodeSource | null }> {
+    const base = {
+      lane: l.category,
+      profile: l.profile,
+      ...(l.nodeProfile && { nodeProfile: true as const }),
+      agent: l.agent,
+      byHand,
+      ...(l.pin && { pin: l.pin }),
+    }
+    if (l.remote) {
+      // A folder of the pinned node: it starts there or nowhere.
+      return {
+        task: { ...base, origin: l.remote, portable: { ok: true } },
+        source: { kind: 'path', cwd: l.cwd, worktree: l.worktree },
+      }
+    }
+    const home = (p: Portable): { task: Task; source: null } => ({
+      task: { ...base, origin: LOCAL, portable: p },
+      source: null,
+    })
+    if (!laneLeaves(l.category, cfg.lanes)) return home({ ok: false, why: { kind: 'lane' } })
+    const [facts, info] = await Promise.all([git.checkout(l.cwd), git.info(l.cwd)])
+    const branch = info && info.branch !== 'HEAD' ? info.branch : ''
+    const subdir = facts ? subdirOf(facts.root, l.cwd) : null
+    // A remote a node cannot clone (a folder of this computer) is no remote for this rule.
+    const remote = facts?.remote?.address && subdir !== null ? facts.remote.url : null
+    const worktree = l.worktree
+      ? { branch: branch || 'HEAD', pushed: !!branch && (await git.pushed(facts?.root ?? l.cwd, branch)) }
+      : null
+    const verdict = portable({
+      lane: l.category,
+      lanes: cfg.lanes,
+      checkout: facts ? { remote, clean: facts.clean, headPushed: facts.headPushed && !!branch } : null,
+      worktree,
+      brief: l.message,
+      exists: path => !everyMachineHas(path) && exists(path),
+    })
+    if (!verdict.ok || !facts?.remote || subdir === null)
+      return home(verdict.ok ? { ok: false, why: { kind: 'no-remote' } } : verdict)
+    // A branch or folder name a node does not take stays here rather than failing there.
+    if (branch && checkBranch(branch)) return home({ ok: false, why: { kind: 'name', name: branch } })
+    if (!subdirTravels(subdir)) return home({ ok: false, why: { kind: 'name', name: subdir } })
+    // The author a commit in this folder carries here, so the node's clone commits as this one (#611).
+    const identity = (await git.identity?.(l.cwd)) ?? null
+    return {
+      task: { ...base, origin: LOCAL, portable: verdict },
+      source: {
+        kind: 'repo',
+        url: facts.remote.url,
+        ref: branch,
+        subdir,
+        worktree: l.worktree,
+        ...(identity && { identity }),
+      },
+    }
+  }
+
+  function adopt(e: QueueEntry): void {
+    const request = e.request as unknown as LaunchRequest
+    const l = newLaunch(request, o.items())
+    l.id = e.id
+    l.sessionGiven = e.session
+    if (e.exactSession) l.exactSession = true
+    l.startedAt = e.at
+    l.state = 'queued'
+    l.step = 'placing'
+    const sent = e.sent ?? null
+    const sentAt = sent ? (e.sentAt ?? e.at) : null
+    const syncing = sent ? null : (e.syncing ?? null)
+    const wait =
+      e.wait ??
+      (sent ? { device: sent, kind: 'offline' } : syncing ? { device: syncing, kind: 'no-status' } : undefined)
+    l.place = wait ? { wait } : {}
+    held.set(l.id, {
+      l,
+      task: e.task,
+      source: e.source,
+      left: new Map(),
+      busy: false,
+      gone: false,
+      sent,
+      sentAt,
+      syncing,
+      diskSent: sent,
+      diskSyncing: syncing,
+    })
+    o.launches.adopt(l)
+  }
+
+  // What waited when this board stopped waits again, its own entries only.
+  const cfg0 = nodes()
+  if (cfg0) {
+    let entries: QueueEntry[] = []
+    try {
+      entries = queue.read(cfg0.id)
+    } catch (err) {
+      o.log(`placer: the queue: ${messageOf(err)}`)
+    }
+    for (const e of entries)
+      try {
+        adopt(e)
+      } catch (err) {
+        o.log(`placer: the queue's entry ${e.id}: ${messageOf(err)}`)
+      }
+  }
+  timerFollows()
+  if (held.size) kick()
+  // This computer's thresholds from its own figures, as a node's from its first status.
+  void o
+    .ownStatus()
+    .then(s => {
+      const cfg = nodes()
+      if (cfg && s) fill(cfg, LOCAL, s)
+    })
+    .catch(() => {})
+
+  return {
+    take(l, byHand) {
+      const cfg = nodes()
+      l.sessionGiven ??= randomUUID()
+      l.state = 'starting'
+      l.step = 'placing'
+      l.place = {}
+      const h: Held = {
+        l,
+        task: {
+          lane: l.category,
+          profile: l.profile,
+          agent: l.agent,
+          byHand,
+          origin: LOCAL,
+          portable: { ok: false, why: { kind: 'lane' } },
+        },
+        source: null,
+        left: new Map(),
+        busy: true,
+        gone: false,
+        sent: null,
+        sentAt: null,
+        syncing: null,
+        diskSent: null,
+        diskSyncing: null,
+      }
+      held.set(l.id, h)
+      void (async () => {
+        try {
+          if (cfg) Object.assign(h, await taskOf(l, byHand, cfg))
+        } catch (err) {
+          o.log(`placer: ${l.name}: ${messageOf(err)}`)
+        }
+        h.busy = false
+        await go(h)
+      })()
+    },
+    cancel(id) {
+      const h = held.get(id)
+      if (!h) return
+      h.gone = true
+      release(h.l.sessionGiven ?? '')
+      letGo(h)
+    },
+    shown(l) {
+      return !!l.place?.device && !!l.sessionGiven && nodeShows(l.place.device, l.sessionGiven)
+    },
+    observe(items) {
+      const awake = items.filter(i => !i.sleeping).length
+      const dropped = awake < lastAwake
+      lastAwake = awake
+      // The first read of herdr since the board started counts as a drop (lastAwake starts at
+      // infinity): what waited is tried now, and not before (awaitsBoard).
+      observed = true
+      if (dropped && waiting().length) kick()
+    },
+    async next(lane, profile, given) {
+      // A section just written is given: the live config follows the file a moment later.
+      const cfg = closed ? null : given === undefined ? nodes() : given
+      if (!cfg) return null
+      const view = await viewOf(cfg, new Map())
+      const task: Task = { lane, profile, agent: 'claude', byHand: true, origin: LOCAL, portable: { ok: true } }
+      const verdict = place(task, view, clock.now())
+      return 'on' in verdict ? verdict.on : null
+    },
+    close() {
+      closed = true
+      off()
+      if (timer !== null) clock.clearInterval(timer)
+      timer = null
+    },
+  }
+}

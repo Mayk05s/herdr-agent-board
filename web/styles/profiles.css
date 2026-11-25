@@ -37,6 +37,22 @@
 }
 /* Started for one profile, running in another: a warning that is not missed. */
 .profile-tag.wrong { max-width: 60%; background: var(--c); color: #fff; }
+/* On another model than config.json's `models` expects (#429, components/ModelTag.tsx): the same red warning. */
+.model-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--red);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* The usage pill: each profile with recent usage, its name in its color before its windows. */
 .limits-profile { color: color-mix(in srgb, var(--c) 75%, var(--label)); font-weight: 600; }

@@ -5,7 +5,7 @@
 // it has local changes (core/server-install.ts ARCHIVE_MARK). Untracked files stay behind.
 import { gzipSync } from 'node:zlib'
 import { ARCHIVE_MARK } from '../core/server-install.ts'
-import { tarAppend } from '../core/tar.ts'
+import { tarAppend } from '../core/tar-append.ts'
 import { ROOT } from './paths.ts'
 
 export interface BoardPack {

@@ -64,6 +64,20 @@ export function isOurCommand(command: string): boolean {
   return OUR_HOOK.test(command) || OUR_STATUS_LINE.test(command)
 }
 
+/**
+ * Whether a command is one any install of the board writes, from any copy: its hook (the question
+ * form's too), status line, notification and wake hooks. Profile sync never sends these; a node's
+ * own install writes them with its paths (core/bundle.ts).
+ */
+export function isBoardCommand(command: string): boolean {
+  return (
+    OUR_HOOK.test(command) ||
+    OUR_STATUS_LINE.test(command) ||
+    OUR_MAC_TOAST.test(command) ||
+    OUR_WAKE_HOOK.test(command)
+  )
+}
+
 /** A path for comparing: forward slashes, no trailing one, lower case. */
 export const normPath = (p: unknown): string =>
   String(p ?? '')
@@ -281,11 +295,27 @@ const cmdShim = (bun: string, script: string): string =>
     '',
   ].join('\r\n')
 
-const shShim = (bun: string, script: string): string => `#!/bin/sh\n# ${MARK}\nexec ${bunCommand(bun, script)} "$@"\n`
+const shShim = (bun: string, script: string, before = ''): string =>
+  `#!/bin/sh\n# ${MARK}\n${before}exec ${bunCommand(bun, script)} "$@"\n`
+
+/**
+ * Git Bash turns every argument that starts with / into a Windows path when it starts the native
+ * Bun, so a brief "/review this" arrived as "C:/Program Files/Git/review this" (#490), and a
+ * `board thread post` text the same (#532). Under Git Bash only, and only while the user has set
+ * neither of Git Bash's own switches, the sh shims turn that off for the arguments alone
+ * (MSYS2_ARG_CONV_EXCL='*': the environment is still converted, as before) and say so in
+ * AGENT_BOARD_PATHCONV: spawn-agent and board then convert their folder and file options
+ * themselves, as Git Bash did, and pass neither variable on (adapters/git-bash.ts).
+ */
+const GIT_BASH_PATHS =
+  '# Git Bash: arguments as typed; the command converts its folder and file options (#490, #532).\n' +
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: the shell's own ${…}
+  'if [ -n "$MSYSTEM" ] && [ -z "${MSYS_NO_PATHCONV+x}${MSYS2_ARG_CONV_EXCL+x}" ]; then export MSYS2_ARG_CONV_EXCL=\'*\' AGENT_BOARD_PATHCONV=1; fi\n'
 
 /**
  * The `board` and `spawn-agent` commands for ~/.local/bin: a sh script for Git Bash, macOS and
- * Linux, a .cmd for PowerShell and cmd.
+ * Linux, a .cmd for PowerShell and cmd. On Windows both sh scripts also keep Git Bash from rewriting
+ * their arguments (GIT_BASH_PATHS).
  */
 export function planShims(paths: InstallPaths): {
   board: string
@@ -293,10 +323,11 @@ export function planShims(paths: InstallPaths): {
   'spawn-agent': string
   'spawn-agent.cmd': string
 } {
+  const gitBash = (paths.platform ?? process.platform) === 'win32' ? GIT_BASH_PATHS : ''
   return {
-    board: shShim(paths.bun, paths.cli),
+    board: shShim(paths.bun, paths.cli, gitBash),
     'board.cmd': cmdShim(paths.bun, paths.cli),
-    'spawn-agent': shShim(paths.bun, paths.spawn),
+    'spawn-agent': shShim(paths.bun, paths.spawn, gitBash),
     'spawn-agent.cmd': cmdShim(paths.bun, paths.spawn),
   }
 }

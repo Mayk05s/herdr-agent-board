@@ -14,14 +14,15 @@ import { api, errorText } from '../../api/client.ts'
 import { useLatest } from '../../hooks/useLatest.ts'
 import { useT } from '../../i18n/I18nProvider.tsx'
 import { ago } from '../../models/card.ts'
-import { deskPage, deviceId, remotePage } from '../../models/remote-page.ts'
+import { adminHere, deskPage, deviceId } from '../../models/remote-page.ts'
 import { useBoardContext } from '../../state/BoardProvider.tsx'
-import { Panel } from '../panel/Panel.tsx'
+import { Panel, type PanelBack } from '../panel/Panel.tsx'
 import { Qr } from '../Qr.tsx'
 
 export interface PhonesPanelProps {
   open: boolean
   onClose(): void
+  back?: PanelBack | undefined
 }
 
 /** Whether the Phones panel is open; a request to pair that the page has not seen yet opens it. */
@@ -39,10 +40,10 @@ export function usePhonesPanel(): [boolean, (open: boolean) => void] {
   return [open, setOpen]
 }
 
-export function PhonesPanel({ open, onClose }: PhonesPanelProps) {
+export function PhonesPanel({ open, onClose, back }: PhonesPanelProps) {
   const t = useT()
   const { data, canEdit: canMutate, toast } = useBoardContext()
-  const here = !remotePage()
+  const here = adminHere()
   const canEdit = canMutate && here
   const answers = here || deskPage()
   const canAnswer = canMutate && answers
@@ -68,6 +69,7 @@ export function PhonesPanel({ open, onClose }: PhonesPanelProps) {
     <Panel
       id="phones-sheet"
       kind="phones"
+      back={back}
       open={open}
       onClose={onClose}
       title={

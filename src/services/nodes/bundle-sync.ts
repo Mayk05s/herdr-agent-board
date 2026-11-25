@@ -1,0 +1,646 @@
+// The bundle from the master (#506, docs/design/nodes 9.1 to 9.3): per device and profile, build the
+// bundle from the profile folder (adapters/bundle-files.ts walks it, core/bundle.ts classifies it
+// with the device's `mcp` and `accept` and the board's slice with its sinks), keep its version in
+// `<state>/nodes/<id>/bundle.json` (per profile: seq, hash, the last report), ask the node what it
+// has, send only the blobs it lacks, and commit. Made by server/app.ts only once `nodes` is on.
+//
+// The hash is computed when a sync is asked and every 5 minutes while a device is online, never on
+// a prompt (9.2). Each request of a sync is answered within 20 s and the whole sync within 15
+// minutes, whatever the node does: a profile's first bundle is hundreds of files, sent a few at a
+// time (#583). Nothing of a profile's settings goes out but what the classifiers let through: a
+// value that looks like a secret stays here, and the log and the record name files and verdicts,
+// never a value.
+
+import { createHash } from 'node:crypto'
+import { readFileSync, statSync } from 'node:fs'
+import { homedir, hostname } from 'node:os'
+import { join } from 'node:path'
+import { type ProfileRead, readProfile, type WalkedFile } from '../../adapters/bundle-files.ts'
+import type { MasterGit } from '../../adapters/git-access.ts'
+import type { DeviceStore } from '../../adapters/node-store.ts'
+import { ROOT } from '../../adapters/paths.ts'
+import {
+  type BundleContext,
+  type BundleManifest,
+  type BundleVersion,
+  buildManifest,
+  bundleHash,
+  bundleSecrets,
+  nextVersion,
+  type ReportEntry,
+} from '../../core/bundle.ts'
+import { type GitIdentity, isAccount, isHost, type NoLogin } from '../../core/git-access.ts'
+import { claudeStateFile } from '../../core/move.ts'
+import { type DeviceConfig, LOCAL, nodesConfig } from '../../core/nodes.ts'
+import { DEFAULT_PROFILE, type Profile } from '../../core/profiles.ts'
+import type { Config } from '../../core/types.ts'
+import { type Clock, realClock } from '../tunnel.ts'
+import type { Link } from './link.ts'
+
+/** What a sync came to: the node current, or why not; what it sent and what the node kept. */
+export interface SyncReport {
+  ok: boolean
+  device: string
+  /** The master's profile id, and the node's it maps to (`nodes.devices.<id>.profiles`). */
+  profile: string
+  nodeProfile: string
+  seq: number
+  hash: string
+  /**
+   * Why not: `device` (no such device with a link), `profile` (no such profile here), `offline`,
+   * `build` (the profile folder could not be read), `changed` (a file changed while it was sent),
+   * `node` (the node refused; `detail` is its code), `timeout` (a request not answered within 20 s,
+   * or the whole sync not done within 15 minutes).
+   */
+  why?: 'device' | 'profile' | 'offline' | 'build' | 'changed' | 'node' | 'timeout'
+  detail?: string
+  /** Blobs sent this time. */
+  sent: number
+  /** Files the node wrote or removed. */
+  applied: string[]
+  /** Files of the node's own it left alone, with its reason. */
+  kept: { path: string; why: string }[]
+  /** The node's backup folder of this commit, or null. */
+  backup: string | null
+  /** The bundle's report (9.1): what travels, what stays and why. */
+  lines: ReportEntry[]
+  /**
+   * What the node did with the owner's git identity the manifest carries (#609): `set`, `same`,
+   * `kept` (its owner set another), `no-git`, `failed`. Absent from a node of an older board, and when
+   * no identity went.
+   */
+  identity?: string
+  /**
+   * The secrets given with it (#604), names and paths only; absent when the device's owner gives
+   * it none (`giveSecrets: false`), and then `lines` says what is to be given by hand.
+   */
+  secrets?: SecretsGiven
+  at: number
+}
+
+/** What the node has of the secrets its profile needs after a sync (#604): names and paths, never a value. */
+export interface SecretsGiven {
+  /** The variables in the node's env file for the profile, by name. */
+  given: string[]
+  /** The secret files in the node's profile folder, by path. */
+  files: string[]
+  /** Files there the node keeps as its own, with its reason. */
+  kept: { path: string; why: string }[]
+  /** What the node would not take, or this board could not read, by name or path. */
+  refused: string[]
+  /** The node's refusal of the whole request (an older node: `not found`). */
+  error?: string
+  /** The GitHub logins the node holds from this board after it, and how (#609): hosts and accounts, never a token. */
+  logins?: { host: string; user: string; via: string }[]
+  /** Logins the node did not take: one of its own there, or gh or git failed. */
+  loginsKept?: { host: string; why: string }[]
+  /** Whether the node has gh: a login without it pushes, and opens no pull request. */
+  gh?: boolean
+  /** This board had no login to give: no gh here, or gh logged in to no host. */
+  noLogin?: NoLogin
+}
+
+export interface BundleSync {
+  /** The node made current for this profile, or why not, within SYNC_TOTAL_MS. */
+  syncIfBehind(device: string, profile?: string, options?: { nodeProfile?: boolean }): Promise<SyncReport>
+  /** The last report of a device's profile, for doctor; null before the first sync. */
+  report(device: string, profile: string): SyncReport | null
+  /**
+   * The secrets of a device over every profile's last report (#604), names only: those the node was
+   * given, and those still to be given by hand (the switch off, or the node did not take them).
+   */
+  secrets(device: string): { given: string[]; toGive: string[] }
+  close(): void
+}
+
+export interface BundleSyncOptions {
+  /** The live config: `nodes` and the board's slice. */
+  cfg: Config
+  links: { link(id: string): Link | null }
+  /** This board's shown profiles. */
+  profiles(): readonly Profile[]
+  store: Pick<DeviceStore, 'bundle' | 'setBundle'>
+  log(text: string): void
+  home?: string
+  platform?: string
+  /** One line of the secrets' audit, names only (services/secrets.ts auditBundle). */
+  audit?(line: Record<string, unknown>): void
+  /**
+   * The owner's git identity, asked before each build, and his GitHub logins, asked for each secrets
+   * request (#609, adapters/git-access.ts masterGit). Without it a bundle carries neither, as before.
+   */
+  git?: MasterGit
+  /** The board's own folder: a hook running a file in it is the board's (core/bundle.ts isBoardHook). */
+  boardDir?: string
+  hostName?: string
+  clock?: Clock
+  /** How long one request to the node may take (SYNC_MS). */
+  requestMs?: number
+}
+
+/** Each request of a sync is answered within this long (9.2). A deadline, never paced. */
+export const SYNC_MS = 20_000
+/** A whole sync is done within this long: a first bundle over a slow link is minutes, not hours. */
+export const SYNC_TOTAL_MS = 15 * 60_000
+/** A secret file a hook's script reads, at most this big: it is a config, not a blob. */
+export const MAX_SECRET_FILE_BYTES = 1024 * 1024
+/** The secret files of one request, at most this many bytes in all: the node's door takes 4 MB of JSON. */
+export const MAX_SECRET_FILES_BYTES = 3 * 1024 * 1024
+/** Blobs on their way to the node at once: one at a time is a round trip each, for hundreds of files. */
+export const SEND_AT_ONCE = 6
+/** The hash is computed this often while a device is online (9.2). */
+export const HASH_MS = 5 * 60_000
+
+const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
+const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+const messageOf = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+const said = (v: unknown): string =>
+  String(v)
+    .replace(/\p{Cc}/gu, ' ')
+    .slice(0, 80)
+
+/** A name or a path the node answered with, kept whole enough to compare with the report's. */
+const named = (v: unknown): string =>
+  String(v)
+    .replace(/\p{Cc}/gu, ' ')
+    .slice(0, 256)
+
+/** The names and paths the node last said it holds from the bundle's secrets (#604). */
+interface Held {
+  env: string[]
+  files: string[]
+}
+
+/**
+ * One profile's part of bundle.json, read again: the version, the last report as it was kept, and
+ * what the node holds of the secrets, kept apart from the report so that a failed sync, whose report
+ * has none, does not forget it.
+ */
+function entryOf(v: unknown): { version: BundleVersion | null; report: SyncReport | null; held: Held | null } {
+  if (!isRecord(v)) return { version: null, report: null, held: null }
+  const words = (x: unknown): string[] => (Array.isArray(x) ? x.filter((w): w is string => typeof w === 'string') : [])
+  const held = isRecord(v.held) ? { env: words(v.held.env), files: words(v.held.files) } : null
+  const version =
+    Number.isInteger(v.seq) && (v.seq as number) > 0 && typeof v.hash === 'string'
+      ? { seq: v.seq as number, hash: v.hash }
+      : null
+  const report = isRecord(v.report) && typeof v.report.ok === 'boolean' ? (v.report as unknown as SyncReport) : null
+  return { version, report, held }
+}
+
+/** What a node may say it did with the identity (services/node/git-access.ts IdentityTaken). */
+const IDENTITY_SAID: ReadonlySet<string> = new Set(['set', 'same', 'kept', 'no-git', 'failed'])
+
+class Late extends Error {}
+
+export function createBundleSync(o: BundleSyncOptions): BundleSync {
+  const home = o.home ?? homedir()
+  const platform = o.platform ?? process.platform
+  const boardDir = o.boardDir ?? ROOT
+  const host = o.hostName ?? hostname()
+  const clock = o.clock ?? realClock
+  const requestMs = o.requestMs ?? SYNC_MS
+  const running = new Map<string, Promise<SyncReport>>()
+  // The owner's global git identity as last asked (#609): undefined until then, and always without `git`.
+  let identity: GitIdentity | null | undefined
+  const askIdentity = async (): Promise<void> => {
+    if (!o.git) return
+    identity = await o.git.identity().catch(() => null)
+  }
+
+  const devices = (): Record<string, DeviceConfig> => nodesConfig(o.cfg.nodes, host)?.devices ?? {}
+  const profiles = (id: string): Record<string, unknown> => {
+    const rec = o.store.bundle(id)
+    return isRecord(rec?.profiles) ? rec.profiles : {}
+  }
+  function save(id: string, profile: string, part: { version: BundleVersion; report?: SyncReport; held?: Held }): void {
+    const all = { ...profiles(id) }
+    const was = entryOf(all[profile])
+    const held = part.held ?? was.held
+    all[profile] = { ...part.version, report: part.report ?? was.report, ...(held && { held }) }
+    o.store.setBundle(id, { profiles: all })
+  }
+
+  /** The bundle of `profile` for `device` on a node of platform `to`, and its version, kept. */
+  function build(
+    device: DeviceConfig,
+    profile: Profile,
+    to: string,
+    programs?: readonly string[],
+  ):
+    | {
+        ok: true
+        manifest: BundleManifest
+        files: WalkedFile[]
+        version: BundleVersion
+        parts: ProfileRead
+        ctx: BundleContext
+      }
+    | { ok: false; detail: string } {
+    const read = readProfile(profile.dir, {
+      to,
+      home,
+      boardDir,
+      claudeJson: claudeStateFile(profile.dir, home, platform),
+      platform,
+      ...(programs && { programs }),
+    })
+    if (!read.ok) return { ok: false, detail: read.why }
+    const ctx: BundleContext = {
+      from: platform,
+      to,
+      profileDir: profile.dir,
+      home,
+      boardDir,
+      mcp: device.mcp,
+      accept: device.accept,
+      ...(programs && { programs }),
+      ...(identity !== undefined && { identity }),
+    }
+    const manifest = buildManifest(read.parts, { config: o.cfg, sinks: device.sinks }, ctx)
+    const was = entryOf(profiles(device.id)[profile.id]).version
+    const version = nextVersion(was, bundleHash(manifest))
+    if (!was || was.seq !== version.seq || was.hash !== version.hash) save(device.id, profile.id, { version })
+    return { ok: true, manifest, files: read.parts.files, version, parts: read.parts, ctx }
+  }
+
+  async function run(deviceId: string, profileId: string): Promise<SyncReport> {
+    const deadline = clock.now() + SYNC_TOTAL_MS
+    const device = devices()[deviceId]
+    const nodeProfile = device?.profiles[profileId] ?? profileId
+    const base: SyncReport = {
+      ok: false,
+      device: deviceId,
+      profile: profileId,
+      nodeProfile,
+      seq: 0,
+      hash: '',
+      sent: 0,
+      applied: [],
+      kept: [],
+      backup: null,
+      lines: [],
+      at: clock.now(),
+    }
+    const not = (why: NonNullable<SyncReport['why']>, detail?: string): SyncReport => ({
+      ...base,
+      why,
+      ...(detail !== undefined && { detail: said(detail) }),
+    })
+    if (!device?.link || deviceId === LOCAL) return not('device')
+    const profile = o.profiles().find(p => p.id === profileId)
+    if (!profile) return not('profile')
+    const link = o.links.link(deviceId)
+    if (link?.state().state !== 'online') return not('offline')
+    const left = (): AbortSignal => {
+      const ms = deadline - clock.now()
+      if (ms <= 0) throw new Late()
+      return AbortSignal.timeout(Math.min(ms, requestMs))
+    }
+    const at = `/api/node/bundle/${encodeURIComponent(nodeProfile)}`
+    const ask = async (
+      path: string,
+      init: RequestInit = {},
+    ): Promise<{ status: number; body: Record<string, unknown> }> => {
+      const res = await link.fetch(path, { ...init, signal: left() })
+      const body: unknown = await res.json().catch(err => {
+        // Cut off after the headers: the deadline, not the node's answer.
+        if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) throw err
+        return {}
+      })
+      return { status: res.status, body: isRecord(body) ? body : {} }
+    }
+    /**
+     * The values the bundle took out and the secret files its scripts read, from this board's
+     * memory to the node in one request of their own: never in the manifest, a blob, the record, a
+     * log line or the report. What the node answers is names.
+     */
+    const give = async (parts: ProfileRead, ctx: BundleContext, dir: string): Promise<SecretsGiven> => {
+      const s = bundleSecrets(parts, ctx)
+      // The owner's GitHub logins (#609): the token of each host gh here is logged in to, or why none.
+      const git = o.git ? await o.git.logins().catch(() => ({ logins: [], none: 'no-login' as const })) : null
+      const logins = git?.logins ?? []
+      const noLogin = git?.none ? { noLogin: git.none } : {}
+      // Nothing to give and nothing given before: no request (a node of an older board has no such route).
+      const held = entryOf(profiles(deviceId)[profileId]).held
+      if (
+        !Object.keys(s.env).length &&
+        !s.files.length &&
+        !logins.length &&
+        (!held || (!held.env.length && !held.files.length))
+      )
+        return { given: [], files: [], kept: [], refused: [], ...noLogin }
+      const texts: { path: string; text: string }[] = []
+      // Named and not sent this time (unreadable, too big, over the request's room): the node keeps its copy.
+      const unread: string[] = []
+      let room = MAX_SECRET_FILES_BYTES
+      for (const path of s.files) {
+        const full = join(dir, ...path.split('/'))
+        try {
+          const size = statSync(full).size
+          if (size > MAX_SECRET_FILE_BYTES || size > room) throw new Error('too big')
+          texts.push({ path, text: readFileSync(full, 'utf8') })
+          room -= size
+        } catch {
+          unread.push(path)
+        }
+      }
+      const res = await ask(`${at}/secrets`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ env: s.env, files: texts, keep: unread, ...(logins.length && { logins }) }),
+      })
+      const b = res.body
+      const words = (v: unknown): string[] => (Array.isArray(v) ? v.map(named) : [])
+      if (res.status !== 200 || b.ok !== true)
+        return { given: [], files: [], kept: [], refused: unread, error: said(b.error ?? res.status), ...noLogin }
+      const written = words(b.written)
+      const removed = words(b.removed)
+      const filesWritten = words(b.filesWritten)
+      const filesRemoved = words(b.filesRemoved)
+      // What the node says of the logins: hosts and accounts, each checked, never a token.
+      const loginsTaken = words(b.loginsTaken).filter(isHost)
+      const loginsSaid = !logins.length
+        ? {}
+        : !Array.isArray(b.logins)
+          ? // A node of an older board took the request and none of the logins.
+            { logins: [], loginsKept: logins.map(l => ({ host: l.host, why: 'older' })), gh: false }
+          : {
+              logins: (Array.isArray(b.logins) ? b.logins.filter(isRecord) : [])
+                .filter(l => isHost(l.host) && isAccount(l.user))
+                .map(l => ({
+                  host: l.host as string,
+                  user: l.user as string,
+                  via: l.via === 'store' ? 'store' : 'gh',
+                })),
+              loginsKept: (Array.isArray(b.loginsKept) ? b.loginsKept.filter(isRecord) : []).map(k => ({
+                host: named(k.host),
+                why: said(k.why),
+              })),
+              gh: b.gh === true,
+            }
+      if (written.length || removed.length || filesWritten.length || filesRemoved.length || loginsTaken.length)
+        o.audit?.({
+          op: 'bundle-sent',
+          device: deviceId,
+          profile: profileId,
+          names: written,
+          removed,
+          files: filesWritten,
+          filesRemoved,
+          ...(loginsTaken.length && { logins: loginsTaken }),
+        })
+      const given = {
+        given: words(b.env),
+        files: words(b.files),
+        kept: Array.isArray(b.kept)
+          ? b.kept.filter(isRecord).map(k => ({ path: named(k.path), why: said(k.why) }))
+          : [],
+        refused: [...words(b.refused), ...unread],
+        ...loginsSaid,
+        ...noLogin,
+      }
+      const version = entryOf(profiles(deviceId)[profileId]).version
+      if (version) save(deviceId, profileId, { version, held: { env: given.given, files: given.files } })
+      return given
+    }
+    try {
+      const status = link.view().status ?? (await link.status())
+      const to = status?.platform
+      if (!to) return not('offline')
+      // Asked once before the first build; after that each sync asks again for the next one and the
+      // 5 minute tick does too, so a start does not wait on git each time.
+      if (identity === undefined) await askIdentity()
+      else void askIdentity()
+      const built = build(device, profile, to, status?.programs)
+      if (!built.ok) return not('build', built.detail)
+      const { manifest, files, version } = built
+      // The secrets first (#604), each sync, whether the bundle changed or not: a value may change
+      // with no file of the profile changing, and the node writes only what did.
+      const secrets = device.giveSecrets === false ? undefined : await give(built.parts, built.ctx, profile.dir)
+      const done = {
+        ...base,
+        seq: version.seq,
+        hash: version.hash,
+        lines: manifest.report,
+        ...(secrets && { secrets }),
+      }
+      const have = await ask(at)
+      if (have.status !== 200) return { ...done, why: 'node', detail: said(have.body.error ?? have.status) }
+      const last = entryOf(profiles(deviceId)[profileId]).report
+      const lastOfThis = last?.ok && last.hash === version.hash ? last : null
+      // The identity of the last commit did not take (no git there yet, git failed): commit again, which
+      // sends no blob and writes nothing but tries the identity once more (#609).
+      const retry = lastOfThis?.identity === 'failed' || lastOfThis?.identity === 'no-git'
+      if (have.body.hash === version.hash && have.body.seq === version.seq && !retry) {
+        // Current: what the node kept of this version, as its commit said.
+        return finish({
+          ...done,
+          ok: true,
+          kept: lastOfThis ? lastOfThis.kept : [],
+          ...(lastOfThis?.identity && { identity: lastOfThis.identity }),
+        })
+      }
+      const there = new Set(isRecord(have.body.files) ? Object.values(have.body.files) : [])
+      const bySha = new Map(files.map(f => [f.sha256, f]))
+      let sent = 0
+      const sendOne = async (sha: string): Promise<SyncReport | null> => {
+        const f = bySha.get(sha)
+        if (!f) return { ...done, why: 'node', detail: 'missing-blob' }
+        const bytes = readFileSync(f.source)
+        if (sha256(bytes) !== sha) return { ...done, why: 'changed', detail: f.path }
+        const put = await ask(`${at}/blob/${sha}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/octet-stream' },
+          body: bytes,
+        })
+        if (put.status !== 200) return { ...done, why: 'node', detail: said(put.body.error ?? put.status) }
+        sent++
+        return null
+      }
+      /**
+       * SEND_AT_ONCE at a time. The first the node refuses ends it: no other is started, those on
+       * their way finish, and that refusal is the answer, whatever came of the others.
+       */
+      const send = async (shas: Iterable<string>): Promise<SyncReport | null> => {
+        const queue = [...shas]
+        let failed: SyncReport | null = null
+        let threw: { err: unknown } | null = null
+        const worker = async (): Promise<void> => {
+          for (let sha = queue.shift(); sha !== undefined && !failed && !threw; sha = queue.shift()) {
+            try {
+              const refused = await sendOne(sha)
+              if (refused) failed ??= refused
+            } catch (err) {
+              threw ??= { err }
+            }
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(SEND_AT_ONCE, queue.length) }, worker))
+        if (failed) return failed
+        if (threw) throw (threw as { err: unknown }).err
+        return null
+      }
+      const failed = await send(new Set(manifest.files.map(f => f.sha256).filter(sha => !there.has(sha))))
+      if (failed) return finish({ ...failed, sent })
+      // The report stays here: it is doctor's (9.4), and the node needs none of it.
+      const body = JSON.stringify({ seq: version.seq, hash: version.hash, manifest: { ...manifest, report: [] } })
+      const commit = () =>
+        ask(`${at}/commit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+      let res = await commit()
+      // The node pruned a blob it had said it had: those, once more.
+      if (res.status === 409 && res.body.error === 'missing-blob' && Array.isArray(res.body.missing)) {
+        const again = await send(res.body.missing.map(String))
+        if (again) return finish({ ...again, sent })
+        res = await commit()
+      }
+      if (res.status !== 200 || res.body.ok !== true) {
+        // What the node names with its refusal: the path, the file that does not parse, how many blobs.
+        const what =
+          res.body.path ??
+          res.body.file ??
+          (Array.isArray(res.body.missing) ? `${res.body.missing.length} blob(s)` : '')
+        const code = String(res.body.error ?? res.status)
+        return finish({ ...done, sent, why: 'node', detail: said(what ? `${code}: ${what}` : code) })
+      }
+      const applied = Array.isArray(res.body.applied) ? res.body.applied.map(String) : []
+      const kept = Array.isArray(res.body.kept)
+        ? res.body.kept.filter(isRecord).map(k => ({ path: said(k.path), why: said(k.why) }))
+        : []
+      const backup = typeof res.body.backup === 'string' ? res.body.backup : null
+      // What the node did with the identity (#609), a word of its own.
+      const identityDone = IDENTITY_SAID.has(String(res.body.git)) ? { identity: String(res.body.git) } : {}
+      o.log(
+        `node bundle ${deviceId}/${profileId}: bundle ${version.seq} applied, ${sent} file(s) sent, ${applied.length} changed, ${kept.length} kept`,
+      )
+      return finish({ ...done, ok: true, sent, applied, kept, backup, ...identityDone })
+    } catch (err) {
+      if (err instanceof Late || (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')))
+        return finish(not('timeout'))
+      o.log(`node bundle ${deviceId}/${profileId}: ${messageOf(err)}`)
+      return finish(not('node', 'error'))
+    }
+  }
+
+  /** The report kept beside the version it is about. */
+  function finish(r: SyncReport): SyncReport {
+    const was = entryOf(profiles(r.device)[r.profile]).version
+    const version = r.seq ? { seq: r.seq, hash: r.hash } : was
+    if (version) save(r.device, r.profile, { version, report: r })
+    return r
+  }
+
+  /** The answer when a sync did not settle in time at all. */
+  function lateReport(device: string, profile: string): SyncReport {
+    const nodeProfile = devices()[device]?.profiles[profile] ?? profile
+    return {
+      ok: false,
+      device,
+      profile,
+      nodeProfile,
+      seq: 0,
+      hash: '',
+      why: 'timeout',
+      sent: 0,
+      applied: [],
+      kept: [],
+      backup: null,
+      lines: [],
+      at: clock.now(),
+    }
+  }
+
+  /**
+   * Every 5 minutes, for each device online: each profile it has that this board has too, its hash;
+   * the owner's identity asked first, when this board gives it (#609), so a change of it moves the hash.
+   */
+  function tick(): void {
+    if (o.git) void askIdentity().finally(hashAll)
+    else hashAll()
+  }
+  function hashAll(): void {
+    for (const device of Object.values(devices())) {
+      if (!device.link) continue
+      const link = o.links.link(device.id)
+      const status = link?.state().state === 'online' ? link.view().status : null
+      if (!status) continue
+      const theirs = new Set(status.profiles.map(p => p.id))
+      for (const profile of o.profiles()) {
+        const key = `${device.id}\n${profile.id}`
+        if (profile.hidden || running.has(key) || !theirs.has(device.profiles[profile.id] ?? profile.id)) continue
+        try {
+          build(device, profile, status.platform, status.programs)
+        } catch (err) {
+          o.log(`node bundle ${device.id}/${profile.id}: ${messageOf(err)}`)
+        }
+      }
+    }
+  }
+  const timer = clock.setInterval(tick, HASH_MS)
+
+  return {
+    syncIfBehind(device, profile = DEFAULT_PROFILE, options) {
+      let target = profile
+      if (options?.nodeProfile) {
+        const map = devices()[device]?.profiles
+        const matched = o.profiles().find(p => (map?.[p.id] ?? p.id) === profile)
+        if (!matched) {
+          return Promise.resolve({
+            ok: true,
+            device,
+            profile,
+            nodeProfile: profile,
+            seq: 0,
+            hash: '',
+            sent: 0,
+            applied: [],
+            kept: [],
+            backup: null,
+            lines: [],
+            at: clock.now(),
+          })
+        }
+        target = matched.id
+      }
+      const key = `${device}\n${target}`
+      const on = running.get(key)
+      if (on) return on
+      // A request that ignored its signal does not hold this device and profile for good.
+      let guard: unknown
+      const late = new Promise<SyncReport>(resolve => {
+        guard = clock.setTimeout(() => resolve({ ...lateReport(device, target) }), SYNC_TOTAL_MS + 1000)
+      })
+      const next = Promise.race([run(device, target), late]).finally(() => {
+        clock.clearTimeout(guard)
+        running.delete(key)
+      })
+      running.set(key, next)
+      return next
+    },
+    report: (device, profile) => {
+      try {
+        return entryOf(profiles(device)[profile]).report
+      } catch {
+        return null
+      }
+    },
+    secrets(device) {
+      const given = new Set<string>()
+      const wanted = new Set<string>()
+      let all: Record<string, unknown> = {}
+      try {
+        all = profiles(device)
+      } catch {}
+      for (const v of Object.values(all)) {
+        const e = entryOf(v)
+        // What the node holds, also after the switch went off: turning it off takes nothing back.
+        const held = new Set([...(e.held?.env ?? []), ...(e.held?.files ?? [])])
+        for (const n of held) given.add(n)
+        for (const l of e.report?.lines ?? [])
+          if (l.verdict === 'needs-secret' && l.why !== 'reference' && !held.has(l.name)) wanted.add(l.name)
+      }
+      return { given: [...given].sort(), toGive: [...wanted].sort() }
+    },
+    close: () => clock.clearInterval(timer),
+  }
+}

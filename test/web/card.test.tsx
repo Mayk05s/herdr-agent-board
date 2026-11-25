@@ -11,8 +11,11 @@ const MIN = 60_000
 // Half minutes: the two sides read the clock a few ms apart and must not straddle a minute.
 const ago = (minutes: number) => Date.now() - (minutes + 0.5) * MIN
 
-/** The card's new status label is not in the old page's markup: compare the rest. */
-const withoutStatus = (html: string) => html.replace(/[ \t]*<span class="card-status"[^>]*>[^<]*<\/span>\n?/, '')
+/** The card's status label and provider mark (#651) are not in the old page's markup: compare the rest. */
+const withoutStatus = (html: string) =>
+  html
+    .replace(/[ \t]*<span class="card-status"[^>]*>[^<]*<\/span>\n?/, '')
+    .replace(/[ \t]*<span[^>]*class="provider-mark"[^>]*>[\s\S]*?<\/span>\n?/, '')
 
 function same(scene: Scene, key: string) {
   const { old, react } = bothCards(scene, key)
@@ -28,6 +31,27 @@ test('the card shows its status by the name', () => {
   // Another column: its own words.
   const bare = bothCards({ items: [item({ key: 'b', column: 'me', name: 'B' })] }, 'b').react
   expect(bare).toContain('>Needs me<')
+})
+
+test('a Claude card shows its context and effort at its foot; another agent’s does not (#193)', () => {
+  const fields = { context: 85_000, contextPct: 42, contextSize: 200_000, effort: 'high', effortLive: true as const }
+  const a = item({ key: 'a', name: 'Alpha', agent: 'claude', status: 'working', column: 'work', ...fields })
+  const { react } = bothCards({ items: [a] }, 'a')
+  expect(react).toContain('class="card-meter"')
+  expect(react).toContain('>85k / 200k (42%)<')
+  expect(react).toContain('>Effort high<')
+  // Effort gone from the last report: the context alone.
+  const { effortLive: _, ...rest } = a
+  const ctx = bothCards({ items: [item({ ...rest, effort: null })] }, 'a').react
+  expect(ctx).toContain('>85k / 200k (42%)<')
+  expect(ctx).not.toContain('meter-effort')
+  expect(ctx).not.toContain('Effort')
+  // Nothing known, or another agent: no line at all.
+  expect(bothCards({ items: [item({ key: 'b', agent: 'claude' })] }, 'b').react).not.toContain('card-meter')
+  expect(bothCards({ items: [item({ key: 'c', agent: 'pi', ...fields })] }, 'c').react).not.toContain('card-meter')
+  // Asleep in the idle column, one line: none either.
+  const asleep = item({ key: 'd', agent: 'claude', sleeping: true, column: 'idle', ...fields })
+  expect(bothCards({ items: [asleep] }, 'd').react).not.toContain('card-meter')
 })
 
 const question = (header: string, multiSelect: boolean) => ({
@@ -349,4 +373,13 @@ test('a recap older than doing leaves the card as the old board drew it (#321)',
     },
     'o',
   )
+})
+
+test('a Codex card says its model and effort under its name (#426); a Claude card with both does not', () => {
+  const codex = item({ key: 'c', name: 'Codex', agent: 'codex', column: 'work', model: 'gpt-6.1-sol', effort: 'low' })
+  expect(bothCards({ items: [codex] }, 'c').react).toContain('<div class="card-meter">gpt-6.1-sol · low</div>')
+  const claude = item({ key: 'd', name: 'Claude', agent: 'claude', column: 'work', model: 'opus', effort: 'high' })
+  expect(bothCards({ items: [claude] }, 'd').react).not.toContain('card-meter')
+  // Without an effort (no turn yet): nothing.
+  expect(bothCards({ items: [{ ...codex, effort: null }] }, 'c').react).not.toContain('card-meter')
 })

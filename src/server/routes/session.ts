@@ -6,10 +6,12 @@ import { type CardPatch, writeCard } from '../../adapters/cards.ts'
 import { checkoutChanges, isCheckout } from '../../adapters/git.ts'
 import { helpersOf } from '../../adapters/helpers.ts'
 import { herdrText } from '../../adapters/herdr.ts'
+import { uploadsCheck } from '../../adapters/own-files.ts'
 import { pause } from '../../adapters/pacing.ts'
-import { uploadsDir } from '../../adapters/paths.ts'
 import { askRestart } from '../../adapters/schedule-store.ts'
 import { picturesSentTo, rememberPictures } from '../../adapters/sent-pictures-store.ts'
+import { sessionCommands } from '../../adapters/slash-commands.ts'
+import { isAgyItem } from '../../core/agy.ts'
 import { busy, PINS } from '../../core/board.ts'
 import { isCodexItem } from '../../core/codex.ts'
 import { limitText, MAX_COMPACT_NOTE, noteText, parseCompactLimit } from '../../core/compact.ts'
@@ -21,6 +23,7 @@ import { t } from '../../core/lang.ts'
 import { checkName } from '../../core/launch/names.ts'
 import type { MessageGate } from '../../core/message-gate.ts'
 import { messageKey } from '../../core/message-key.ts'
+import { modelFamily } from '../../core/model-check.ts'
 import type { Viewer } from '../../core/mokupilot-mode.ts'
 import { isPiItem } from '../../core/pi.ts'
 import type { QueuedPrompt, QueueWindow } from '../../core/queue.ts'
@@ -36,8 +39,14 @@ import {
   sleepSession,
   wake,
   wakeAnswers,
+  wakeSleepsAgy,
 } from '../../services/actions.ts'
-import { answerPermission, answerQuestions } from '../../services/answer.ts'
+import {
+  answerPermission,
+  answerQuestions,
+  codexApprovalFingerprint,
+  codexApprovalIdentity,
+} from '../../services/answer.ts'
 import { askArchive, undoMs } from '../../services/archive.ts'
 import { askAside } from '../../services/aside.ts'
 import { collect } from '../../services/board.ts'
@@ -46,6 +55,7 @@ import { forkSession } from '../../services/launch/fork.ts'
 import type { Launches } from '../../services/launch/launches.ts'
 import { renameSession, renameWorkspace } from '../../services/launch/rename.ts'
 import { startCall } from '../../services/mokupilot.ts'
+import { sessionSpend } from '../../services/spend.ts'
 import { ownAddresses } from '../../services/tunnel.ts'
 import { sendNow, stopTurn, turnIO } from '../../services/turn.ts'
 import { type Body, type Handler, json, type Route } from '../http.ts'
@@ -65,6 +75,8 @@ export interface SessionApp {
   gate: MessageGate
   /** Sessions with an answer being typed into their dialog. */
   answering: Set<string>
+  /** Registered node addresses, used to allow node viewers to open secondary-profile links (#700). */
+  nodeAddresses?: () => readonly string[]
 }
 
 const changed = (item: Item): Result => ({ ok: false, error: t('err.sessionChanged', { name: item.name }) })
@@ -88,7 +100,7 @@ function queueWindow(deps: Deps, item: Item): QueueWindow {
 
 /** The user's messages still in a running Claude session's queue, as its detail shows them (Send now, #330). */
 function queueOf(deps: Deps, item: Item): QueuedPrompt[] {
-  if (!item.alive || isCodexItem(item) || isPiItem(item)) return []
+  if (!item.alive || isCodexItem(item) || isPiItem(item) || isAgyItem(item)) return []
   // As far back as the detail reads it, so both see the same queue, a sent picture's path given back
   // as there: Send now names a message by the text the page shows.
   const { queued } = deps.claude.sessionThread(item.transcript ?? '', 60, queueWindow(deps, item))
@@ -106,19 +118,23 @@ function byBoard(item: Item, conv: ConversationTurn[]): ConversationTurn[] {
 
 async function detail(app: SessionApp, item: Item) {
   const { deps } = app
-  const { transcript, claudeRoot, alive, since, pipe, ...shown } = item
+  const { transcript, claudeRoot, alive, since, pipe, apiError, ...shown } = item
   // queued: the user's messages Claude has not taken in yet (queueWindow).
   // A pi session's turns are in its session file, its key.
-  const claude = !isCodexItem(item) && !isPiItem(item)
-  const read = isCodexItem(item)
-    ? deps.codex.sessionThread(item.session ?? '', 60)
-    : isPiItem(item)
-      ? deps.pi.sessionThread(item.session ?? '', 60)
-      : deps.claude.sessionThread(transcript ?? '', 60, queueWindow(deps, item), { compactions: !!item.compact })
+  const claude = !isAgyItem(item) && !isCodexItem(item) && !isPiItem(item)
+  const read = isAgyItem(item)
+    ? deps.agy.sessionThread(item.session ?? '', 60)
+    : isCodexItem(item)
+      ? deps.codex.sessionThread(item.session ?? '', 60)
+      : isPiItem(item)
+        ? deps.pi.sessionThread(item.session ?? '', 60)
+        : deps.claude.sessionThread(transcript ?? '', 60, queueWindow(deps, item), { compactions: !!item.compact })
   const thread = claude && item.session ? withPicturesBack(read, item.session) : read
   const conversation = byBoard(item, withSessions(app.items(), thread.conversation))
   // helpers: every subagent, fork, workflow agent and teammate, newest first (adapters/helpers.ts).
-  const own = helpersOf(transcript, { alive: !!alive, since: since ?? null })
+  const own = isAgyItem(item)
+    ? deps.agy.sessionHelpers(item.session)
+    : helpersOf(transcript, { alive: !!alive, since: since ?? null })
   // checkout: whether its folder is in git, for the sheet's Changes button.
   const checkout = await isCheckout(item.cwd)
   let screen = ''
@@ -137,12 +153,33 @@ async function detail(app: SessionApp, item: Item) {
         .join('\n')
       // The dialog on it, for the sheet to answer: a permission prompt, or pi's menu or text
       // input in a pane herdr says runs pi, goes by its fingerprint.
-      dialog = publicDialog(parseDialog(text, item.agent))
+      const parsed = parseDialog(text, item.agent)
+      if (isCodexItem(item) && parsed?.kind === 'permission') {
+        const identity = await codexApprovalIdentity(item)
+        if (identity) {
+          const current = await herdrText(['agent', 'read', item.pane, '--source', 'visible'], 5000)
+          const same = parseDialog(current, item.agent)
+          if (same?.kind === 'permission' && same.fingerprint === parsed.fingerprint)
+            dialog = publicDialog({ ...parsed, fingerprint: codexApprovalFingerprint(identity, parsed.fingerprint) })
+        }
+      } else dialog = publicDialog(parsed)
     } catch {}
   }
   const helpers = own.helpers.map(publicHelper)
   const queued = alive ? thread.queued : []
-  return { item: shown, conversation, queued, helpers, workflows: own.workflows, screen, dialog, checkout }
+  // Token spend from this session's transcript (#636); omitted when absent or unreadable.
+  const spend = await sessionSpend(deps, item).catch(() => null)
+  return {
+    item: shown,
+    conversation,
+    queued,
+    helpers,
+    workflows: own.workflows,
+    screen,
+    dialog,
+    checkout,
+    ...(spend ? { spend } : {}),
+  }
 }
 
 /**
@@ -178,14 +215,19 @@ function picturesBackFor(session: string): <M extends { text: string; at: number
 function message(app: SessionApp, item: Item, body: Body): Promise<Result> {
   const { deps } = app
   // Attached files go as their paths: Claude reads them, and picks up image paths as images.
-  const files = (Array.isArray(body.files) ? body.files : []).filter(
-    (p): p is string => typeof p === 'string' && p.startsWith(uploadsDir()),
-  )
+  // Only files the board took in its uploads (#401): one outside refuses the message.
+  const files = (Array.isArray(body.files) ? body.files : []).filter((p): p is string => typeof p === 'string')
+  if (files.length && !files.every(uploadsCheck()))
+    return Promise.resolve({ ok: false, error: t('msg.err.file'), code: 'file' })
   const list = files.length ? `${t('msg.files', { n: files.length })}:\n${files.join('\n')}` : ''
   // The card is for one session: a pane that holds another one now gets nothing. Panes with
   // no Claude session id (other agents) are matched by the card alone.
   if ((body.session ?? null) !== (item.session ?? null)) return Promise.resolve(changed(item))
-  return app.gate(item.key, body.requestId ?? randomUUID(), [body.session ?? null, body.text, files], async () => {
+  // "Send anyway" (#164): herdr says a dialog holds the session, but the screen shows none.
+  const anyway = body.anyway === true
+  const draft = body.draft === true
+  const payload = [body.session ?? null, body.text, files, ...(anyway ? [true] : [])]
+  return app.gate(item.key, body.requestId ?? randomUUID(), payload, async () => {
     // Always collect a new snapshot before accepting a message, even if SSE is connected: a
     // board that cannot reach herdr fails here rather than send on old data.
     const fresh = await freshItem(deps, item)
@@ -195,9 +237,14 @@ function message(app: SessionApp, item: Item, body: Body): Promise<Result> {
     const typed = [String(body.text ?? '').trim(), list].filter(Boolean).join('\n\n')
     const pictures = files.filter(p => PICTURE_PATH.test(p))
     // What its thread needs should the message reach the session while it works (core/sent-pictures.ts).
-    if (pictures.length && fresh.session && !isCodexItem(fresh) && !isPiItem(fresh))
+    if (pictures.length && fresh.session && !isCodexItem(fresh) && !isPiItem(fresh) && !isAgyItem(fresh))
       rememberPictures({ session: fresh.session, key: messageKey(typed), pictures, at: Date.now() }, deps.log)
-    return send(deps, fresh, typed, { pictures: pictures.length > 0 })
+    return send(deps, fresh, typed, {
+      look: true,
+      anyway,
+      ...(draft && { draft: true }),
+      pictures: pictures.length > 0,
+    })
   })
 }
 
@@ -265,6 +312,9 @@ function card(item: Item, body: Body): Result {
   if (typeof body.doing === 'string') patch.doing = body.doing.trim()
   // Kept in sight, or not any more.
   if (typeof body.favorite === 'boolean') patch.favorite = body.favorite || ''
+  // "This model is fine here" (#429): the family it runs now, so another one warns again; false takes it back.
+  if (body.modelOk === true) patch.modelOk = modelFamily(item.model) ?? ''
+  else if (body.modelOk === false) patch.modelOk = ''
   // Auto-compact (#378): its own limit ('' or null: Settings' default applies) and instructions.
   if (body.compactAt !== undefined) {
     const raw = body.compactAt
@@ -305,7 +355,9 @@ function card(item: Item, body: Body): Result {
  * anything is scheduled.
  */
 async function restart(deps: SessionApp['deps'], item: Item): Promise<Result> {
-  if (!item.session || !item.pane || item.agent !== 'claude')
+  if (isAgyItem(item) && !wakeSleepsAgy(deps))
+    return { ok: false, error: t('err.restart.agyNeedsBoardWake', { name: item.name }) }
+  if (!item.session || !item.pane || (item.agent !== 'claude' && !isAgyItem(item)))
     return { ok: false, error: t('err.restart.notClaude', { name: item.name }) }
   if (item.sleeping) return { ok: false, error: t('err.restart.asleep', { name: item.name }) }
   const up = await wakeAnswers(deps)
@@ -390,7 +442,12 @@ async function act(
     // A MokuPilot call whose agent is a fork of this session, in the session's own profile; no herdr in it.
     // Here or on the viewer's computer by the mode, and under `auto` by who asks (core/mokupilot-mode.ts).
     case 'mokupilot':
-      return startCall(deps.cfg, item, { profiles: deps.profiles(), viewer, own: ownAddresses })
+      return startCall(deps.cfg, item, {
+        profiles: deps.profiles(),
+        viewer,
+        own: ownAddresses,
+        ...(app.nodeAddresses && { nodeAddresses: app.nodeAddresses }),
+      })
     // A new session in a new tab with a copy of this one's conversation; this one stays as it is.
     case 'fork':
       return app.launches
@@ -423,7 +480,7 @@ export function sessionRoutes(app: SessionApp): Route[] {
       what === 'mokupilot' ? { peer: ctx.peer(), forwardedFor: req.headers.get('x-forwarded-for') } : undefined
     const r = await act(app, item, what, ctx.body, viewer)
     app.refresh()
-    return json(r.ok ? 200 : 409, r)
+    return json(r.ok ? 200 : r.code === 'file' ? 400 : 409, r)
   })
   return [
     {
@@ -444,8 +501,21 @@ export function sessionRoutes(app: SessionApp): Route[] {
       path: /^\/api\/session\/([^/]+)\/history$/,
       // In the session's own profile: the folder its records were read from.
       handle: withItem(async (item, _req, ctx) => {
+        if (isAgyItem(item))
+          return json(200, await app.deps.agy.searchHistory(item.cwd, ctx.url.searchParams.get('q'), item.session))
         const home = app.deps.homes.forDir(item.claudeRoot ?? app.deps.claude.root)
         return json(200, await home.searchHistory(item.cwd, ctx.url.searchParams.get('q'), item.session))
+      }),
+    },
+    {
+      method: 'GET',
+      path: /^\/api\/session\/([^/]+)\/commands$/,
+      // The slash commands its chat box offers (#191): asked only once the box starts with a slash.
+      // Claude's from the session's own profile; a card working in the board's own files gets the agent's alone.
+      handle: withItem(async (item, _req, ctx) => {
+        const claudeRoot = item.claudeRoot ?? app.deps.claude.root
+        const own = ctx.ownFile(item.cwd)
+        return json(200, { commands: await sessionCommands(own ? { ...item, cwd: '' } : item, { claudeRoot }) })
       }),
     },
     {

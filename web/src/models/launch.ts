@@ -2,6 +2,7 @@
 // grows out of (models/grow.ts draws it), the folder field's list and columns, and the cards of
 // sessions on their way. What the form starts with and lacks is models/launch-form.ts.
 import { baseName, completions, type folderSuggestions } from '../../../src/core/launch/names.ts'
+import { blockerText, type DeviceTitles, deviceName, refusalText } from '../../../src/core/launch/place-text.ts'
 import type { ColumnId, Item, LaunchView, Translator } from '../../../src/core/types.ts'
 import { FROM_BELOW, type GrowFrom } from './grow.ts'
 
@@ -147,7 +148,9 @@ export type LauncherInfo = { kind: 'herdr'; agent: string } | { kind: 'command';
 export const launcherLine = (l: LauncherInfo, t: Translator): string =>
   l.kind === 'command'
     ? t('launch.viaCommand', { name: l.name })
-    : t('launch.viaHerdr', { agent: l.agent === 'claude' ? 'Claude' : l.agent })
+    : t('launch.viaHerdr', {
+        agent: l.agent === 'claude' ? 'Claude' : l.agent === 'agy' ? 'Antigravity' : l.agent,
+      })
 
 /** The command's name, for the step it is at ("Starting with {name}…"); none for herdr. */
 export const launcherName = (l: LauncherInfo): string => (l.kind === 'command' ? l.name : '')
@@ -181,8 +184,9 @@ export function pendingLaunches(
 export const needsYou = (l: Pick<LaunchView, 'state'>): boolean =>
   l.state === 'failed' || l.state === 'waiting' || l.state === 'trust'
 
-/** "Working" while it starts, "Needs me" once it needs the user. */
-export const launchColumn = (l: Pick<LaunchView, 'state'>): ColumnId => (needsYou(l) ? 'me' : 'work')
+/** "Working" while it starts, "Needs me" once it needs the user, "Waiting" while it waits for room on a device (#504). */
+export const launchColumn = (l: Pick<LaunchView, 'state'>): ColumnId =>
+  needsYou(l) ? 'me' : l.state === 'queued' ? 'ext' : 'work'
 
 /**
  * A launch's board item, in its lane, and in the profile it starts in (the profile switch shows it
@@ -207,12 +211,21 @@ export function placeholderOf(l: LaunchView): Item {
     categorySet: false,
     attention: '',
     ...(l.profile ? { profile: l.profile } : {}),
+    // A start placed on another device (#502): its card shows that device and its switch finds it.
+    ...(l.device ? { device: l.device } : {}),
   }
 }
 
 /** How it goes, for the line on its card; a session back from the archive is resumed, not started anew. */
-export function stepText(l: LaunchView, t: Translator, launcher: string): string {
+export function stepText(l: LaunchView, t: Translator, launcher: string, devices?: DeviceTitles): string {
   if (l.state === 'waiting') return t('launch.step.dialog')
+  // A master's start (#504): the device it is choosing, cloning on or starting on.
+  const device = l.place?.device ? deviceName(l.place.device, t, devices) : ''
+  if (l.place && (l.state === 'starting' || l.state === 'done')) {
+    if (l.step === 'cloning' || l.step === 'syncing') return t(`node.place.${l.step}`, { name: device })
+    if (device) return t('place.on', { device })
+    if (l.step === 'placing') return t('node.place.choosing')
+  }
   if (l.state === 'done') return t('launch.step.done')
   if (l.resume && l.step === 'agent') return t('archive.step')
   return t(`launch.step.${l.step}`, { name: launcher })
@@ -228,3 +241,25 @@ export const retries = (l: Pick<LaunchView, 'kind'>): boolean => l.kind !== 'mes
 /** The folder's name and the workspace, under the name on its card. */
 export const launchWhere = (l: Pick<LaunchView, 'cwd' | 'workspace'>, t: Translator): string =>
   [baseName(l.cwd), l.workspace && t('meta.workspace', { name: l.workspace })].filter(Boolean).join(' · ')
+
+// ---------------------------------------------------------------- where a start runs (#504)
+
+// The words of a start's place are core's, which spawn-agent prints too (core/launch/place-text.ts).
+export { blockerText, type DeviceTitles, homeText, refusalText } from '../../../src/core/launch/place-text.ts'
+
+/** The devices that turned a start away on its way, in words; '' for none. */
+export const turnedText = (l: Pick<LaunchView, 'place'>, t: Translator, devices?: DeviceTitles): string =>
+  (l.place?.turned ?? [])
+    .map(x => t('place.turned', { device: deviceName(x.device, t, devices), why: t(`place.turn.${x.error}`) }))
+    .join('; ')
+
+/** Why a start of a master failed before it ran, when the placer refused it; null for any other failure. */
+export function placeRefusal(l: Pick<LaunchView, 'place'>, t: Translator, devices?: DeviceTitles): string | null {
+  if (l.place?.refuse) return refusalText(l.place.refuse, t, devices)
+  if (l.place?.queueFull) return t('place.queueFull')
+  return null
+}
+
+/** What a queued start waits for. */
+export const queuedText = (l: Pick<LaunchView, 'place'>, t: Translator, devices?: DeviceTitles): string =>
+  l.place?.wait ? t('place.queued', { why: blockerText(l.place.wait, t, devices) }) : t('place.queuedTurned')

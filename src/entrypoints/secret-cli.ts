@@ -76,7 +76,10 @@ async function settled(key: string, r: SecretRequest, pollMs: number): Promise<S
 }
 
 export async function secretCmd(argv: string[], ctx: SecretContext): Promise<number> {
-  const args = [...argv]
+  // The flags stop at a lone --: a word after it is a plain word, never a flag (#459).
+  const cut = argv.indexOf('--')
+  const args = cut < 0 ? [...argv] : argv.slice(0, cut)
+  const after = cut < 0 ? [] : argv.slice(cut + 1)
   const sub = args.shift() ?? ''
   const pollMs = ctx.pollMs ?? 1000
   try {
@@ -129,7 +132,8 @@ export async function secretCmd(argv: string[], ctx: SecretContext): Promise<num
           if (at <= 0) throw new Usage(`not a parameter: ${p} (<name>=<value>)`)
           params[p.slice(0, at)] = p.slice(at + 1)
         }
-        if (args.length) throw new Usage(`unexpected: ${args.join(' ')}`)
+        const left = [...args, ...after]
+        if (left.length) throw new Usage(`unexpected: ${left.join(' ')}`)
         // no --sink: the board's own store, when it is the one sink of config.json's there is (the
         // calendar's own, #328, is not one of them)
         const conf = secretsOf(ctx.cfg)
@@ -158,7 +162,7 @@ export async function secretCmd(argv: string[], ctx: SecretContext): Promise<num
       }
       case 'status': {
         const wait = flag(args, '--wait')
-        const id = args[0] ?? ''
+        const id = [...args, ...after][0] ?? ''
         const r = ownRequest(key, id)
         if (!r) throw new Usage(`no request ${id} of this session (board secret requests)`)
         const now = wait ? await settled(key, r, pollMs) : expireIfDue(key, r)
@@ -166,7 +170,7 @@ export async function secretCmd(argv: string[], ctx: SecretContext): Promise<num
         return CODE[statusOf(now, Date.now())]
       }
       case 'cancel': {
-        const id = args[0] ?? ''
+        const id = [...args, ...after][0] ?? ''
         const r = cancelSecret(key, id)
         if (!r) throw new Usage(`no request ${id} of this session (board secret requests)`)
         ctx.out(statusLine(r, Date.now()))

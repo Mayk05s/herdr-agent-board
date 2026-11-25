@@ -645,14 +645,11 @@ test('threads on (#379): the start brief gains their block, with agents only; a 
   const card = cardOf(box, 's1')
   assert.equal(
     start,
-    context('SessionStart', brief(cfg, card, box.dir, env, 'Claude', null, null, [], [], false, threadsConfig(true))),
+    context('SessionStart', brief(cfg, card, box.dir, env, 'Claude', null, null, [], false, threadsConfig(true))),
   )
   assert.ok(start.includes(JSON.stringify(threadsBrief()).slice(1, -1)))
   // Without the switch: the brief as it was.
-  assert.equal(
-    brief(cfg, card, box.dir, env),
-    brief(cfg, card, box.dir, env, 'Claude', null, null, [], [], false, null),
-  )
+  assert.equal(brief(cfg, card, box.dir, env), brief(cfg, card, box.dir, env, 'Claude', null, null, [], false, null))
   assert.ok(!brief(cfg, card, box.dir, env).includes('board thread'))
   // A prompt: the wait reminder alone, as without threads; nothing read or said for them.
   const prompt = { hook_event_name: 'UserPromptSubmit', session_id: 's1', cwd: box.dir, prompt: 'go on' }

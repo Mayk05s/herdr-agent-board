@@ -3,21 +3,35 @@
 
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { agentGet, type HerdrAgent, herdr, herdrText, paneTerminals, snapshot } from '../adapters/herdr.ts'
+import {
+  agentGet,
+  asAgent,
+  type HerdrAgent,
+  herdr,
+  herdrText,
+  nativeBoardSid,
+  paneTerminals,
+  snapshot,
+} from '../adapters/herdr.ts'
 import { reportToDay, runningDay } from '../adapters/mokupilot-day.ts'
 import { pause } from '../adapters/pacing.ts'
 import { possibleProfilePanes, provenProfilePanes } from '../adapters/profile-panes.ts'
 import { boardOnPath } from '../adapters/resume-report.ts'
-import { peekPiSleepers, peekWakeSessions } from '../adapters/wake-files.ts'
+import { peekAgySleepers, peekPiSleepers, peekWakeSessions } from '../adapters/wake-files.ts'
 import { cliWakeHerdr } from '../adapters/wake-herdr.ts'
+import { AGY_AGENT, isAgyItem } from '../core/agy.ts'
+import { CODEX_AGENT } from '../core/codex.ts'
+import { agyDraft } from '../core/dialogs/agy-dialogs.ts'
+import { codexDraft } from '../core/dialogs/codex-input.ts'
 import { inputDraft, stillPasting } from '../core/dialogs/input-box.ts'
 import { piDraft } from '../core/dialogs/pi-dialogs.ts'
+import { parseDialog } from '../core/dialogs/questions.ts'
 import { itemProfile } from '../core/item-profile.ts'
 import { t } from '../core/lang.ts'
 import { sameDir } from '../core/launch/names.ts'
 import { boardNotice } from '../core/notices.ts'
 import { onServer } from '../core/on-server.ts'
-import { isPiItem, piTurnOver } from '../core/pi.ts'
+import { isPiItem, PI_AGENT, piTurnOver } from '../core/pi.ts'
 import {
   absoluteProfileDir,
   defaultProfileDir,
@@ -36,6 +50,7 @@ import { raiseTerminal } from '../integrations/terminal-window.ts'
 import type { BoardWake } from '../integrations/wake.ts'
 import type { Deps } from './deps.ts'
 import { holdsItsLine, settlePaste } from './paste.ts'
+import { defaultAgyOps, wakeAgy } from './wake/agy.ts'
 import { followFiles } from './wake/follow.ts'
 import { PROFILE_NOT_PLAIN, type WakeOutcome, wakeInPane } from './wake/pane-ops.ts'
 import { defaultPiOps, readPiTail, wakePi } from './wake/pi.ts'
@@ -43,6 +58,7 @@ import { defaultTabOps, openTab } from './wake/tabs.ts'
 
 /**
  * `busy` (plus `dialog` or `draft`) says send refused because the session is occupied, not broken.
+ * `code: 'stale'` with `dialog`: herdr says it waits in a dialog, but its screen shows none (#164).
  * A wake refused because wake is slow to answer (it may be waking that very session: nothing was
  * typed) says `wakeBusy`; the board's own wake that failed on a herdr call says `herdrDown`. A
  * reminder waits for either without counting the wait (services/scheduler.ts).
@@ -55,6 +71,7 @@ export type ActionResult =
       busy?: boolean
       dialog?: boolean
       draft?: boolean
+      code?: 'stale'
       wakeBusy?: boolean
       herdrDown?: boolean
     }
@@ -76,6 +93,41 @@ function newWake(deps: Pick<Deps, 'cfg' | 'wake'>): BoardWake | null {
 
 /** Whether the wake the board talks to puts pi sessions to sleep (#178): the board's own; the separate plugin does not. */
 export const wakeSleepsPi = (deps: Pick<Deps, 'cfg' | 'wake'>): boolean => newWake(deps) !== null
+
+/** Whether the wake the board talks to puts Antigravity (`agy`) sessions to sleep (#631): the board's own; the separate plugin does not. */
+export const wakeSleepsAgy = (deps: Pick<Deps, 'cfg' | 'wake'>): boolean => newWake(deps) !== null
+
+/**
+ * An Antigravity (`agy`) session can be woken (#631): `board` on PATH, which `board resume --agy`
+ * runs, and its conversation still on disk.
+ */
+function canWakeAgy(deps: Deps, item: Pick<Item, 'name'> & Partial<Pick<Item, 'session'>>): WakeGuard {
+  if (!boardOnPath()) return { ok: false, refused: true, error: t('err.canWake.board', { name: item.name }) }
+  if (!item.session || !deps.agy.hasConversation(item.session))
+    return { ok: false, refused: true, error: t('err.agyConversationGone', { name: item.name }) }
+  return { ok: true }
+}
+
+/**
+ * The board wakes a sleeping `agy` session itself, as wake does (`services/wake/agy.ts`), while
+ * wake does not answer: from `wake-agy.json` (read only), in its own pane or a new tab.
+ */
+async function wakeAgyHere(deps: Deps, item: Item): Promise<ActionResult> {
+  const sleeper = item.session ? peekAgySleepers()[item.session] : undefined
+  if (!sleeper) return { ok: false, error: t('err.wake', { name: item.name, why: t('err.sleep.unknownToWake') }) }
+  const timeoutMs = wakeConfig(deps.cfg.wake).wakeTimeoutSec * 1000
+  try {
+    const outcome = await wakeAgy(defaultAgyOps(cliWakeHerdr, deps.agy), sleeper, await snapshot(), {
+      timeoutMs,
+      log: text => deps.log(`wake: ${text}`),
+    })
+    if (!outcome.ok) return { ok: false, error: t('err.wake', { name: item.name, why: outcome.error }) }
+    deps.log(`wake: woke ${item.name} (agy) in ${outcome.pane} from the board`)
+    return { ok: true, pane: outcome.pane }
+  } catch (err) {
+    return { ok: false, herdrDown: true, error: t('err.wake', { name: item.name, why: messageOf(err) }) }
+  }
+}
 
 /**
  * A sleeping pi session can be woken (#178): `board` on PATH, which the wake line runs, and its
@@ -270,6 +322,8 @@ export async function checkWake(
 ): Promise<WakeGuard> {
   // A sleeping pi session wakes in the account it slept with, which wake kept (#178).
   if (item.sleeping && isPiItem(item)) return canWakePi(item)
+  // An Antigravity (`agy`) session needs no Claude profile, only `board` on PATH and its conversation (#631).
+  if (isAgyItem(item)) return canWakeAgy(deps, item)
   if (offFileSleeper(deps.cfg, item) || newWake(deps)) return canWakeAgain(deps, item, set)
   // The board's records first, without asking herdr: the board's own profile in a pane no record
   // puts in another one wakes with the same herdr calls as before profiles.
@@ -305,6 +359,7 @@ export async function wake(deps: Deps, item: Item): Promise<ActionResult> {
   const check = await checkWake(deps, item)
   if (!check.ok) return { ok: false, error: check.error }
   if (isPiItem(item)) return wakePiItem(deps, item)
+  if (isAgyItem(item)) return wakeAgyItem(deps, item)
   if (offFileSleeper(deps.cfg, item)) return wakeHere(deps, item)
   const fresh = newWake(deps)
   if (!fresh) return deps.wake.wake(item)
@@ -326,6 +381,20 @@ async function wakePiItem(deps: Deps, item: Item): Promise<ActionResult> {
     if (reach === 'up') return fresh.wake(item)
   }
   return wakePiHere(deps, item)
+}
+
+/**
+ * A sleeping Antigravity (`agy`) session woken (#631): by the board's wake while it answers, else
+ * by the board itself (`wakeAgyHere`); never while wake took the question but is slow to answer.
+ */
+async function wakeAgyItem(deps: Deps, item: Item): Promise<ActionResult> {
+  const fresh = newWake(deps)
+  if (fresh) {
+    const reach = await fresh.reach()
+    if (reach === 'slow') return { ok: false, wakeBusy: true, error: t('err.wakeBusy', { name: item.name }) }
+    if (reach === 'up') return fresh.wake(item)
+  }
+  return wakeAgyHere(deps, item)
 }
 
 /**
@@ -364,9 +433,10 @@ export async function wakeAnswers(
  */
 export async function readyToSleep(
   deps: Deps,
-  item: Pick<Item, 'pane' | 'session' | 'profile' | 'profileFolder'>,
+  item: Pick<Item, 'pane' | 'session' | 'profile' | 'profileFolder'> & Partial<Pick<Item, 'agent'>>,
 ): Promise<{ ok: true; status: AgentStatus } | { ok: false; why: string; profile?: true }> {
   if (isPiItem(item)) return readyPiToSleep(item)
+  if (isAgyItem(item)) return readyAgyToSleep(deps, item)
   const set = deps.profiles()
   const dir = itemProfile(item, set.list)?.dir ?? item.profileFolder
   if (!dir) return { ok: false, why: t('err.wakeProfile', { profile: profileLabel(item, set) }), profile: true }
@@ -404,6 +474,34 @@ async function readyPiToSleep(
     const lines = item.session ? readPiTail(item.session) : null
     if (!lines || !piTurnOver(lines)) return { ok: false, why: 'busy' }
     const draft = piDraft(await herdrText(['pane', 'read', item.pane ?? '', '--source', 'visible'], 10_000))
+    if (draft === null) return { ok: false, why: 'dialog' }
+    return draft === '' ? { ok: true, status: agent.status } : { ok: false, why: 'draft' }
+  } catch (err) {
+    return { ok: false, why: t('err.restart.herdr', { why: messageOf(err) }) }
+  }
+}
+
+/**
+ * readyToSleep for an Antigravity (`agy`) session (#631): herdr shows it in its pane on its
+ * conversation UUID and not at work nor in a dialog, no subagent helpers are running, and nothing
+ * is typed in its input box. No Claude profile is needed.
+ */
+async function readyAgyToSleep(
+  deps: Deps,
+  item: Pick<Item, 'pane' | 'session'>,
+): Promise<{ ok: true; status: AgentStatus } | { ok: false; why: string }> {
+  try {
+    const agent = item.pane ? await agentGet(item.pane) : null
+    const actualSession = agent?.session ? (deps.agy.rootSession(agent.session) ?? agent.session) : null
+    if (!agent || agent.kind !== AGY_AGENT || actualSession !== (item.session ?? null))
+      return { ok: false, why: 'gone' }
+    if (agent.status === 'blocked') return { ok: false, why: 'dialog' }
+    if (agent.status === 'working') return { ok: false, why: 'busy' }
+    if (item.session && (deps.agy.hasRunningSubagent(item.session) || deps.agy.hasRunningBgTask(item.session)))
+      return { ok: false, why: 'tasks' }
+    const draft = agyDraft(
+      await herdrText(['agent', 'read', item.pane ?? '', '--source', 'recent', '--lines', '40', '--ansi'], 10_000),
+    )
     if (draft === null) return { ok: false, why: 'dialog' }
     return draft === '' ? { ok: true, status: agent.status } : { ok: false, why: 'draft' }
   } catch (err) {
@@ -503,6 +601,37 @@ async function enterAfterPaste(pane: string, text: string, name: string): Promis
 }
 
 /**
+ * What the agent's own input box holds when its screen shows that box and no dialog: Claude's
+ * (inputDraft) or pi's (piDraft); null when a dialog, or anything the board cannot read, is there.
+ */
+async function shownDraft(pane: string, kind: string): Promise<string | null> {
+  const screen = await herdrText(['agent', 'read', pane, '--source', 'visible', '--ansi'], 10_000).catch(() => null)
+  if (screen === null || parseDialog(screen, kind)) return null
+  return kind === PI_AGENT ? piDraft(screen) : kind === AGY_AGENT ? agyDraft(screen) : inputDraft(screen)
+}
+
+/** How long sendAnyway waits for its text to show in the input box before it gives up on Enter. */
+const ANYWAY_SHOWN_MS = 3000
+const sameWords = (a: string, b: string): boolean => a.replace(/\s+/g, '') === b.replace(/\s+/g, '')
+
+/**
+ * The message (one line, no control characters) typed into an empty input box herdr wrongly takes
+ * for a dialog (#164): `agent prompt` refuses a pane herdr calls blocked, so the text goes with
+ * `pane send-text`, and Enter only once the box shows it, still with no dialog over it. Otherwise
+ * it stays typed there, unsent.
+ */
+async function sendAnyway(pane: string, kind: string, text: string, name: string): Promise<ActionResult> {
+  await herdr(['pane', 'send-text', pane, /^-/.test(text) ? ` ${text}` : text], 10_000)
+  for (const end = Date.now() + ANYWAY_SHOWN_MS; ; await pause(100)) {
+    const draft = await shownDraft(pane, kind)
+    if (draft !== null && sameWords(draft, text)) break
+    if (Date.now() >= end) return { ok: false, error: t('err.anywayUnsent', { name }) }
+  }
+  await herdr(['agent', 'send-keys', pane, 'enter'], 10_000)
+  return { ok: true }
+}
+
+/**
  * A message for a MokuPilot day session (#331): into its day's inbox, which MokuPilot types into
  * the session as a report from the sender, one turn after another (a reminder set to wait until the
  * session is free waits in the scheduler). Only the day that runs now, and only while it is still
@@ -529,6 +658,12 @@ function toDay(item: Item, text: string): ActionResult {
  * input box (services/paste.ts). `woken`: the caller woke the session itself just now (the
  * scheduler), so herdr may not name it in its pane yet. `probe` (auto-compact, #378): every check,
  * nothing typed, for a sleeping session nothing at all (it is not woken).
+ * `boundTerminal` pins a Board event to the original native SID and terminal. It cannot wake
+ * a sleeper or follow a session to another pane.
+ * `look` (the page's messages, #164): herdr says the session waits in a dialog, yet a Claude or
+ * pi screen shows its own input box and no dialog: refused with `code: 'stale'`, which the page
+ * offers to send anyway. `anyway`: then typed all the same (sendAnyway), the screen checked again
+ * first. A screen the board cannot read stays a dialog.
  */
 export async function send(
   deps: Deps,
@@ -540,20 +675,44 @@ export async function send(
     pictures = false,
     woken = false,
     probe = false,
-  }: { free?: boolean; draft?: boolean; pictures?: boolean; woken?: boolean; probe?: boolean } = {},
+    boundTerminal,
+    look = false,
+    anyway = false,
+  }: {
+    free?: boolean
+    draft?: boolean
+    pictures?: boolean
+    woken?: boolean
+    probe?: boolean
+    boundTerminal?: string
+    look?: boolean
+    anyway?: boolean
+  } = {},
 ): Promise<ActionResult> {
   const text = String(message ?? '').trim()
   if (!text) return { ok: false, error: t('err.emptyMessage') }
+  const changed = (): Extract<ActionResult, { ok: false }> => ({
+    ok: false,
+    error: t('err.sessionChanged', { name: item.name }),
+  })
+  if (boundTerminal !== undefined && (!item.session || !item.pane || item.day || item.sleeping)) return changed()
   if (item?.day) return toDay(item, text)
   // A sleeping session whose pane is gone wakes in a new tab: pi's (#178), Claude's that wake closed (#204).
   if (!item?.pane && !item?.sleeping) return { ok: false, error: t('err.noPane') }
   const expectedSession = item.session ?? null
-  const refused = (agent: HerdrAgent | null): ActionResult | null => {
-    if (!agent || agent.session !== expectedSession)
-      return { ok: false, error: t('err.sessionChanged', { name: item.name }) }
+  const refused = (agent: HerdrAgent | null): Extract<ActionResult, { ok: false }> | null => {
+    const actualSession =
+      agent?.kind === AGY_AGENT && agent.session && agent.session !== expectedSession
+        ? (deps.agy.rootSession(agent.session) ?? agent.session)
+        : (agent?.session ?? null)
+    if (!agent || actualSession !== expectedSession) return changed()
     if (agent.status === 'blocked')
       return { ok: false, busy: true, dialog: true, error: t('err.blocked', { name: item.name }) }
-    if (free && agent.status === 'working')
+    if (
+      free &&
+      (agent.status === 'working' ||
+        (agent.kind === AGY_AGENT && expectedSession && deps.agy.hasRunningSubagent(expectedSession)))
+    )
       return { ok: false, busy: true, error: t('err.working', { name: item.name }) }
     return null
   }
@@ -571,7 +730,24 @@ export async function send(
     const agent = named ? await namedAgent(pane, expectedSession) : await agentGet(pane)
     // Recheck after wake too: the pane may now host a different session.
     const before = refused(agent)
-    if (before) return before
+    const kind = agent?.kind === 'claude' || agent?.kind === PI_AGENT || agent?.kind === AGY_AGENT ? agent.kind : null
+    if (before?.dialog && look && kind && boundTerminal === undefined && !probe) {
+      // Only an empty input box with no dialog over it: text in the box may be a frame the board
+      // does not know, or the user's own.
+      if ((await shownDraft(pane, kind)) !== '') return before
+      // send-text types every character as it is: a line break could submit half the message.
+      const typeable = [...text].every(c => c >= ' ' && c !== '\x7f')
+      if (!anyway || !typeable)
+        return { ...before, error: t('err.blockedNoDialog', { name: item.name }), ...(typeable && { code: 'stale' }) }
+      const fresh = await agentGet(pane)
+      if (!fresh || fresh.session !== expectedSession || fresh.kind !== kind) return changed()
+      if (fresh.status === 'blocked') {
+        // The screen once more, right before typing: a dialog that came up meanwhile gets nothing.
+        if ((await shownDraft(pane, kind)) !== '') return before
+        return await sendAnyway(pane, kind, text, item.name)
+      }
+      // herdr no longer says blocked: the usual send below.
+    } else if (before) return before
     const claude = agent?.kind === 'claude' || item.agent === 'claude'
     // Pictures to Claude on the board's own server: the Enter is the board's, once the paste is over.
     const settle = pictures && claude && onServer(deps.cfg)
@@ -600,6 +776,48 @@ export async function send(
       // A message of the board's still in the box, or its pictures still being read (sent again
       // from the thread): it is not typed twice, only its Enter is missing.
       typed = settle && ((!!draft && holdsItsLine(draft, text)) || stillPasting(screen))
+    } else if ((agent?.kind === AGY_AGENT || item.agent === AGY_AGENT) && guardDraft) {
+      // Scheduled reminders and restart notes must not collide with unsent text or a dialog in agy.
+      const draft = agyDraft(await herdrText(['agent', 'read', pane, '--source', 'visible', '--ansi'], 10_000))
+      if (draft === null || draft !== '') {
+        return {
+          ok: false,
+          busy: true,
+          draft: draft !== null,
+          dialog: draft === null,
+          error: t(draft === null ? 'err.blocked' : 'err.draft', { name: item.name }),
+        }
+      }
+      const fresh = await agentGet(pane)
+      const after = refused(fresh)
+      if (after) return after
+      if (fresh?.kind !== agent?.kind) return { ok: false, error: t('err.sessionChanged', { name: item.name }) }
+    }
+    if (boundTerminal !== undefined) {
+      // A fresh native snapshot checks both identities together, after any screen read.
+      const current = await snapshot()
+      const matches = current.panes.filter(p => p.agent_session?.value === expectedSession)
+      const [target] = matches
+      if (
+        matches.length !== 1 ||
+        target?.pane_id !== pane ||
+        target.terminal_id !== boundTerminal ||
+        target.agent !== item.agent ||
+        nativeBoardSid(target) !== expectedSession
+      )
+        return changed()
+      const blocked = refused(asAgent({ agent: target }))
+      if (blocked) return blocked
+      if (target.agent_status !== 'idle' && target.agent_status !== 'done') return changed()
+    }
+    // Codex has the same trouble with a draft: Enter sends it together with the text. Only a scheduled
+    // message looks, and only at a Codex session, so every other session makes the calls it made.
+    if (guardDraft && (agent?.kind === CODEX_AGENT || item.agent === CODEX_AGENT)) {
+      const draft = codexDraft(await herdrText(['agent', 'read', pane, '--source', 'visible', '--ansi'], 10_000))
+      if (draft) return { ok: false, busy: true, draft: true, error: t('err.draft', { name: item.name }) }
+      const fresh = await agentGet(pane)
+      const after = refused(fresh)
+      if (after) return after
     }
     if (probe) return { ok: true }
     // This read and prompt are separate CLI calls, not an atomic identity check and send.

@@ -21,14 +21,30 @@
 //                                               script, macOS' toast.ts)
 //   bun src/entrypoints/install.ts --no-toast   and without them
 //   bun src/entrypoints/install.ts --codex      Codex's hooks and the commands, leaving Claude alone
+//   bun src/entrypoints/install.ts --agy        Antigravity CLI's hooks, MCP, status line, skills and commands, leaving Claude alone
+//   bun src/entrypoints/install.ts --codex --codex-home [dir] [--codex-master]
+//                                               the same in a CODEX_HOME of its own for the sessions
+//                                               herdr runs (default ~/.config/herdr/codex), linked to
+//                                               ~/.codex for auth and config; ~/.codex is not written
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { installSkill } from '../adapters/agents-skill.ts'
-import { codexHooksPlan, installCodexHooks } from '../adapters/codex-hooks.ts'
-import { configFile, loadConfig, readConfigFile } from '../adapters/config-file.ts'
+import {
+  agyConfigDir,
+  agyHooksPlan,
+  agyMcpPlan,
+  agySettingsDir,
+  agySettingsPlan,
+  installAgyHooks,
+  installAgyMcp,
+  installAgySettings,
+} from '../adapters/agy-hooks.ts'
+import { defaultCodexHome, prepareCodexHome } from '../adapters/codex-dedicated.ts'
+import { codexHooksPlan, installCodexHooks, labelHerdrHookIn } from '../adapters/codex-hooks.ts'
+import { configFile, loadConfig, readConfigFile, withConfigFile } from '../adapters/config-file.ts'
 import { putBrowserParts } from '../adapters/desktop-files.ts'
-import { claudeIntegrationInstall, codexIntegrationInstall } from '../adapters/herdr.ts'
+import { agyIntegrationInstall, claudeIntegrationInstall, codexIntegrationInstall } from '../adapters/herdr.ts'
 import { installInto, readSettings } from '../adapters/hook-settings.ts'
 import { installLaunchers } from '../adapters/launchers.ts'
 import { ROOT } from '../adapters/paths.ts'
@@ -43,9 +59,16 @@ import { wakeSwitch } from '../core/wake/config.ts'
 import { threadsConfig } from '../core/work-threads.ts'
 import { ensureToastApp, toastAppState } from '../integrations/toast-mac.ts'
 
-const args = process.argv.slice(2)
-for (const a of args.filter(a => a !== '--toast' && a !== '--no-toast' && a !== '--codex'))
-  console.log(`ignored ${a}: the options are --toast, --no-toast and --codex`)
+const argv = process.argv.slice(2)
+// --codex-home takes the folder that follows it unless that is another option.
+const homeAt = argv.indexOf('--codex-home')
+const homeValue = homeAt >= 0 && argv[homeAt + 1] && !argv[homeAt + 1]?.startsWith('--') ? argv[homeAt + 1] : undefined
+const args = argv.filter((_, i) => i !== homeAt && !(homeValue !== undefined && i === homeAt + 1))
+const master = args.includes('--codex-master')
+for (const a of args.filter(a => !['--toast', '--no-toast', '--codex', '--codex-master', '--agy'].includes(a)))
+  console.log(
+    `ignored ${a}: the options are --toast, --no-toast, --codex, --codex --codex-home [dir] [--codex-master] and --agy`,
+  )
 let toast = args.includes('--toast') ? true : args.includes('--no-toast') ? false : undefined
 const toasts = process.platform === 'win32' || process.platform === 'darwin'
 if (toast && !toasts) {
@@ -72,14 +95,95 @@ const isFolder = (path: string): boolean => {
     return false
   }
 }
+// Opt-in: the normal Claude install never reads or changes an Antigravity CLI folder.
+if (args.includes('--agy')) {
+  try {
+    if (args.includes('--toast') || args.includes('--no-toast'))
+      throw new Error('--agy does not take --toast or --no-toast')
+    if (args.includes('--codex')) throw new Error('pass --agy or --codex, not both')
+    const dir = agyConfigDir()
+    const settingsDir = agySettingsDir()
+    const script = join(ROOT, 'src', 'entrypoints', 'agy-hook.ts')
+    const agyStatusline = join(ROOT, 'src', 'entrypoints', 'agy-statusline.ts')
+    const plan = agyHooksPlan(dir, script)
+    const mcpPlan = agyMcpPlan(dir, paths.bun, paths.cli)
+    const settingsPlan = agySettingsPlan(settingsDir, paths.bun, agyStatusline)
+    installAgyHooks(plan)
+    installAgyMcp(mcpPlan)
+    installAgySettings(settingsPlan)
+    installShims()
+    const agySkills = [
+      { name: SKILL, from: files.skill },
+      { name: TEAM_SKILL, from: files.teamSkill },
+      ...(threadsConfig(loadConfig().threads) ? [{ name: THREADS_SKILL, from: files.threadsSkill }] : []),
+    ].map(s => ({ ...s, text: readText(s.from) }))
+    for (const s of agySkills) {
+      if (s.text === null) continue
+      const skill = installSkill(dir, s.text, s.name)
+      console.log(
+        skill.action === 'foreign'
+          ? `skipped ${skill.file}: a skill of that name that is not ours`
+          : `skill: ${skill.file}`,
+      )
+    }
+    console.log(`Antigravity CLI hooks: SessionStart, PreInvocation -> ${script} in ${plan.file}`)
+    console.log(`Antigravity CLI MCP: ListAgents, SendMessage -> ${paths.cli} mcp --agents in ${mcpPlan.file}`)
+    console.log(
+      settingsPlan.statusLineSet
+        ? `Antigravity CLI status line: ${agyStatusline} in ${settingsPlan.file}`
+        : `Antigravity CLI status line in ${settingsPlan.file}: left as it was (not ours)`,
+    )
+    if (Bun.which('bun') === null)
+      console.log('Antigravity CLI hooks: warning: bun is not on PATH; add Bun to PATH before starting agy.')
+    try {
+      await agyIntegrationInstall()
+      console.log(`herdr's hook: antigravity-cli integration in ${dir}`)
+    } catch (err) {
+      console.log(
+        `herdr's Antigravity CLI hook: not installed: ${messageOf(err).split(/\r?\n/)[0]}. Run herdr integration install antigravity-cli.`,
+      )
+    }
+  } catch (err) {
+    console.error(`agent-board install: ${messageOf(err)}`)
+    process.exit(1)
+  }
+  process.exit(0)
+}
 // Opt-in: the normal Claude install never reads or changes a Codex folder.
 if (args.includes('--codex')) {
   try {
     if (args.includes('--toast') || args.includes('--no-toast'))
       throw new Error('--codex does not take --toast or --no-toast')
-    const dir = process.env.CODEX_HOME || join(homedir(), '.codex')
+    if (homeAt >= 0 && (homeValue ?? '').startsWith('~'))
+      throw new Error('--codex-home: write the folder out, the shell has not expanded ~')
+    if (master && homeAt < 0) console.log('ignored --codex-master: it goes with --codex --codex-home')
+    const dedicated = homeAt >= 0 ? (homeValue ?? defaultCodexHome()) : null
+    const dir = dedicated ?? (process.env.CODEX_HOME || join(homedir(), '.codex'))
     const script = join(ROOT, 'src', 'entrypoints', 'codex-hook.ts')
-    const plan = codexHooksPlan(dir, script)
+    // Named in Codex's /hooks only in the dedicated home: a name changes a hook's trusted hash.
+    const labels = dedicated
+      ? { SessionStart: t('setup.codexHook.session'), UserPromptSubmit: t('setup.codexHook.prompt') }
+      : undefined
+    const plan = codexHooksPlan(dir, script, labels)
+    if (dedicated) {
+      const { linked, failed } = prepareCodexHome(dedicated, join(homedir(), '.codex'), { master })
+      console.log(`Codex home: ${dedicated}${linked.length ? `, linked from ~/.codex: ${linked.join(', ')}` : ''}`)
+      if (failed.length)
+        console.log(`Codex home: could not link ${failed.join(', ')}; link or copy them into ${dedicated} yourself.`)
+      // The board finds the rollouts of these sessions there (adapters/codex-home.ts).
+      loadConfig() // writes the defaults when there is no config.json yet
+      withConfigFile((raw, save) => {
+        if (raw && raw.codexHome !== dedicated) save({ ...raw, codexHome: dedicated })
+      })
+      const skill = [
+        { name: THREADS_SKILL, from: files.threadsSkill },
+        { name: SKILL, from: files.codexSkill },
+      ]
+      for (const s of skill) {
+        const text = readText(s.from)
+        if (text !== null) console.log(`skill: ${installSkill(dedicated, text, s.name).file}`)
+      }
+    }
     installCodexHooks(plan)
     installShims()
     console.log(`Codex hooks: SessionStart, UserPromptSubmit -> ${script} in ${plan.file}`)
@@ -88,8 +192,11 @@ if (args.includes('--codex')) {
     console.log(
       'Codex: enable hooks if disabled (codex features enable hooks), then review and trust these hooks in /hooks.',
     )
+    if (dedicated)
+      console.log(`Codex: the board's New session window and spawn-agent start Codex with CODEX_HOME=${dedicated}.`)
     try {
       await codexIntegrationInstall(dir)
+      if (dedicated) labelHerdrHookIn(dir, t('setup.codexHook.herdr'))
       console.log(`herdr's hook: codex integration in ${dir}`)
     } catch (err) {
       console.log(

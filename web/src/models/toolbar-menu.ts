@@ -18,16 +18,20 @@ export interface EntryInput {
   team?: { unread: number } | null
   /** Threads that wait on the owner (#392); null: threads are off. */
   threads?: { needsOwner: number } | null
+  /** What waits on the owner and what went by default unseen (#487); null: decisions are off. */
+  decisions?: { waiting: number; defaulted: number } | null
   /** The usage pill's own text. */
   usage: string
   /** The server chip's own words (the board's own server's page only; '' elsewhere). */
   server?: string
   presence: PresenceSwitchView | null
+  /** The away journal's "Since 23:56" (#489); null: no return to open again. */
+  journal?: string | null
 }
 
 /** Every action's entry; More lists those that left the row (moreEntries). */
 export function toolbarEntries(input: EntryInput, t: Translator): ToolbarEntry[] {
-  const { canMutate, schedule, tasks, next, usage, presence, team, threads, server } = input
+  const { canMutate, schedule, tasks, next, usage, presence, team, threads, journal, decisions, server } = input
   const proposed = tasks?.proposed ?? 0
   return [
     ...(presence
@@ -54,6 +58,13 @@ export function toolbarEntries(input: EntryInput, t: Translator): ToolbarEntry[]
       ...(threads && threads.needsOwner > 0 && { count: threads.needsOwner, alert: true }),
     },
     {
+      id: 'decisions-open',
+      label: t('dec.open'),
+      ...(decisions && decisions.waiting > 0 && { count: decisions.waiting }),
+      ...(decisions && decisions.defaulted > 0 && { hint: t('dec.defaultedHint') }),
+      ...(decisions && decisions.waiting + decisions.defaulted > 0 && { alert: true }),
+    },
+    {
       id: 'new-session',
       label: t('launch.toolbar'),
       ...(!canMutate && { disabled: true, reason: t('mobile.readOnly') }),
@@ -70,6 +81,7 @@ export function toolbarEntries(input: EntryInput, t: Translator): ToolbarEntry[]
       count: next,
       ...(next === 0 && { disabled: true, reason: t('attention.none') }),
     },
+    ...(journal ? [{ id: 'journal-open', label: journal }] : []),
     { id: 'cal-tb', label: t('cal.open') },
     { id: 'time-open', label: t('time.open') },
     { id: 'limits', label: usage || t('limits.title') },

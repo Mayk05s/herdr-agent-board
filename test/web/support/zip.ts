@@ -1,7 +1,7 @@
 // A zip made in a test (an Office file's parts): stored or deflated, with a central directory a
-// reader can trust or one that says a part is bigger than it is (a zip bomb's), sizes in ZIP64
-// extra fields, bytes after its end, or entry counts that disagree.
-import { deflateRawSync } from 'node:zlib'
+// reader can trust or one that says a part is bigger or smaller than it is (a zip bomb's), sizes
+// in ZIP64 extra fields or a data descriptor, bytes after its end, or entry counts that disagree.
+import { constants, deflateRawSync } from 'node:zlib'
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n
@@ -24,9 +24,41 @@ export interface ZipPart {
   claims?: number
   /** The sizes as 0xFFFFFFFF, the true ones in a ZIP64 extra field. */
   zip64?: boolean
+  /** The compressed size the central directory says, instead of the true one. */
+  claimsCompressed?: number
+  /** A data descriptor after the data (flag bit 3): the local header's CRC and sizes 0. */
+  descriptor?: boolean
+  /** The method the local header says, when it should say otherwise than the directory. */
+  localMethod?: number
+  /** The part already deflated (`data` is then ignored), and the size it unpacks to. */
+  deflated?: Deflated
+}
+
+export interface Deflated {
+  body: Uint8Array
+  size: number
+}
+
+/**
+ * `head`, then `mb` megabytes of spaces, then `tail`, deflated without ever holding them: a
+ * megabyte of spaces deflated once and its blocks repeated (each refers back only within itself).
+ */
+export function deflatedRun(head: string, mb: number, tail: string): Deflated {
+  const sync = { finishFlush: constants.Z_SYNC_FLUSH }
+  const space = deflateRawSync(Buffer.alloc(1 << 20, 0x20), sync)
+  const body = Buffer.concat([
+    deflateRawSync(Buffer.from(head), sync),
+    ...Array.from({ length: mb }, () => space),
+    deflateRawSync(Buffer.from(tail)),
+  ])
+  return { body: new Uint8Array(body), size: Buffer.byteLength(head) + mb * (1 << 20) + Buffer.byteLength(tail) }
 }
 
 export interface ZipOptions {
+  /** Bytes the archive will follow: added to every offset it gives (an archive appended to others). */
+  base?: number
+  /** The end record's comment. */
+  comment?: Uint8Array
   /** Bytes after the end of central directory record. */
   tail?: number
   /** Bytes before the archive (its offsets left as they are, as a self-extracting stub has it). */
@@ -53,40 +85,50 @@ export function zip(parts: ZipPart[], options: ZipOptions = {}): Uint8Array {
   const decoy: Buffer[] = []
   let offset = 0
   for (const part of parts) {
-    const raw = typeof part.data === 'string' ? Buffer.from(part.data) : Buffer.from(part.data)
-    const body = part.stored ? raw : deflateRawSync(raw)
+    const raw = part.deflated ? Buffer.alloc(0) : Buffer.from(part.data)
+    const body = part.deflated ? Buffer.from(part.deflated.body) : part.stored ? raw : deflateRawSync(raw)
+    const size = part.deflated?.size ?? raw.length
     const name = Buffer.from(part.name)
     const crc = crc32(raw)
     const head = Buffer.alloc(30)
     head.writeUInt32LE(0x04034b50, 0)
     head.writeUInt16LE(20, 4)
-    head.writeUInt16LE(part.stored ? 0 : 8, 8)
-    head.writeUInt32LE(crc, 14)
-    head.writeUInt32LE(body.length, 18)
-    head.writeUInt32LE(raw.length, 22)
+    head.writeUInt16LE(part.descriptor ? 8 : 0, 6)
+    head.writeUInt16LE(part.localMethod ?? (part.stored ? 0 : 8), 8)
+    head.writeUInt32LE(part.descriptor ? 0 : crc, 14)
+    head.writeUInt32LE(part.descriptor ? 0 : body.length, 18)
+    head.writeUInt32LE(part.descriptor ? 0 : size, 22)
     head.writeUInt16LE(name.length, 26)
-    local.push(head, name, body)
+    const descriptor = Buffer.alloc(part.descriptor ? 16 : 0)
+    if (part.descriptor) {
+      descriptor.writeUInt32LE(0x08074b50, 0)
+      descriptor.writeUInt32LE(crc, 4)
+      descriptor.writeUInt32LE(body.length, 8)
+      descriptor.writeUInt32LE(part.claims ?? size, 12)
+    }
+    local.push(head, name, body, descriptor)
     const extra = Buffer.alloc(part.zip64 ? 20 : 0)
     if (part.zip64) {
       extra.writeUInt16LE(1, 0)
       extra.writeUInt16LE(16, 2)
-      extra.writeBigUInt64LE(BigInt(part.claims ?? raw.length), 4)
+      extra.writeBigUInt64LE(BigInt(part.claims ?? size), 4)
       extra.writeBigUInt64LE(BigInt(body.length), 12)
     }
     const entry = Buffer.alloc(46)
     entry.writeUInt32LE(0x02014b50, 0)
     entry.writeUInt16LE(45, 4)
     entry.writeUInt16LE(45, 6)
+    entry.writeUInt16LE(part.descriptor ? 8 : 0, 8)
     entry.writeUInt16LE(part.stored ? 0 : 8, 10)
     entry.writeUInt32LE(crc, 16)
-    entry.writeUInt32LE(part.zip64 ? 0xffffffff : body.length, 20)
-    entry.writeUInt32LE(part.zip64 ? 0xffffffff : (part.claims ?? raw.length), 24)
+    entry.writeUInt32LE(part.zip64 ? 0xffffffff : (part.claimsCompressed ?? body.length), 20)
+    entry.writeUInt32LE(part.zip64 ? 0xffffffff : (part.claims ?? size), 24)
     entry.writeUInt16LE(name.length, 28)
     entry.writeUInt16LE(extra.length, 30)
-    entry.writeUInt32LE(offset, 42)
+    entry.writeUInt32LE(offset + (options.base ?? 0), 42)
     central.push(entry, name, extra)
     if (options.zip64End?.decoy?.includes(part.name)) decoy.push(entry, name, extra)
-    offset += head.length + name.length + body.length
+    offset += head.length + name.length + body.length + descriptor.length
   }
   const directory = Buffer.concat(central)
   const end = Buffer.alloc(22)
@@ -94,7 +136,8 @@ export function zip(parts: ZipPart[], options: ZipOptions = {}): Uint8Array {
   end.writeUInt16LE(options.onDisk ?? parts.length, 8)
   end.writeUInt16LE(options.total ?? parts.length, 10)
   end.writeUInt32LE(directory.length, 12)
-  end.writeUInt32LE(offset, 16)
+  end.writeUInt32LE(offset + (options.base ?? 0), 16)
+  end.writeUInt16LE(options.comment?.length ?? 0, 20)
   const out: Buffer[] = [Buffer.alloc(options.head ?? 0), ...local, directory]
   if (options.gap) {
     // The second directory lists the same parts' places with other names and sizes.
@@ -134,5 +177,7 @@ export function zip(parts: ZipPart[], options: ZipOptions = {}): Uint8Array {
       end.writeUInt32LE(0xffffffff, 16)
     }
   }
-  return new Uint8Array(Buffer.concat([...out, end, Buffer.alloc(options.tail ?? 0)]))
+  return new Uint8Array(
+    Buffer.concat([...out, end, Buffer.from(options.comment ?? new Uint8Array()), Buffer.alloc(options.tail ?? 0)]),
+  )
 }

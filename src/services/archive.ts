@@ -38,11 +38,12 @@ import {
   updateArchived,
 } from '../adapters/archive-store.ts'
 import { readCard } from '../adapters/cards.ts'
-import { cwdOf } from '../adapters/claude-home.ts'
-import { herdr, workspaceList } from '../adapters/herdr.ts'
+import { transcriptCwd } from '../adapters/claude-home.ts'
+import { agentGet, herdr, workspaceList } from '../adapters/herdr.ts'
 import { isRecord } from '../adapters/json-store.ts'
 import { pause } from '../adapters/pacing.ts'
 import { listEntries, removeEntry, restoreEntry } from '../adapters/schedule-store.ts'
+import { AGY_AGENT } from '../core/agy.ts'
 import { type ArchiveRecord, type ArchiveReturning, archiveBlock } from '../core/archive.ts'
 import { noteOf } from '../core/board.ts'
 import { categoryInfo } from '../core/categories.ts'
@@ -51,6 +52,7 @@ import { t } from '../core/lang.ts'
 import { sameDir, sessionWorkspace, UNSAFE_CHARS } from '../core/launch/names.ts'
 import { launchTarget, type ProfileSet, sessionProfile } from '../core/profiles.ts'
 import { cleanName, type ScheduleEntry, type SessionRef } from '../core/schedule-rules.ts'
+import { TURN_RESUME_KIND } from '../core/turn-resume.ts'
 import type { Config, Item, Translator } from '../core/types.ts'
 import { sleepLabels } from '../core/wake/sessions.ts'
 import { nextRun } from '../core/when.ts'
@@ -92,8 +94,17 @@ function update(
  * in still shows for a moment (herdr's snapshot can lag the close). Seen in another pane once it
  * is archived, the session is back (resumed by Return, or by hand); one being put back shows.
  */
-export const hides = (record: ArchiveRecord | null, item: Pick<Item, 'pane'>): boolean =>
-  !!record && (record.state === 'closing' || (record.state === 'archived' && record.pane === item.pane))
+export const hides = (record: ArchiveRecord | null, item: Pick<Item, 'pane' | 'sleeping'>): boolean =>
+  !!record && (record.state === 'closing' || (record.state === 'archived' && archivedPane(record, item)))
+
+/**
+ * Whether the item is in the pane its record was archived in. A sleeper whose pane wake closed
+ * (#204) has none: null on the board, '' in its record. Read as different, it came straight back
+ * (#323). Only a sleeper: a MokuPilot call agent going on in the session has no pane either, and
+ * shows (#326).
+ */
+const archivedPane = (record: ArchiveRecord, item: Pick<Item, 'pane' | 'sleeping'>): boolean =>
+  record.pane === item.pane || (record.pane === '' && item.pane == null && !!item.sleeping)
 
 // ------------------------------------------------------------------ the session's profile
 
@@ -162,7 +173,7 @@ async function paneGet(pane: string): Promise<PaneFacts | null> {
 export type ArchiveSubject = Pick<
   Item,
   'name' | 'autoName' | 'pane' | 'session' | 'profile' | 'profileFolder' | 'profileWanted'
->
+> & { agent?: string }
 
 /**
  * Whether a shell's label is one herdr-wake gives this sleeper (sleepLabels). The board knows the
@@ -191,8 +202,11 @@ export type FreeToClose = { ok: true; pane: PaneFacts | null } | { ok: false; wh
  * `tr`'s language (profileDoubt).
  */
 export async function freeToClose(deps: Deps, item: ArchiveSubject, tr: Translator = t): Promise<FreeToClose> {
-  const doubt = profileDoubt(item, deps.profiles(), tr)
-  if (doubt !== null) return { ok: false, why: 'archive.why.profile', detail: doubt }
+  const isAgy = item.agent === AGY_AGENT
+  if (!isAgy) {
+    const doubt = profileDoubt(item, deps.profiles(), tr)
+    if (doubt !== null) return { ok: false, why: 'archive.why.profile', detail: doubt }
+  }
   // A sleeper whose pane wake closed (#204): nothing to close.
   if (!item.pane) return { ok: true, pane: null }
   const target = item.pane
@@ -215,6 +229,19 @@ export async function freeToClose(deps: Deps, item: ArchiveSubject, tr: Translat
       return { ok: false, why: 'archive.why.herdr', detail: messageOf(err) }
     }
     return { ok: true, pane }
+  }
+  if (isAgy) {
+    if (pane.agent !== AGY_AGENT || pane.session !== (item.session ?? null))
+      return { ok: false, why: 'archive.why.gone' }
+    try {
+      const agent = await agentGet(target)
+      if (!agent || agent.session !== (item.session ?? null)) return { ok: false, why: 'archive.why.gone' }
+      if (agent.status === 'blocked') return { ok: false, why: 'archive.why.dialog' }
+      if (agent.status === 'working') return { ok: false, why: 'archive.why.working' }
+      return { ok: true, pane }
+    } catch (err) {
+      return { ok: false, why: 'archive.why.herdr', detail: messageOf(err) }
+    }
   }
   if (pane.agent !== 'claude' || pane.session !== (item.session ?? null)) return { ok: false, why: 'archive.why.gone' }
   const ready = await readyToSleep(deps, item)
@@ -269,6 +296,7 @@ export async function askArchive(
     title: item.title ?? '',
     sleeping: !!item.sleeping,
     activity: item.activity ?? 0,
+    ...(item.agent && item.agent !== 'claude' && { agent: item.agent }),
     // The profile it runs in: it comes back in that one, or not at all (bringBack).
     ...(item.profile !== undefined && { profile: item.profile }),
     ...(item.profileFolder !== undefined && { profileFolder: item.profileFolder }),
@@ -296,7 +324,7 @@ export async function askArchive(
 export function holdEntries(key: string): number {
   let dropped = 0
   for (const e of listEntries().filter(x => x.key === key && !x.receipt)) {
-    if (e.kind === 'restart' || e.kind === 'sleep') {
+    if (e.kind === 'restart' || e.kind === 'sleep' || e.kind === TURN_RESUME_KIND) {
       removeEntry(e.id)
       dropped++
       continue
@@ -588,14 +616,14 @@ export function markReturning(key: string, launch: string | null): void {
  * by hand. Its entries go back with its pane and folder now, the record goes. Also finishes a
  * record a board left `restoring` when it stopped. Returns whether the record is gone.
  */
-export function settleReturned(item: Pick<Item, 'key' | 'pane' | 'cwd'>): boolean {
+export function settleReturned(item: Pick<Item, 'key' | 'pane' | 'cwd' | 'sleeping'>): boolean {
   const seen: { r: ArchiveRecord | null; fresh: boolean } = { r: null, fresh: false }
   update(item.key, rec => {
     if (rec.state === 'restoring') {
       seen.r = rec
       return undefined
     }
-    if (rec.state !== 'archived' || rec.pane === item.pane) return undefined
+    if (rec.state !== 'archived' || archivedPane(rec, item)) return undefined
     const moved: ArchiveRecord = { ...rec, state: 'restoring', moved: true }
     seen.r = moved
     seen.fresh = true
@@ -674,24 +702,37 @@ export async function bringBack(deps: Deps, app: ReturnApp, key: string): Promis
     markReturning(key, null)
     return { ok: false, error }
   }
-  // Its own profile, hidden or not, never another (launchTarget with the record as the parent).
-  const set = deps.profiles()
-  const facts = recordProfile(deps, rec)
-  const target = launchTarget(undefined, { name: rec.name, ...facts }, set)
-  const refused = (profile: string): BringBack =>
-    fail(t('archive.err.profile', { name: rec.name, profile, session: rec.session }))
-  if (!target.ok) return refused(profileDoubt(facts, set) ?? t('profile.unknown'))
-  const own = target.profile
-  // Its conversation, in that profile's folder only: Claude resumes a session only where it ran.
-  const path = deps.homes.forDir(own.dir).transcriptPath(rec.session, rec.cwd)
-  if (!path) {
-    const elsewhere = set.list.some(
-      p => !sameDir(p.dir, own.dir) && deps.homes.forDir(p.dir).transcriptPath(rec.session, rec.cwd),
-    )
-    return elsewhere ? refused(own.title) : fail(t('archive.err.noTranscript', { name: rec.name }))
+  // Its own profile (Claude), or Antigravity's conversation folder (agy needs no Claude profile).
+  const isAgy = rec.agent === AGY_AGENT
+  let cwd = rec.cwd
+  let profileBody: { profile?: string } = {}
+  let parentOpt: {
+    parent?: { key: string; name: string; profile?: string | null; profileFolder?: string; profileWanted?: string }
+  } = {}
+  if (isAgy) {
+    if (!deps.agy.transcriptPath(rec.session)) return fail(t('archive.err.noTranscript', { name: rec.name }))
+    cwd = deps.agy.sessionCwd(rec.session) || rec.cwd
+  } else {
+    const set = deps.profiles()
+    const facts = recordProfile(deps, rec)
+    const target = launchTarget(undefined, { name: rec.name, ...facts }, set)
+    const refused = (profile: string): BringBack =>
+      fail(t('archive.err.profile', { name: rec.name, profile, session: rec.session }))
+    if (!target.ok) return refused(profileDoubt(facts, set) ?? t('profile.unknown'))
+    const own = target.profile
+    // Its conversation, in that profile's folder only: Claude resumes a session only where it ran.
+    const path = deps.homes.forDir(own.dir).transcriptPath(rec.session, rec.cwd)
+    if (!path) {
+      const elsewhere = set.list.some(
+        p => !sameDir(p.dir, own.dir) && deps.homes.forDir(p.dir).transcriptPath(rec.session, rec.cwd),
+      )
+      return elsewhere ? refused(own.title) : fail(t('archive.err.noTranscript', { name: rec.name }))
+    }
+    // Claude finds a session by the folder whose project folder holds its transcript (#621).
+    cwd = await transcriptCwd(path, rec.cwd)
+    profileBody = { profile: own.id }
+    parentOpt = { parent: { key: rec.key, name: rec.name, ...facts } }
   }
-  // Claude finds a session by the folder it ran in.
-  const cwd = (await cwdOf(path)) || rec.cwd
   let workspaces: { id: string; label: string }[]
   try {
     workspaces = (await workspaceList(8000)).map(w => ({ id: w.id, label: w.label ?? '' }))
@@ -717,10 +758,14 @@ export async function bringBack(deps: Deps, app: ReturnApp, key: string): Promis
       .replace(/^[\s/-]+/, '')
       .trim()
       .slice(0, 60) || rec.session.slice(0, 8)
-  const started = await app.launches.start({ name, cwd, category, workspace, profile: own.id }, items, {
-    resume: rec.session,
-    parent: { key: rec.key, name: rec.name, ...facts },
-  })
+  const started = await app.launches.start(
+    { name, cwd, category, workspace, ...profileBody, ...(isAgy && { agent: AGY_AGENT }) },
+    items,
+    {
+      resume: rec.session,
+      ...parentOpt,
+    },
+  )
   if (!started.ok) return fail(started.error)
   markReturning(key, started.id)
   deps.log(`archive ${rec.name}: resuming ${rec.session} in ${cwd}`)

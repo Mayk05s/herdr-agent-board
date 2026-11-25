@@ -9,6 +9,8 @@
 // last entry written. Only the entries on the way from it back to the root are the session as it
 // is now; a branch left behind with /tree is not read.
 import { posix, win32 } from 'node:path'
+import { AGY_AGENT } from './agy.ts'
+import { parseLostAccess } from './lost-access.ts'
 import { boardNotice } from './notices.ts'
 import {
   type ConversationTurn,
@@ -65,14 +67,21 @@ export interface Naming {
   title: string
   command: (name: string) => string
   done: RegExp
+  /** An agent that prints no confirmation: what its screen shows once `name` took. Asked before `done`. */
+  doneFor?: (name: string) => RegExp
 }
 
 export const CLAUDE_NAMING: Naming = { title: 'Claude', command: name => `/rename ${name}`, done: /Session renamed/i }
 export const PI_NAMING: Naming = { title: 'pi', command: name => `/name ${name}`, done: /Session name set/i }
+export const AGY_NAMING: Naming = {
+  title: 'Antigravity',
+  command: name => `/rename ${name}`,
+  done: /(?:Session|Conversation|Thread)?\s*renamed|Title (?:set|updated)/i,
+}
 
-/** The agents the board starts and names: Claude, and pi (herdr's kinds); null for any other. */
+/** The agents the board starts and names: Claude, pi and Antigravity (herdr's kinds); null for any other. */
 export function namingOf(kind: string | null | undefined): Naming | null {
-  return kind === 'claude' ? CLAUDE_NAMING : kind === PI_AGENT ? PI_NAMING : null
+  return kind === 'claude' ? CLAUDE_NAMING : kind === PI_AGENT ? PI_NAMING : kind === AGY_AGENT ? AGY_NAMING : null
 }
 
 /** Whether a board item is a pi session the board can read: herdr says pi, and its key is the file. */
@@ -192,11 +201,13 @@ const tailComplete = (info: PiInfo): boolean => !!(info.prompt && info.lastText 
 export function parsePiTail(lines: readonly string[]): PiInfo {
   const info: PiInfo = { name: '', title: '', prompt: '', lastText: '', question: '', replied: false, tool: null }
   const results = new Set<string>() // tool calls that have a result (seen later in the file)
+  let accessSettled = false
   walkBranch(
     lines,
     (head, line) => {
       if (head.type !== 'message') return
-      const message = rec(parse(line)?.message)
+      const o = parse(line)
+      const message = rec(o?.message)
       const role = str(message?.role)
       if (role === 'toolResult') {
         results.add(str(message?.toolCallId))
@@ -210,6 +221,18 @@ export function parsePiTail(lines: readonly string[]): PiInfo {
         return
       }
       if (role !== 'assistant') return
+      if (!accessSettled) {
+        const stop = str(message?.stopReason)
+        if (stop === 'error') {
+          const errText = str(message?.errorMessage).trim() || textOf(message?.content).trim()
+          const at = num(message?.timestamp) || Date.parse(str(o?.timestamp)) || 0
+          const hit = parseLostAccess(errText, { at })
+          if (hit) info.lostAccess = hit
+          accessSettled = true
+        } else if (stop !== 'aborted') {
+          accessSettled = true
+        }
+      }
       const u = rec(message?.usage)
       if (info.context == null && u) {
         const tokens = num(u.input) + num(u.cacheRead) + num(u.cacheWrite)

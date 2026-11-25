@@ -4,13 +4,18 @@
 // WorkBody), sent only to a board whose caps say `work`. Every board that takes part keeps its own
 // copy, and the copies come out the same:
 //
-//   1. Entries are immutable and carry `n`, one more than the highest the writer had seen.
+//   1. Entries are immutable and carry `n`, one more than the highest the writer had seen; a
+//      private entry, which no peer gets, the `n` of the entry it follows (#541); so does every
+//      entry of this board with nothing to send it, which is private for that (#548).
 //   2. A head field takes the value of the entry that is last in the order (n, at, author's peer
 //      id): foldShared below. Two boards with the same entries get the same head, whatever order the
 //      entries arrived in.
-//   3. Every entry carries its sender's head after it. A board whose own counter is more than one
-//      behind the entry's knows it missed entries: it writes an entry of its own that takes the
-//      sender's head fields (`entries missing here`), placed right after the sender's.
+//   3. Every entry carries its sender's head after it, folded without the sender's private
+//      entries (#549) and those that did not go out (#556). A board whose own counter is more than one behind the entry's knows it
+//      missed entries: it writes an entry of its own that takes the sender's head fields
+//      (`entries missing here`), placed right after the sender's. An entry sent after a later one
+//      was sent carries the head of now instead, and a board that adopted over its number takes
+//      the fields that still differ (`arrived late`, #561).
 //
 // What a peer may set (11.4): status, summary, what it waits on, the title, and an assignee that
 // is the peer itself (or one of its sessions), a third member of the team, nobody, or this board
@@ -52,12 +57,40 @@ export const authorPeer = (p: Party, me: string): string => (p.kind === 'peer' ?
 export const isAdoption = (e: Pick<ThreadEntry, 'type' | 'private' | 'author'>): boolean =>
   e.type === 'system' && e.private === true && e.author.kind === 'peer'
 
-/** Entries in the order every board folds a shared thread in: (n, at, author's peer id), an adoption after its sender's entry, then the id. */
+/**
+ * A private entry this board wrote itself (#541): it shares its number with the entry it follows,
+ * folds after it, and no peer holds it, nor the head fields it set (#549).
+ */
+export const ownPrivate = (e: Pick<ThreadEntry, 'private' | 'author'>): boolean =>
+  e.private === true && e.author.kind !== 'peer'
+
+/**
+ * An entry of this board that did not go out (#556): held for the owner, discarded by the owner,
+ * or refused by the hub. Until it goes, no peer holds it nor the head fields it set: it stays out
+ * of the head the next entry carries and out of the history file, as a private one does.
+ */
+export const notSent = (e: Pick<ThreadEntry, 'out'>): boolean =>
+  e.out === 'held' || e.out === 'discarded' || e.out === 'refused'
+
+/** Whether the peers hold an entry: any but this board's own private ones and those that did not go out. */
+export const wentOut = (e: Pick<ThreadEntry, 'private' | 'author' | 'out'>): boolean => !ownPrivate(e) && !notSent(e)
+
+/** Where an entry stands in this board's journal; the one being written (no row yet) is the last. */
+const writtenAt = (e: Pick<ThreadEntry, 'seq'>): number => e.seq || Number.MAX_SAFE_INTEGER
+
+/**
+ * Entries in the order every board folds a shared thread in: (n, at, author's peer id), an adoption
+ * after its sender's entry, then the id. This board's own private entries, which no other board
+ * holds, come after the others of their number, whatever the clocks say, and among themselves in
+ * the order they were written.
+ */
 export function sharedOrder(entries: readonly ThreadEntry[], me: string): ThreadEntry[] {
   const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
   return [...entries].sort(
     (a, b) =>
       a.n - b.n ||
+      Number(ownPrivate(a)) - Number(ownPrivate(b)) ||
+      (ownPrivate(a) && ownPrivate(b) ? writtenAt(a) - writtenAt(b) : 0) ||
       a.at - b.at ||
       cmp(authorPeer(a.author, me), authorPeer(b.author, me)) ||
       Number(isAdoption(a)) - Number(isAdoption(b)) ||
@@ -66,7 +99,7 @@ export function sharedOrder(entries: readonly ThreadEntry[], me: string): Thread
 }
 
 /** A thread before its first entry: what folding its feed starts from (its id, key, lane, scope and creator kept). */
-export const blankHead = (h: ThreadHead): ThreadHead => ({
+export const blankHead = ({ ref: _ref, state: _state, verify: _verify, ...h }: ThreadHead): ThreadHead => ({
   ...h,
   title: '',
   summary: '',
@@ -85,6 +118,28 @@ export function foldShared(base: ThreadHead, entries: readonly ThreadEntry[], me
   for (const e of sharedOrder(entries, me)) h = applyEntry(h, e)
   // A copy that never got the entry with the title keeps the one it was made with.
   return h.title ? h : { ...h, title: base.title }
+}
+
+/**
+ * The head as the peers fold it (#549, #556): every entry but this board's own private ones and
+ * those that did not go out (held, discarded, refused), whose fields stay here as their text does.
+ */
+export const theirHead = (base: ThreadHead, entries: readonly ThreadEntry[], me: string): ThreadHead =>
+  foldShared(base, entries.filter(wentOut), me)
+
+/**
+ * What the entry that shares a thread sets (11.2): every head field the peers hold, from the head
+ * as they would fold it (theirHead), so a thread shared again sends nothing of an entry that stayed
+ * home the first time (#563).
+ */
+export function shareSet(h: ThreadHead): EntrySet {
+  return {
+    title: h.title,
+    status: h.status,
+    summary: h.summary,
+    ...(h.waitingOn && { waitingOn: h.waitingOn }),
+    ...(h.assignee && { assignee: h.assignee }),
+  }
 }
 
 // ------------------------------------------------------------------ out (11.1)
@@ -241,6 +296,11 @@ export function missingText(from: number, to: number, who: string): string {
   return `entries missing here (${span}); the head is taken from ${who}'s copy`
 }
 
+/** The words of the entry that takes a sender's head again when an entry it missed arrives late (#561). */
+export function lateText(n: number, who: string): string {
+  return `#${n} arrived late; the head is taken again from ${who}'s copy`
+}
+
 /**
  * The key a peer's thread goes by here (11.5): its own when this board has no thread with it, else
  * with the peer's name after it (`atlas-13@ben`), letters and digits of the name, or of its key.
@@ -298,14 +358,17 @@ export interface HistoryFile {
 /** At most this many entries in one history file. */
 export const HISTORY_MAX = 2000
 
-/** The shared entries of a thread as `Send history` exports them: never a private one, nor one that came from a copy. */
+/**
+ * The shared entries of a thread as `Send history` exports them: never a private one, one that did
+ * not go out (held, discarded, refused, #556), nor one that came from a copy.
+ */
 export function historyOf(h: ThreadHead, entries: readonly ThreadEntry[], me: string): HistoryFile {
   return {
     v: 1,
     thread: h.id,
     key: wireKey(h),
     entries: entries
-      .filter(e => !e.private && e.out !== 'copy' && e.out !== 'import')
+      .filter(e => !e.private && !notSent(e) && e.out !== 'copy' && e.out !== 'import')
       .slice(-HISTORY_MAX)
       .map(e => {
         const set = wireSet(e.set, me)

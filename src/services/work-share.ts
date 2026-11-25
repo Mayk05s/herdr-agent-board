@@ -23,7 +23,16 @@ import {
   setScope,
   ThreadError,
 } from '../adapters/work-thread-store.ts'
-import { GENERAL, isPeerId, MAX_TEXT, readWork, type ThreadRef, validName, type WorkBody } from '../core/team.ts'
+import {
+  GENERAL,
+  isPeerId,
+  MAX_TEXT,
+  readWork,
+  type ThreadRef,
+  validName,
+  type WorkBody,
+  type WorkPost,
+} from '../core/team.ts'
 import {
   adoptedSet,
   fallbackLine,
@@ -32,11 +41,15 @@ import {
   type HistoryFile,
   historyOf,
   isAdoption,
+  lateText,
   localKey,
   missingText,
   type NameOf,
   peerSet,
   sharedOrder,
+  shareSet,
+  theirHead,
+  wentOut,
   wireHead,
   wireKey,
   wireSet,
@@ -44,7 +57,6 @@ import {
 } from '../core/work-share.ts'
 import {
   cleanText,
-  type EntrySet,
   LANE,
   OWNER,
   type Party,
@@ -58,7 +70,7 @@ import {
   type ThreadScope,
   TITLE_MAX,
 } from '../core/work-threads.ts'
-import { postEntry, type ThreadsCtx, tellWatchers, type Written } from './work-threads.ts'
+import { notMirrored, postEntry, type ThreadsCtx, tellWatchers, type Written } from './work-threads.ts'
 
 /** This board's peer id: what its own entries order by on a shared thread; '' before it has a key. */
 export const myPeer = (): string => readKey()?.pub ?? ''
@@ -75,7 +87,7 @@ export interface InboundWork {
   /** The session name the sender's board signed, when an agent wrote it. */
   agent?: string
   text: string
-  /** The sender's time (it orders entries, 4.3). */
+  /** The message's time, when it was sent: it orders the entry (4.3) unless `work.at` names the entry's own (#564). */
   at: number
   ref: ThreadRef
   /** The topic's key on this board's Team. */
@@ -105,15 +117,29 @@ export function fromScope(s: SharedScope, m: Pick<InboundWork, 'from' | 'topic' 
 }
 
 /**
+ * Whether a peer's message is its share of a thread this board holds from that peer's earlier
+ * sharing (#569): only the board that shared a thread shares it again.
+ */
+const reshares = (s: SharedScope, from: string, share: boolean): boolean => share && s.by === from
+
+/**
  * Whether a message that carries `work` may be kept at all (11.4): on a thread this board knows as
  * shared with that scope, from one of its members; or on a thread it does not know yet (a share, or
  * a member who joined late). Anything else is dropped as a bad frame.
  */
-export function mayTake(db: BoardDb | null, m: Pick<InboundWork, 'from' | 'topic' | 'ref'>): boolean {
+export function mayTake(
+  db: BoardDb | null,
+  m: Pick<InboundWork, 'from' | 'topic' | 'ref'> & {
+    /** The message is a share (`work.share`): from the thread's sharer it renews the scope (#569). */
+    share?: boolean
+  },
+): boolean {
   if (m.ref.id === GENERAL) return false
   const head = db ? getThread(db, m.ref.id) : null
   if (!head) return !db || !fullFrom(db, m.from)
   const s = sharingOf(head)
+  if (s && reshares(s, m.from, m.share === true))
+    return fromScope(scopeFrom(m, s.key, 0), m) && !(db && fullThread(db, head.id))
   return !!s && fromScope(s, m) && !(db && fullThread(db, head.id))
 }
 
@@ -162,19 +188,30 @@ export function ingest(
   if (!head && !w) return { taken: false, why: 'not_shared' }
   if (!head && w?.unshare) return { taken: false, why: 'not_shared' }
   if (!head && fullFrom(ctx.db, m.from)) return { taken: false, why: 'full' }
+  // The thread shared again by the peer that shared it (#569): the share renews its scope here,
+  // ended or not, with the topic it comes in, so a peer that held the earlier sharing takes it.
+  let renewed = false
   if (head) {
     const s = sharingOf(head)
-    if (!s || s.ended !== undefined) return { taken: false, why: s ? 'unshared' : 'not_shared' }
-    if (!fromScope(s, m)) return { taken: false, why: 'scope' }
+    renewed = !!s && !!w && reshares(s, m.from, w.share === true)
+    if (!renewed && (!s || s.ended !== undefined)) return { taken: false, why: s ? 'unshared' : 'not_shared' }
+    const scope = renewed && w ? scopeFrom(m, w.head.key, 0) : (s as SharedScope)
+    if (!fromScope(scope, m)) return { taken: false, why: 'scope' }
     if (fullThread(ctx.db, head.id)) return { taken: false, why: 'full' }
     // One entry moves the counter by so much at most: no peer uses up a thread's numbers.
     if (w && w.n > head.rev + MAX_N_JUMP) return { taken: false, why: 'counter' }
   } else if (w && w.n > MAX_N_JUMP) return { taken: false, why: 'counter' }
   if (entryById(ctx.db, m.id)) return { taken: false, why: 'dup' }
-  // The sender's time orders entries (4.3); one far in the future is held to a day ahead.
-  const at = Math.min(Number.isFinite(m.at) ? m.at : ctx.now, ctx.now + DAY)
+  // The entry's own time orders entries (4.3): the one `work` carries (#564), else the message's,
+  // which is when it was sent. One far in the future is held to a day ahead.
+  const sent = w?.at ?? m.at
+  const at = Math.min(Number.isFinite(sent) ? sent : ctx.now, ctx.now + DAY)
   const done = ctx.db.write(byOf(author), tx => {
     let fresh = false
+    if (renewed && head && w) {
+      setScope(tx, head.id, scopeFrom(m, w.head.key, at))
+      head = getThread(tx, head.id) ?? head
+    }
     if (!head) {
       const work = w as WorkBody
       const key = localKey(work.head.key, k => keyTaken(ctx.db, k), author.name, m.from)
@@ -227,10 +264,10 @@ export function ingest(
       )
       entry = r.entry
       after = r.head
-      // Rule 3: entries this board never got. Not for the share itself, whose earlier entries stay
-      // on its sharer's board (11.2).
+      // Rule 3: entries this board never got. Not for a share, the first or one again: the entries
+      // before it stay on its sharer's board (11.2).
       const missedFrom = fresh ? 1 : before.rev + 1
-      if (!(fresh && w.share) && w.n > missedFrom) {
+      if (!((fresh || renewed) && w.share) && w.n > missedFrom) {
         const a = appendEntry(
           tx,
           before.id,
@@ -246,6 +283,22 @@ export function ingest(
           ctx.me,
         )
         after = a.head
+      } else if (!w.hist && w.head.rev > w.n) {
+        // Rule 3 again (#561): an entry sent after a later one went out carries its sender's head as
+        // it is now. Where this board took an older head over that entry's number, the fields that
+        // still differ are taken, right after the adoptions of their number.
+        const top = Math.min(w.head.rev, after.rev)
+        const entries = entriesOf(tx, before.id)
+        const set = entries.some(e => isAdoption(e) && e.n > w.n && e.n <= top) ? adoptedSet(w.head, after) : {}
+        if (Object.keys(set).length) {
+          const last = Math.max(at, ...entries.filter(e => e.n === top).map(e => e.at + 1))
+          after = appendEntry(
+            tx,
+            before.id,
+            { n: top, at: last, author, type: 'system', text: lateText(w.n, author.name), set, private: true },
+            ctx.me,
+          ).head
+        }
       }
       if (w.unshare && s.by === m.from) setScope(tx, before.id, { ...s, ended: at })
     }
@@ -314,17 +367,29 @@ export function outgoing(
 ): Outgoing | null {
   const target = targetOf(head)
   if (!target || entry.private || entry.author.kind === 'peer') return null
-  // The head as it was right after the entry: every entry up to it, in the shared order.
+  // Whether a session's done only proposed a close is read on this board's own head, private
+  // entries and all, as the entry was folded when it was written.
   const all = sharedOrder(entriesOf(db, head.id), me)
   const upTo = all.slice(0, all.findIndex(e => e.id === entry.id) + 1)
   const after = foldShared(head, upTo.length ? upTo : [entry], me)
   const before = foldShared(head, upTo.slice(0, -1), me)
+  // A done held for a verifier (#492) goes as a proposal does: its note, not its status or summary.
   const proposed =
-    entry.author.kind === 'session' &&
-    entry.set?.status === 'done' &&
-    before.status === 'owner' &&
-    after.status === 'owner'
+    entry.set?.hold === true ||
+    (entry.author.kind === 'session' &&
+      entry.set?.status === 'done' &&
+      before.status === 'owner' &&
+      after.status === 'owner')
   const set = wireSet(entry.set, me, proposed)
+  // The head the peers hold right after it (#549): the entries before it but this board's own
+  // private ones and those that did not go out (held, discarded, refused: #556), whose fields stay
+  // here as their text does, then the entry as the peers take it.
+  // One that goes out after a later entry was sent (held, then sent by the owner: #561) carries the
+  // head the peers hold now, every entry that went out and it, so a peer that took an older head for
+  // its number takes this one (rule 3).
+  const late = all.slice(upTo.length).some(e => e.n > entry.n && (e.out === 'sent' || e.author.kind === 'peer'))
+  const shown = late ? all.filter(e => e.id !== entry.id && wentOut(e)) : upTo.slice(0, -1).filter(wentOut)
+  const theirs = foldShared(head, [...shown, asSent(entry, proposed)], me)
   const s = sharingOf(head)
   const flags = {
     ...(entry.type === 'system' && s && entry.at === s.at && s.by === 'me' && isShareEntry(entry) && { share: true }),
@@ -332,22 +397,52 @@ export function outgoing(
   } as { share?: true; unshare?: true }
   // The share and the unshare say what happened in the board's words: a board without `work` reads
   // them as a topic's lines, one with it shows its own.
-  const own = flags.share || flags.unshare ? '' : entry.text
-  const text = own || fallbackLine(entry, after, flags)
-  const file = entry.files?.[0]
+  // A verdict (#492) goes as the plain status it leads to: the verifier's line and report stay here.
+  const verdict = entry.set?.verdict !== undefined
+  const own = flags.share || flags.unshare || verdict ? '' : entry.text
+  const text = own || fallbackLine(entry, theirs, flags)
+  const file = verdict ? undefined : entry.files?.[0]
   return {
     target,
     text,
     work: {
       n: entry.n,
+      // Its own time (#564): a held entry goes out later than it was written, and every board
+      // orders it by when it was written, as this one does.
+      at: entry.at,
       type: entry.type,
       ...(set && { set }),
-      head: wireHead(after),
+      head: wireHead(theirs),
       ...(!own && { auto: true as const }),
       ...flags,
     },
     ...(file && { file: { path: filePathOf(file.ref), name: file.name } }),
   }
+}
+
+/**
+ * A held entry's `work` as it goes when the owner sends it (#561): an agent's draft keeps the body
+ * written when it was held, so one sent after a later entry was sent takes the head the peers hold
+ * now (outgoing). Any other is returned as it is.
+ */
+export function freshWork(db: BoardDb, work: WorkPost, me: string): WorkPost {
+  const entry = entryById(db, work.id)
+  const head = entry && getThread(db, entry.thread)
+  if (!entry || !head || entry.n !== work.body.n) return work
+  const out = outgoing(db, head, entry, me, ref => ref)
+  if (!out || out.work.head.rev <= out.work.n) return work
+  return { ...work, body: { ...work.body, head: out.work.head } }
+}
+
+/**
+ * An entry as the peers fold it: without the status and summary of a done that only proposed a
+ * close (wireSet), and by this board's owner, so that no fold reads a proposal in it again.
+ */
+function asSent(e: ThreadEntry, proposed: boolean): ThreadEntry {
+  const owner = { kind: 'owner' } as const
+  if (!proposed || !e.set) return { ...e, author: owner }
+  const { status: _status, summary: _summary, ...rest } = e.set
+  return { ...e, author: owner, set: rest }
 }
 
 /** The system entry that shared a thread: it sets every head field the peers hold (shareThread). */
@@ -392,13 +487,14 @@ export function declineShare(ctx: ThreadsCtx, head: ThreadHead): Written {
   if (ctx.actor.kind !== 'owner') throw new ThreadError('owner_only', 'only the owner answers a request to share')
   if (!requestOf(head)) throw new ThreadError('no_request', `nobody asked to share ${head.key}`)
   ctx.db.write(byOf(ctx.actor), tx => setScope(tx, head.id, 'local'))
-  return postEntry(ctx, { ...head, scope: 'local' }, { type: 'note', text: 'share declined' })
+  return postEntry(ctx, { ...head, scope: 'local' }, { type: 'note', text: 'share declined', noDirect: true })
 }
 
 /**
  * The owner shares a thread (11.2): its scope becomes the topic with the thread's id, and one
- * system entry carries the head as it is now; the entries before it stay on this board. Sending it
- * is the caller's (work-hub.ts). Refused for an agent, a mirrored thread, one shared already.
+ * system entry carries the head as the peers would fold it now (#563); the entries before it stay
+ * on this board. Sending it is the caller's (work-hub.ts). Refused for an agent, a mirrored thread,
+ * one shared already; a refusal leaves the scope as it was (#562).
  */
 export function shareThread(ctx: ThreadsCtx & { me: string }, head: ThreadHead, target: ShareTarget): Written {
   if (ctx.actor.kind !== 'owner') throw new ThreadError('owner_only', 'only the owner shares a thread')
@@ -415,16 +511,50 @@ export function shareThread(ctx: ThreadsCtx & { me: string }, head: ThreadHead, 
     by: 'me',
     at: ctx.now,
   }
+  // Without this board's private entries and those that never went out of an earlier sharing:
+  // their fields are no more the peers' than their text is (#563).
+  const set = shareSet(theirHead(head, entriesOf(ctx.db, head.id), ctx.me))
+  // What postEntry would refuse is refused before the scope changes (#562).
+  notMirrored(ctx, head, set)
+  const was = getThread(ctx.db, head.id)?.scope ?? head.scope
   ctx.db.write(byOf(ctx.actor), tx => setScope(tx, head.id, scope))
-  const shared = { ...head, scope }
-  const set: EntrySet = {
-    title: head.title,
-    status: head.status,
-    summary: head.summary,
-    ...(head.waitingOn && { waitingOn: head.waitingOn }),
-    ...(head.assignee && { assignee: head.assignee }),
+  try {
+    return postEntry({ ...ctx, me: ctx.me }, { ...head, scope }, { type: 'system', text: SHARE_TEXT, set })
+  } catch (err) {
+    try {
+      ctx.db.write(byOf(ctx.actor), tx => setScope(tx, head.id, was))
+    } catch {
+      // The refusal is what the caller hears, not a failed restore after it.
+    }
+    throw err
   }
-  return postEntry({ ...ctx, me: ctx.me }, shared, { type: 'system', text: SHARE_TEXT, set })
+}
+
+/**
+ * Sharing again (#569): a peer that held the earlier sharing takes the new share only on a board
+ * that says `work-reshare`; one that keeps shared threads without it would drop it, so the owner
+ * hears who and why instead. A board without `work` reads the share as a topic's line, as before.
+ * `peers`: whom the share goes to; `roster`: the Team roster as the board shows it.
+ */
+export function reshareFits(
+  head: ThreadHead,
+  peers: string[],
+  roster: { peer: string; work?: boolean; reshare?: boolean }[],
+  nameOf: NameOf,
+): void {
+  const was = sharingOf(head)
+  if (!was || was.ended === undefined || was.by !== 'me') return
+  const held =
+    was.kind === 'peer' ? [was.peer ?? ''] : was.kind === 'channel' ? (was.members ?? []) : roster.map(p => p.peer)
+  const old = peers.filter(id => {
+    const p = roster.find(r => r.peer === id)
+    return held.includes(id) && p?.work === true && !p.reshare
+  })
+  if (old.length)
+    throw new ThreadError(
+      'reshare',
+      `${old.map(p => nameOf(p)).join(', ')} held ${head.key} when it was shared before, and their board drops a share again until it is updated`,
+    )
 }
 
 /**
@@ -460,7 +590,11 @@ export function takeOffer(ctx: ThreadsCtx & { me: string }, head: ThreadHead): W
 export function declineOffer(ctx: ThreadsCtx & { me: string }, head: ThreadHead, why = ''): Written {
   const s = offerOf(ctx, head)
   const text = cleanText(why, 500)
-  const w = postEntry(ctx, head, { text: text ? `declined: ${text}` : 'declined', set: { assignee: null } })
+  const w = postEntry(ctx, head, {
+    text: text ? `declined: ${text}` : 'declined',
+    set: { assignee: null },
+    noDirect: true,
+  })
   clearOffer(ctx, w.head, s)
   return { ...w, head: getThread(ctx.db, head.id) ?? w.head }
 }

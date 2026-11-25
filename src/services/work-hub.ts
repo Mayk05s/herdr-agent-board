@@ -21,7 +21,7 @@ import {
   ThreadError,
 } from '../adapters/work-thread-store.ts'
 import { categoryInfo } from '../core/categories.ts'
-import { channelMembers, isPeerId, type ThreadRef, teamConfig } from '../core/team.ts'
+import { channelMembers, isPeerId, type ThreadRef, teamConfig, type WorkPost } from '../core/team.ts'
 import { sharesLane, TEAM, threadKey } from '../core/team-agents.ts'
 import type { Config } from '../core/types.ts'
 import { scopeWho } from '../core/work-share.ts'
@@ -40,12 +40,14 @@ import {
 import type { InboundEvent, TeamService } from './team-hub.ts'
 import type { TeamRouter } from './team-router.ts'
 import {
+  freshWork,
   historyText,
   importHistory,
   ingest,
   mayTake,
   myPeer,
   outgoing,
+  reshareFits,
   type ShareTarget,
   shareThread,
   targetOf,
@@ -66,7 +68,9 @@ export interface WorkHub {
   /** Threads, their sharing and Team are all on: the hello says `work`. */
   on(): boolean
   /** The hub client's check on a message that carries `work` (11.4). */
-  mayTake(m: { from: string; topic: string; ref: ThreadRef }): boolean
+  mayTake(m: { from: string; topic: string; ref: ThreadRef; share?: boolean }): boolean
+  /** A held draft's `work` as it goes when the owner sends it (#561): the head of now for one sent late. */
+  fresh(w: WorkPost): WorkPost
   /** A message the hub client kept: an entry of a shared thread, when it is one (true then). */
   inbound(e: InboundEvent): boolean
   /**
@@ -313,6 +317,15 @@ export function createWorkHub({ cfg, team, router, gated, log, changed, schedule
         return false
       }
     },
+    fresh(w) {
+      if (!on()) return w
+      try {
+        return withThreadsDb(false, db => (db ? freshWork(db, w, me()) : w))
+      } catch (err) {
+        log(`threads: a draft's head was not renewed: ${err instanceof Error ? err.message : String(err)}`)
+        return w
+      }
+    },
 
     inbound(e) {
       if (!on() || !e.work || e.held) return false
@@ -380,6 +393,7 @@ export function createWorkHub({ cfg, team, router, gated, log, changed, schedule
         const head = findThread(db, word, null, true)
         const target = targetFor(to, head.id)
         laneFits(head.lane, target.lanesOf)
+        reshareFits(head, target.lanesOf, team.view()?.roster ?? [], p => team.nameOf(p))
         if (history && !team.view()?.files)
           throw new ThreadError('files_hub', 'the hub takes no files: share without history')
         const { lanesOf: _l, ...t } = target

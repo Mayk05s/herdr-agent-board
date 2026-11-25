@@ -15,6 +15,7 @@ import {
 import { foldModeOf } from '../../../src/core/fold-mode.ts'
 import { canStop } from '../../../src/core/turn-keys.ts'
 import type { Item, LaunchView, ToolCall } from '../../../src/core/types.ts'
+import { useDecisions } from '../hooks/useDecisions.ts'
 import { useFold } from '../hooks/useFold.ts'
 import { useHeadFit } from '../hooks/useHeadFit.ts'
 import { useWordClip } from '../hooks/useWordClip.ts'
@@ -24,23 +25,32 @@ import { type CallLines as CallView, callLines, inMokupilot } from '../models/ca
 import {
   ago,
   askLine,
+  type CardBgTask,
+  type CardChecklist,
   type CardWords,
   cardAge,
+  cardBgTask,
+  cardChecklist,
+  cardMeter,
   cardWords,
   compact,
   dismissable,
   folds,
   inTurn,
   launchOf,
+  plain,
   questionLine,
 } from '../models/card.ts'
 import { nameParts } from '../models/card-head.ts'
+import { nodeLook, nodeOffline } from '../models/devices.ts'
 import { pendingQuestions } from '../models/question-model.ts'
 import { restartOf, restartView } from '../models/restart.ts'
 import { COLUMN_COLORS } from '../models/toolbar.ts'
 import { useBoardContext } from '../state/BoardProvider.tsx'
 import { AlarmBadge } from './AlarmBadge.tsx'
 import { classNames } from './class-names.ts'
+import { DecisionButtons } from './decisions/DecisionButtons.tsx'
+import { CardIdentity } from './devices/DeviceChip.tsx'
 import { HelpersChip, Relations } from './helpers/CardHelpers.tsx'
 import {
   CheckGlyph,
@@ -56,9 +66,12 @@ import {
   Turn,
   WriteGlyph,
 } from './icons.tsx'
+import { ModelTag } from './ModelTag.tsx'
 import { ProfileTag } from './ProfileTag.tsx'
+import { ProviderMark } from './ProviderMark.tsx'
 import { StopButton } from './StopButton.tsx'
 import { CardThreadChips, KeyText } from './threads/bits.tsx'
+import { WatchLine } from './WatchLine.tsx'
 
 /** What a session on its way shows on the board (hooks/useLaunch.ts). */
 export interface LaunchSlots {
@@ -105,6 +118,8 @@ export function Card(props: CardProps) {
     busy && 'busy',
     placeholder && 'placeholder',
     props.related && 'related',
+    // An offline device's card (#502): its last one, greyed (nodes.css).
+    nodeOffline(item, data?.devices) && 'node-offline',
   )
   return (
     <article
@@ -147,14 +162,40 @@ export function Card(props: CardProps) {
 }
 
 function CardContent({ item, launch, folding }: { item: Item; launch: LaunchSlots | undefined; folding: boolean }) {
+  const t = useT()
   const { data } = useBoardContext()
   const oneLine = compact(item, data?.schedules)
+  const checklist = !oneLine && !folding ? cardChecklist(item, t) : null
   return (
     <>
       <CardTop item={item} />
+      {/* A card of another device (#502): its identity row with the device; none for this computer's. */}
+      <CardIdentity item={item} />
+      {item.agent === 'codex' && item.model && item.effort && (
+        <div className="card-meter">
+          {item.model} · {item.effort}
+        </div>
+      )}
       {!oneLine && <CardBody item={item} launch={launch} folding={folding} />}
       <CardActions item={item} />
+      {checklist && <ChecklistEdge checklist={checklist} />}
     </>
+  )
+}
+
+/** Quiet 2px progress line along the card's bottom edge (#637); full list in native tooltip. */
+function ChecklistEdge({ checklist }: { checklist: CardChecklist }) {
+  return (
+    <div
+      className="card-todo-track"
+      role="progressbar"
+      aria-label={checklist.ariaLabel}
+      aria-valuemin={0}
+      aria-valuemax={checklist.total}
+      aria-valuenow={checklist.done}
+    >
+      <div className="card-todo-fill" style={{ width: `${checklist.pct}%` }} />
+    </div>
   )
 }
 
@@ -171,6 +212,7 @@ function CardTop({ item }: { item: Item }) {
       ) : (
         <span className={`dot ${item.column}`} style={{ '--c': COLUMN_COLORS[item.column] }} />
       )}
+      <ProviderMark item={item} />
       <CardName name={item.name} was={was} />
       {/* A favorite: a quiet star by the name. */}
       {item.favorite && (
@@ -186,6 +228,8 @@ function CardTop({ item }: { item: Item }) {
       )}
       {/* Its profile, while the board shows more than one, or one hidden or not known. */}
       <ProfileTag item={item} mark />
+      {/* Another model than config.json's `models` expects (#429). */}
+      <ModelTag item={item} />
       <span className="card-status" style={{ '--c': COLUMN_COLORS[item.column] }} title={t(`col.${item.column}`)}>
         {t(`col.${item.column}`)}
       </span>
@@ -257,8 +301,48 @@ function CardBody({ item, launch, folding }: { item: Item; launch: LaunchSlots |
   const t = useT()
   const words = cardWords(item)
   const started = launchOf(item)
+  const checklist = cardChecklist(item, t)
+  const explicitDoing = !!plain(item.doing)
+  const stepDiffers = !!checklist?.current && plain(words.own) !== checklist.current
+  const inlineChecklist = checklist && (
+    <>
+      <span className="card-todo-ratio">{checklist.ratio}</span>
+      {checklist.current && (!explicitDoing || stepDiffers) && (
+        <>
+          <span className="card-todo-sep" aria-hidden="true">
+            {' · '}
+          </span>
+          <span className="card-todo-step">{checklist.current}</span>
+        </>
+      )}
+    </>
+  )
   const what = words.recap ? (
-    <RecapLine item={item} words={words} />
+    <RecapLine item={item} words={words} checklist={checklist} />
+  ) : explicitDoing ? (
+    <div className="what" title={checklist?.tooltip}>
+      {checklist && (
+        <>
+          <span className="card-todo-ratio">{checklist.ratio}</span>
+          <span className="card-todo-sep" aria-hidden="true">
+            {' · '}
+          </span>
+        </>
+      )}
+      <KeyText text={words.own} />
+      {checklist && stepDiffers && (
+        <>
+          <span className="card-todo-sep" aria-hidden="true">
+            {' · '}
+          </span>
+          <span className="card-todo-step">{checklist.current}</span>
+        </>
+      )}
+    </div>
+  ) : checklist ? (
+    <div className="what" title={checklist.tooltip}>
+      {inlineChecklist}
+    </div>
   ) : words.own ? (
     <div className="what">
       <KeyText text={words.own} />
@@ -269,10 +353,14 @@ function CardBody({ item, launch, folding }: { item: Item; launch: LaunchSlots |
     </div>
   ) : null
   const wait = item.column === 'ext' && (
-    <div className="chip">
-      <ClockGlyph />
-      <span>{item.wait || t('note.parked')}</span>
-    </div>
+    <>
+      <div className="chip">
+        <ClockGlyph />
+        <span>{item.wait || t('note.parked')}</span>
+      </div>
+      {/* Watches (#486): how its probe stands; nothing without one. */}
+      <WatchLine item={item} />
+    </>
   )
   if (folding)
     return (
@@ -303,7 +391,7 @@ function CardBody({ item, launch, folding }: { item: Item; launch: LaunchSlots |
  * set back a shade once the session has gone on long after it. The task it stands over under it,
  * in one line. Both end at a word.
  */
-function RecapLine({ item, words }: { item: Item; words: CardWords }) {
+function RecapLine({ item, words, checklist }: { item: Item; words: CardWords; checklist: CardChecklist | null }) {
   const t = useT()
   const { now } = useBoardContext()
   const line = useRef<HTMLDivElement>(null)
@@ -316,7 +404,13 @@ function RecapLine({ item, words }: { item: Item; words: CardWords }) {
       <div
         ref={line}
         className={classNames('what recap', words.stale && 'stale')}
-        title={recap === words.recap ? undefined : words.recap}
+        title={
+          recap === words.recap
+            ? checklist?.tooltip
+            : checklist
+              ? `${words.recap}\n\n${checklist.tooltip}`
+              : words.recap
+        }
       >
         <span className="sr-only">{`${t('card.recap')}: `}</span>
         {age && (
@@ -325,11 +419,22 @@ function RecapLine({ item, words }: { item: Item; words: CardWords }) {
           </span>
         )}
         {age && ' '}
+        {checklist && !words.task && (
+          <>
+            <span className="card-todo-ratio">{checklist.ratio}</span>{' '}
+          </>
+        )}
         <span data-clip="">{recap}</span>
       </div>
       {words.task && (
-        <div ref={task} className="task" title={doing === words.task ? undefined : words.task}>
-          <span className="task-label">{t('row.task')}</span> <span data-clip="">{doing}</span>
+        <div ref={task} className="task" title={checklist?.tooltip ?? (doing === words.task ? undefined : words.task)}>
+          <span className="task-label">{t('row.task')}</span>{' '}
+          {checklist && (
+            <>
+              <span className="card-todo-ratio">{checklist.ratio}</span>{' '}
+            </>
+          )}
+          <span data-clip="">{doing}</span>
         </div>
       )}
     </>
@@ -338,18 +443,73 @@ function RecapLine({ item, words }: { item: Item; words: CardWords }) {
 
 /** What it said last, what it runs, a restart, its helpers and partners, how its start goes. */
 function CardRest({ item, launch }: { item: Item; launch: LaunchSlots | undefined }) {
+  const t = useT()
+  const { now } = useBoardContext()
   const words = cardWords(item)
   const started = launchOf(item)
+  const bgTask = cardBgTask(item, now, t)
   return (
     <>
       {words.said && <div className="said">{words.said}</div>}
-      {item.column === 'work' && <Now tool={item.tool} />}
+      {item.column === 'work' ? (
+        item.tool?.pending ? (
+          <>
+            <Now tool={item.tool} />
+            {bgTask && <BgTaskLine task={bgTask} />}
+          </>
+        ) : bgTask ? (
+          <BgTaskLine task={bgTask} />
+        ) : (
+          <Now tool={item.tool} />
+        )
+      ) : (
+        bgTask && <BgTaskLine task={bgTask} />
+      )}
       <RestartLine item={item} />
       <HelpersChip item={item} />
       <Relations item={item} />
+      <MeterLine item={item} />
       {/* Started from the board and not done starting: how it goes, or why it failed. */}
       {started && launch?.note(started)}
     </>
+  )
+}
+
+/** Active or potentially stuck background task line on a card (#676). */
+function BgTaskLine({ task }: { task: CardBgTask }) {
+  return (
+    <div className={classNames('now bg-task', task.stuck && 'stuck')} title={task.tooltip}>
+      {task.stuck ? <ClockGlyph /> : <SpinGlyph />}
+      <span className="tool">{task.label}</span>
+      {task.detail && <span className="detail">{task.detail}</span>}
+    </div>
+  )
+}
+
+/**
+ * A Claude session's context and effort (#193), quietly at the card's foot: "85k / 200k (42%) ·
+ * Effort high", either part alone when only one is known, nothing when neither is or for another
+ * agent (models/card.ts cardMeter).
+ */
+function MeterLine({ item }: { item: Item }) {
+  const t = useT()
+  const meter = cardMeter(item, t)
+  if (!meter) return null
+  return (
+    <div className="card-meter">
+      <div className="meter-row">
+        {meter.context && (
+          <span className={classNames('meter-ctx', meter.tone)} title={t('card.contextHint')}>
+            {meter.context}
+          </span>
+        )}
+        {meter.effort && (
+          <span className="meter-effort" title={t('meter.effortHint')}>
+            {meter.effort}
+          </span>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -416,14 +576,20 @@ function CardAsk({ item }: { item: Item }) {
   )
   // Asked in its browser: the ask clamps its text on its own and "Open its browser" stays under it
   // (the card's ask clamps its whole box to three lines, which cut the button off a long one).
-  if (item.desktop?.asks)
-    return (
-      <div className="ask desk-asking">
-        <div className="ask-q">{line}</div>
-        <OpenBrowser item={item} />
-      </div>
-    )
-  return <div className="ask">{line}</div>
+  // Decisions (#487): its options, the default and Hold; nothing for an ask without them.
+  return (
+    <>
+      {item.desktop?.asks ? (
+        <div className="ask desk-asking">
+          <div className="ask-q">{line}</div>
+          <OpenBrowser item={item} />
+        </div>
+      ) : (
+        <div className="ask">{line}</div>
+      )}
+      {item.decision && <CardDecision item={item} />}
+    </>
+  )
 }
 
 /** What the agent asks is done in its own browser (a sign-in, a captcha): the button that opens it. */
@@ -435,6 +601,27 @@ function OpenBrowser({ item }: { item: Item }) {
       <ScreenGlyph />
       <span>{t('desk.openIt')}</span>
     </button>
+  )
+}
+
+/** A question's options on its card (#487). */
+function CardDecision({ item }: { item: Item }) {
+  const decisions = useDecisions()
+  const d = item.decision
+  if (!d) return null
+  return (
+    <DecisionButtons
+      inCard
+      decisions={decisions}
+      choice={{
+        sessionKey: item.key,
+        id: d.id,
+        options: d.options,
+        recommend: d.recommend,
+        defaultAt: d.defaultAt,
+        held: d.held !== undefined,
+      }}
+    />
   )
 }
 
@@ -483,11 +670,15 @@ function RestartLine({ item }: { item: Item }) {
 
 function CardActions({ item }: { item: Item }) {
   const t = useT()
-  const { canMutate, canEdit } = useBoardContext()
+  const { canMutate, canEdit, data, now } = useBoardContext()
   const q = (s: string) => t('q', { s })
   // A MokuPilot call agent (#326) runs in MokuPilot, not in a pane: nothing to focus, put to sleep
   // or type into from the board.
   const away = inMokupilot(item)
+  // A card of another device (#502): its herdr pane is not on this computer, so no Go to herdr;
+  // while the master does not hear the device, what goes there answers that it is not reachable.
+  const node = nodeLook(item, data?.devices, now, t)
+  const why = node?.why || undefined
   return (
     <div className="card-actions">
       {/* Its turn interrupted with its program's own key, where the board knows it (#330). */}
@@ -496,14 +687,14 @@ function CardActions({ item }: { item: Item }) {
         <button
           type="button"
           data-act="dismiss"
-          title={item.attention === 'later' ? t('card.seen', { col: q(t('col.me')) }) : t('card.noReply')}
-          disabled={!canEdit}
+          title={why ?? (item.attention === 'later' ? t('card.seen', { col: q(t('col.me')) }) : t('card.noReply'))}
+          disabled={!canEdit || !!why}
         >
           <CheckGlyph />
         </button>
       )}
       {!item.sleeping && !!item.session && !inTurn(item) && !away && (
-        <button type="button" data-act="sleep" title={t('card.sleep')} disabled={!canMutate}>
+        <button type="button" data-act="sleep" title={why ?? t('card.sleep')} disabled={!canMutate || !!why}>
           <MoonGlyph />
         </button>
       )}
@@ -513,7 +704,7 @@ function CardActions({ item }: { item: Item }) {
           <WriteGlyph />
         </button>
       )}
-      {!away && (
+      {!away && !node && (
         <button type="button" data-act="focus" title={t('card.focus')} disabled={!canMutate}>
           <FocusGlyph />
         </button>

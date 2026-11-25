@@ -8,6 +8,7 @@
 import { type RefObject, useLayoutEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { FOLD_SLACK, foldsNow, nextFold, type SegmentsRoom, withFold } from '../models/segment-fold.ts'
+import { withoutSpill } from './no-spill.ts'
 
 /** No control folded: the page as it starts, and as the server draws it. */
 const NONE: ReadonlySet<string> = new Set()
@@ -61,7 +62,8 @@ export function segmentFoldIn(row: HTMLElement, slack = FOLD_SLACK): { id: strin
   const i = nextFold(
     controls.map(c => ({
       folded: !!c.seg.hidden,
-      room: () => (c.seg.hidden ? tried(c, drawn, slack) : drawnRoom(c.seg)),
+      // Tried at full width, a folded control can be wider than a phone: it stays inside the row (hooks/no-spill.ts).
+      room: () => (c.seg.hidden ? withoutSpill(row, () => tried(c, drawn, slack)) : drawnRoom(c.seg)),
     })),
     slack,
   )

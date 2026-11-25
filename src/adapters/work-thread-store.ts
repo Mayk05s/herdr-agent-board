@@ -8,7 +8,9 @@ import { randomUUID } from 'node:crypto'
 import { MAX_WORK_N } from '../core/team-wire.ts'
 import { foldShared } from '../core/work-share.ts'
 import {
+  afterN,
   applyEntry,
+  type CaseState,
   type EntryOut,
   type EntrySet,
   type EntryType,
@@ -16,6 +18,7 @@ import {
   isEntryOut,
   isParty,
   isThreadStatus,
+  isVerdict,
   keyNumber,
   keyOf,
   MINE,
@@ -23,6 +26,7 @@ import {
   type Proposed,
   type SharedScope,
   sharedOf,
+  sharingOf,
   THREAD_KEY,
   type ThreadEntry,
   type ThreadFile,
@@ -30,6 +34,7 @@ import {
   type ThreadLink,
   type ThreadScope,
   type ThreadStatus,
+  type VerifyHead,
   type Watch,
   type WatchTarget,
   type WatchWhat,
@@ -66,6 +71,9 @@ interface HeadRow {
   done_at: number | null
   rev: number
   origin: string | null
+  ref: string | null
+  state: string | null
+  verify: string | null
 }
 
 interface EntryRow {
@@ -87,7 +95,7 @@ interface EntryRow {
 }
 
 const HEAD_COLUMNS =
-  'id, key, lane, title, summary, status, waiting_on, proposed, assignee, parent, scope, created_by, created_at, updated_at, done_at, rev, origin'
+  'id, key, lane, title, summary, status, waiting_on, proposed, assignee, parent, scope, created_by, created_at, updated_at, done_at, rev, origin, ref, state, verify'
 const ENTRY_COLUMNS = 'id, thread, n, seq, at, author, type, text, fields, links, files, reply_to, private, closed, out'
 
 const parse = (s: string | null): unknown => {
@@ -157,7 +165,35 @@ function headOf(r: HeadRow): ThreadHead {
     doneAt: r.done_at,
     rev: r.rev,
     ...(r.origin !== null && { origin: parse(r.origin) }),
+    // Case files (#488): only once set, so the heads of a board without them are as they were.
+    ...(r.ref !== null && r.ref !== '' && { ref: r.ref }),
+    ...(stateOf(r.state) && { state: stateOf(r.state) as CaseState }),
+    ...(verifyOf(r.verify) && { verify: verifyOf(r.verify) as VerifyHead }),
   }
+}
+
+/** A thread's verification as stored (#492); null for none, or a value that does not read as one. */
+function verifyOf(s: string | null): VerifyHead | null {
+  const v = parse(s)
+  if (!isObj(v) || typeof v.on !== 'boolean') return null
+  const run = isObj(v.run) && typeof v.run.key === 'string' && typeof v.run.until === 'number' ? v.run : null
+  return {
+    on: v.on,
+    ...(v.lane === true && { lane: true as const }),
+    accept: strs(v.accept) ?? [],
+    run: run
+      ? { key: run.key as string, name: String(run.name ?? ''), at: Number(run.at) || 0, until: run.until as number }
+      : null,
+    fails: Number(v.fails) || 0,
+    last: isVerdict(v.last) ? v.last : null,
+  }
+}
+
+/** A case's state as stored (#488): JSON {text, at, by}; anything else is none. */
+function stateOf(s: string | null): CaseState | null {
+  const v = parse(s)
+  if (!isObj(v) || typeof v.text !== 'string' || typeof v.at !== 'number' || !isParty(v.by)) return null
+  return { text: v.text, at: v.at, by: v.by }
 }
 
 function entryOf(r: EntryRow): ThreadEntry {
@@ -196,7 +232,7 @@ export function threadByKey(db: BoardDb, key: string): ThreadHead | null {
 }
 
 /**
- * The thread a word names: its key, the first 8 characters of its id, or a bare number in `lane`
+ * The thread a word names: its key, the first 8 characters of its id (or the whole id), or a bare number in `lane`
  * (the session's own). Refused with the reason when none or several match.
  */
 export function findThread(db: BoardDb, word: string, lane: string | null, exact = false): ThreadHead {
@@ -205,17 +241,19 @@ export function findThread(db: BoardDb, word: string, lane: string | null, exact
     const h = sameKey(db, w, exact)
     if (h) return h
   }
-  if (/^\d{1,9}$/.test(w)) {
-    if (!lane) throw new ThreadError('no_lane', `"${word}" is a number: give the whole key (<lane>-${w})`)
+  const number = /^\d{1,9}$/.test(w)
+  if (number && lane) {
     const h = sameKey(db, keyOf(lane, Number(w)))
     if (h) return h
   }
+  // An id's first 8 characters can all be digits (#572): a number that names no thread is tried as one.
   if (ID_REF.test(w)) {
     const rows = db.db.query(`SELECT ${HEAD_COLUMNS} FROM threads WHERE id LIKE ? LIMIT 3`).all(`${w}%`) as HeadRow[]
     if (rows.length === 1) return headOf(rows[0] as HeadRow)
     if (rows.length > 1)
       throw new ThreadError('ambiguous', `"${word}" names several threads: ${rows.map(r => r.key).join(', ')}`)
   }
+  if (number && !lane) throw new ThreadError('no_lane', `"${word}" is a number: give the whole key (<lane>-${w})`)
   throw new ThreadError('not_found', `no thread "${word}" on this board`)
 }
 
@@ -270,6 +308,37 @@ export function listThreads(db: BoardDb, f: ListFilter = {}): ThreadHead[] {
   return (db.db.query(sql).all(...params) as HeadRow[]).map(headOf)
 }
 
+/** The threads that carry an outside reference (#488), whatever their status; the caller matches them (core/work-cases.ts sameRef). */
+export function threadsWithRef(db: BoardDb): ThreadHead[] {
+  return (
+    db.db
+      .query(`SELECT ${HEAD_COLUMNS} FROM threads WHERE ref IS NOT NULL AND ref <> '' ORDER BY updated_at DESC, key`)
+      .all() as HeadRow[]
+  ).map(headOf)
+}
+
+/** Held dones (#492): open threads whose done waits for a verifier, the oldest proposal first. */
+export function heldThreads(db: Pick<BoardDb, 'db'>): ThreadHead[] {
+  return (
+    db.db
+      .query(
+        `SELECT ${HEAD_COLUMNS} FROM threads WHERE proposed IS NOT NULL AND json_valid(proposed) AND json_extract(proposed, '$.verify') = 1 AND status NOT IN ('done', 'dropped') ORDER BY json_extract(proposed, '$.at'), key`,
+      )
+      .all() as HeadRow[]
+  ).map(headOf)
+}
+
+/** Threads with a verifier running (#492), whatever else they hold. */
+export function verifyingThreads(db: Pick<BoardDb, 'db'>): ThreadHead[] {
+  return (
+    db.db
+      .query(
+        `SELECT ${HEAD_COLUMNS} FROM threads WHERE verify IS NOT NULL AND json_valid(verify) AND json_type(verify, '$.run') = 'object'`,
+      )
+      .all() as HeadRow[]
+  ).map(headOf)
+}
+
 /** The threads imported from one session's task board (#393), whatever their status. */
 export function threadsFromBoard(db: BoardDb, harness: string, session: string): ThreadHead[] {
   return (
@@ -307,18 +376,27 @@ export function childrenOf(db: BoardDb, parent: string): ThreadHead[] {
   ).map(headOf)
 }
 
-/** A thread's entries, oldest first: after `since` (an n), or the last `last`, or all. */
+/**
+ * A thread's entries, oldest first: after `since` (an n; on a thread that is or was shared, a
+ * private entry with that number too: afterN), or the last `last`, or all.
+ */
 export function entriesOf(
   db: Pick<BoardDb, 'db'>,
   thread: string,
-  o: { since?: number; last?: number } = {},
+  o: { since?: number; last?: number; shared?: boolean } = {},
 ): ThreadEntry[] {
-  if (o.since !== undefined)
+  if (o.since !== undefined) {
+    const since = o.since
     return (
       db.db
-        .query(`SELECT ${ENTRY_COLUMNS} FROM thread_entries WHERE thread = ? AND n > ? ORDER BY n, at, id`)
-        .all(thread, o.since) as EntryRow[]
-    ).map(entryOf)
+        .query(
+          `SELECT ${ENTRY_COLUMNS} FROM thread_entries WHERE thread = ? AND n ${o.shared ? '>=' : '>'} ? ORDER BY n, at, id`,
+        )
+        .all(thread, since) as EntryRow[]
+    )
+      .map(entryOf)
+      .filter(e => afterN(e, since, o.shared === true))
+  }
   if (o.last !== undefined)
     return (
       db.db
@@ -530,15 +608,20 @@ const saveHead = (tx: Tx, h: ThreadHead, fresh: boolean): void => {
     h.doneAt,
     h.rev,
     json(h.origin),
+    h.ref ?? null,
+    json(h.state),
+    json(h.verify),
   ]
   if (fresh)
     tx.db
-      .query(`INSERT INTO threads (${HEAD_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .query(
+        `INSERT INTO threads (${HEAD_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
       .run(...values)
   else
     tx.db
       .query(
-        `UPDATE threads SET key = ?2, lane = ?3, title = ?4, summary = ?5, status = ?6, waiting_on = ?7, proposed = ?8, assignee = ?9, parent = ?10, scope = ?11, created_by = ?12, created_at = ?13, updated_at = ?14, done_at = ?15, rev = ?16, origin = ?17 WHERE id = ?1`,
+        `UPDATE threads SET key = ?2, lane = ?3, title = ?4, summary = ?5, status = ?6, waiting_on = ?7, proposed = ?8, assignee = ?9, parent = ?10, scope = ?11, created_by = ?12, created_at = ?13, updated_at = ?14, done_at = ?15, rev = ?16, origin = ?17, ref = ?18, state = ?19, verify = ?20 WHERE id = ?1`,
       )
       .run(...values)
 }
@@ -587,6 +670,10 @@ export function createThread(
     text?: string
     /** Where an imported thread came from (3.2). */
     origin?: unknown
+    /** A case's outside reference (#488). */
+    ref?: string
+    /** It asks for verification from the start (#492); `lane`: because its lane is in verify.lanes. */
+    verify?: { on: true; lane: boolean }
   },
 ): { head: ThreadHead; entry: ThreadEntry } {
   const id = input.id ?? randomUUID()
@@ -617,6 +704,8 @@ export function createThread(
     ...(input.assignee && { assignee: input.assignee }),
     ...(input.parent && { parent: input.parent }),
     ...(input.summary && { summary: input.summary }),
+    ...(input.ref && { ref: input.ref }),
+    ...(input.verify && { verify: true, ...(input.verify.lane && { verifyLane: true as const }) }),
   }
   const head = applyEntry(empty, {
     id: '',
@@ -659,10 +748,25 @@ export function appendEntry(
   const row = tx.db.query(`SELECT ${HEAD_COLUMNS} FROM threads WHERE id = ?`).get(id) as HeadRow | null
   if (!row) throw new ThreadError('not_found', 'no such thread')
   const before = headOf(row)
+  // An entry of this board that never reaches the peers of a shared thread: a private one (#541),
+  // or one written with nothing to send it (no `out`: the parent's "all N sub-threads closed",
+  // #548). It is private, and takes the number of the entry it follows (as an adoption takes its
+  // sender's), since a number of its own would leave a hole the peers read as entries missing
+  // (4.3, rule 3). A peer's entry is numbered by its board, or is next in this one's feed. A
+  // caller whose entry is meant to go out sets `out` (postEntry does).
+  // A peer's thread whose sharing ended counts too (#569): what this board writes there stays home
+  // if its sharer shares it again, so a number of its own would outrank the share.
+  const was = sharingOf(before)
+  const home =
+    (sharedOf(before) !== null || (was?.ended !== undefined && was.by !== 'me')) &&
+    input.n === undefined &&
+    input.author.kind !== 'peer' &&
+    (input.private === true || input.out === undefined)
+  const n = home ? before.rev : before.rev + 1
   const draft: ThreadEntry = {
     id: input.id ?? randomUUID(),
     thread: id,
-    n: input.n ?? before.rev + 1,
+    n: input.n ?? n,
     seq: 0,
     at: input.at,
     author: input.author,
@@ -672,7 +776,7 @@ export function appendEntry(
     ...(input.links?.length && { links: input.links }),
     ...(input.files?.length && { files: input.files }),
     ...(input.replyTo && { replyTo: input.replyTo }),
-    ...(input.private && { private: true }),
+    ...((input.private || home) && { private: true }),
     ...(input.closed !== undefined && { closed: input.closed }),
     ...(input.out && { out: input.out }),
   }
@@ -694,19 +798,40 @@ export function appendEntry(
   return { before, head, entry }
 }
 
-/** An entry of a thread by its id, its first 8 characters, or its number (`4`, `#4`). */
+/**
+ * An entry of a thread by its id, its first 8 characters, or its number (`4`, `#4`). An id's first
+ * characters can all be digits (#572): a number that names no entry is tried as the start of an id.
+ */
 export function findEntry(db: BoardDb, thread: string, word: string): ThreadEntry {
   const w = word.trim().toLowerCase().replace(/^#/, '')
-  if (!/^\d{1,9}$/.test(w) && !/^[0-9a-f][0-9a-f-]{3,35}$/.test(w))
+  const idLike = /^[0-9a-f][0-9a-f-]{3,35}$/.test(w)
+  if (!/^\d{1,9}$/.test(w) && !idLike)
     throw new ThreadError('no_entry', `"${word}" is not an entry: its number (4, #4) or its id`)
-  const rows = /^\d{1,9}$/.test(w)
+  const byNumber = /^\d{1,9}$/.test(w)
     ? (db.db
         .query(`SELECT ${ENTRY_COLUMNS} FROM thread_entries WHERE thread = ? AND n = ?`)
         .all(thread, Number(w)) as EntryRow[])
-    : (db.db
-        .query(`SELECT ${ENTRY_COLUMNS} FROM thread_entries WHERE thread = ? AND id LIKE ? LIMIT 2`)
-        .all(thread, `${w}%`) as EntryRow[])
+    : []
+  const number = byNumber.length > 0
+  const rows = number
+    ? byNumber
+    : idLike
+      ? (db.db
+          .query(`SELECT ${ENTRY_COLUMNS} FROM thread_entries WHERE thread = ? AND id LIKE ? LIMIT 2`)
+          .all(thread, `${w}%`) as EntryRow[])
+      : []
   if (rows.length === 1) return entryOf(rows[0] as EntryRow)
+  // One number, several entries: on a shared thread a private entry takes the number of the entry
+  // it follows (#541), and two boards may write the same number at once. The number is the one
+  // entry the peers hold by it, when there is one; else the entry goes by its id.
+  const found = rows.map(entryOf)
+  const open = found.filter(e => !e.private)
+  if (number && open.length === 1) return open[0] as ThreadEntry
+  if (number && found.length > 1)
+    throw new ThreadError(
+      'no_entry',
+      `#${w} is ${found.length} entries: give its id (${found.map(e => e.id.slice(0, 8)).join(', ')})`,
+    )
   throw new ThreadError('no_entry', `no entry "${word}" in that thread (its number, #4, or its id)`)
 }
 
@@ -781,6 +906,22 @@ export function dropWatch(tx: Tx, session: string, target: WatchTarget): number 
   return tx.db.query('DELETE FROM thread_watch WHERE session = ? AND target = ?').run(session, target).changes
 }
 
+/** A watch as given, `since` and all, unless the session watches that target already (#403). */
+export function addWatchKept(tx: Tx, w: Watch, at: number): void {
+  tx.db
+    .query(
+      'INSERT INTO thread_watch (session, target, what, idle, wake, name, at, since) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (session, target) DO NOTHING',
+    )
+    .run(w.session, w.target, w.what, w.idle ? 1 : 0, w.wake ? 1 : 0, w.name, at, w.since)
+}
+
+/** Every watch of `session` but those on the targets `keep` names; how many went. */
+export function dropWatchesOf(tx: Tx, session: string, keep: readonly WatchTarget[] = []): number {
+  const marks = keep.map(() => '?').join(', ')
+  const sql = `DELETE FROM thread_watch WHERE session = ?${keep.length ? ` AND target NOT IN (${marks})` : ''}`
+  return tx.db.query(sql).run(session, ...keep).changes
+}
+
 export interface Cursor {
   /** The last change an event was queued for. */
   seq: number
@@ -805,6 +946,40 @@ export function moveCursor(tx: Tx, session: string, to: Partial<Cursor>): void {
          seq = max(seq, coalesce(?2, seq)), at = max(at, coalesce(?3, at)), asked = max(asked, coalesce(?4, asked))`,
     )
     .run(session, to.seq ?? null, to.at ?? null, to.asked ?? null)
+}
+
+/** A session's cursor as given, back or forward (#403); null removes it. */
+export function setCursor(tx: Tx, session: string, to: Cursor | null): void {
+  if (!to) {
+    tx.db.query('DELETE FROM thread_cursor WHERE session = ?').run(session)
+    return
+  }
+  tx.db
+    .query(
+      'INSERT INTO thread_cursor (session, seq, at, asked) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (session) DO UPDATE SET seq = ?2, at = ?3, asked = ?4',
+    )
+    .run(session, to.seq, to.at, to.asked)
+}
+
+/**
+ * A session known by another key from now on (#616: moved to another device, `<id>` to
+ * `@<device>:<id>` and back): the threads it created or is assigned, its watches and its cursor
+ * follow it. A watch or a cursor the new key has already stays as it is. How many rows changed.
+ */
+export function rekeySession(tx: Tx, from: string, to: string): number {
+  if (!from || !to || from === to) return 0
+  let n = 0
+  for (const col of ['created_by', 'assignee'] as const)
+    n += tx.db
+      .query(
+        `UPDATE threads SET ${col} = json_set(${col}, '$.key', ?2) WHERE json_extract(${col}, '$.kind') = 'session' AND json_extract(${col}, '$.key') = ?1`,
+      )
+      .run(from, to).changes
+  n += tx.db.query('UPDATE OR IGNORE thread_watch SET session = ?2 WHERE session = ?1').run(from, to).changes
+  tx.db.query('DELETE FROM thread_watch WHERE session = ?1').run(from)
+  n += tx.db.query('UPDATE OR IGNORE thread_cursor SET session = ?2 WHERE session = ?1').run(from, to).changes
+  tx.db.query('DELETE FROM thread_cursor WHERE session = ?1').run(from)
+  return n
 }
 
 /** The threads a session counts as its own: those it created or is assigned. */

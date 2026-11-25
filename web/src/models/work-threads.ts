@@ -212,9 +212,12 @@ export type FeedItem =
         | 'kept'
         | 'closed'
         | 'fields'
+        | 'state'
         | 'shared'
         | 'unshared'
         | 'said'
+        | 'verifier'
+        | 'verdict'
       to: ThreadStatus
     }
   | { kind: 'ask'; entry: ThreadEntryView; open: boolean }
@@ -237,8 +240,9 @@ export function feedOf(head: ThreadHead, entries: readonly ThreadEntryView[], op
   const shared = sharingOf(head) !== null
   let h: ThreadHead | null = null
   let day = ''
+  const { verify: _verify, ...rest } = head
   const blank: ThreadHead = {
-    ...head,
+    ...rest,
     title: '',
     summary: '',
     status: 'next',
@@ -273,32 +277,61 @@ export function feedOf(head: ThreadHead, entries: readonly ThreadEntryView[], op
     const sharedHere = shared && e.type === 'system' && !e.text && !before && e.author.kind === 'peer'
     // Only this board's own lines are said as such; a teammate's system entry carries no words (#394).
     const ownWords = !!e.text && (e.author.kind !== 'peer' || e.private === true)
-    const said = shared && e.type === 'system' && (ownWords || sharedHere) && !e.closed && !created
+    const localNotice =
+      !shared &&
+      e.type === 'system' &&
+      e.private === true &&
+      e.author.kind === 'owner' &&
+      !!e.text &&
+      !Object.keys(set).length &&
+      !e.closed &&
+      !created
+    const said = (shared && e.type === 'system' && (ownWords || sharedHere) && !e.closed && !created) || localNotice
     const did: Extract<FeedItem, { kind: 'status' }>['did'] | null = created
       ? 'created'
       : said
-        ? e.text === SHARED_TEXT || sharedHere
+        ? !localNotice && (e.text === SHARED_TEXT || sharedHere)
           ? 'shared'
-          : e.text === UNSHARED_TEXT
+          : !localNotice && e.text === UNSHARED_TEXT
             ? 'unshared'
             : 'said'
         : e.closed
           ? 'closed'
-          : proposed
-            ? 'proposed'
-            : confirmed
-              ? 'confirmed'
-              : kept
-                ? 'kept'
-                : set.status !== undefined && changed
-                  ? 'status'
-                  : !words && !e.files?.length && !e.links?.length && Object.keys(set).length
-                    ? 'fields'
-                    : null
+          : set.verdict
+            ? 'verdict'
+            : set.verifier
+              ? 'verifier'
+              : proposed
+                ? 'proposed'
+                : confirmed
+                  ? 'confirmed'
+                  : kept
+                    ? 'kept'
+                    : set.status !== undefined && changed
+                      ? 'status'
+                      : !words &&
+                          !e.files?.length &&
+                          !e.links?.length &&
+                          set.state !== undefined &&
+                          Object.keys(set).length === 1
+                        ? 'state'
+                        : !words && !e.files?.length && !e.links?.length && Object.keys(set).length
+                          ? 'fields'
+                          : null
     if (did) out.push({ kind: 'status', entry: e, did, to: after.status })
     if (words || e.files?.length || e.links?.length) out.push({ kind: 'message', entry: e })
   }
   return out
+}
+
+/** A case's state in the feed (#488): its first three lines on one, cut at 200 characters. */
+export function stateLines(text: string): string {
+  const lines = text
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+  const shown = lines.slice(0, 3).join(' / ') + (lines.length > 3 ? ' / …' : '')
+  return shown.length > 200 ? `${shown.slice(0, 199)}…` : shown
 }
 
 /** Who wrote an entry, for its mark: the owner's own words are "out", everyone else's "in". */

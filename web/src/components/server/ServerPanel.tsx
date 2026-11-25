@@ -24,16 +24,18 @@ import {
   swapPercent,
   uptimeText,
 } from '../../models/server-state.ts'
-import { Panel } from '../panel/Panel.tsx'
+import { Panel, type PanelBack } from '../panel/Panel.tsx'
 
 export interface ServerPanelProps {
   open: boolean
   onClose(): void
   /** The page's poll unless given (a test's own). */
   poll?: ServerPoll
+  /** Back to the Settings list when opened from it (#679). */
+  back?: PanelBack | undefined
 }
 
-export function ServerPanel({ open, onClose, poll }: ServerPanelProps) {
+export function ServerPanel({ open, onClose, poll, back }: ServerPanelProps) {
   const t = useT()
   const { view, error } = useServerState('panel', open ? PANEL_MS : null, poll)
   const about = view
@@ -47,6 +49,7 @@ export function ServerPanel({ open, onClose, poll }: ServerPanelProps) {
       kind="server"
       open={open}
       onClose={onClose}
+      back={back}
       title={
         <>
           <h2>{t('sys.title')}</h2>

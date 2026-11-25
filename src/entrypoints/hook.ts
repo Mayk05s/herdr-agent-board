@@ -39,12 +39,14 @@ import { inheritedProfileDir, loadProfiles } from '../adapters/profiles.ts'
 import { readStdin } from '../adapters/stdin.ts'
 import { BRIEF_VERSION, brief, waitReminder } from '../core/brief.ts'
 import { calendarConfig } from '../core/calendar.ts'
+import { decisionsConfig } from '../core/decisions.ts'
 import { heldQuestionOf } from '../core/held-question.ts'
 import { isNotice } from '../core/notices.ts'
 import { type Profile, profileReport } from '../core/profiles.ts'
 import { secretsConfig, usableSinks, withDefaultStore } from '../core/secrets.ts'
 import { todosConfig, todosNews } from '../core/todos.ts'
 import type { Config } from '../core/types.ts'
+import { watchesConfig } from '../core/watches.ts'
 import { threadsConfig } from '../core/work-threads.ts'
 
 const text = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
@@ -148,15 +150,33 @@ async function main(): Promise<void> {
   // What the agent asked to be done in its browser (services/desktop.ts askBrowser): the user talks
   // as they do it ("where is that button?"), which does not answer it; handing the browser back does.
   const inBrowser = (c: typeof card): boolean => !!c?.ask && c.askBrowser !== undefined && c.askBrowser === c.askSince
+  // A card with an open decision (#487) loses it with its ask; only such a card has one.
   const answered = (c: typeof card): CardPatch | null =>
     c?.pin || (c?.ask && !fromBoard)
-      ? { ...(!fromBoard && !inBrowser(c) && { ask: '', askSince: '' }), pin: '', pinAt: '', pinBusy: '' }
+      ? {
+          ...(!fromBoard &&
+            !inBrowser(c) && { ask: '', askSince: '', ...(c?.decision !== undefined && { decision: '' }) }),
+          pin: '',
+          pinAt: '',
+          pinBusy: '',
+        }
       : null
   // A pi session's ask and wait are on pi's card; the brief stays with the Claude session it went to.
   // pi's card is told the profile too: the folder this Claude runs in is the account pi's turn
   // goes to, whichever of the bridge's providers it took.
   const boardKey = event === 'UserPromptSubmit' ? await boardKeyOf(pane, sid) : null
   const boardCard = boardKey ? readCard(boardKey) : card
+  // Decisions (#487): the decision the ask carries is closed first, the owner's answer or withdrawn,
+  // from the cards as read: the board, seeing a card without it, would take it for one left behind.
+  if (event === 'UserPromptSubmit' && !fromBoard) {
+    for (const c of [card, boardKey ? boardCard : null]) {
+      if (!c?.ask || c.decision === undefined) continue
+      const { closeOnPrompt } = await import('../services/decisions.ts')
+      try {
+        closeOnPrompt(c, input.prompt, Date.now())
+      } catch {}
+    }
+  }
   if (event === 'UserPromptSubmit') {
     const done = answered(card)
     if (done) Object.assign(patch, done)
@@ -189,10 +209,14 @@ async function main(): Promise<void> {
       presence,
       todosConfig(cfg.todos),
       sinks,
-      stores,
       calendar,
       // Threads (#379), only while config.json turns them on: else the brief is as it was.
       threadsConfig(cfg.threads),
+      // Watches (#486), only while config.json turns them on: else the brief is as it was.
+      watchesConfig(cfg.watches) !== null,
+      // Decisions (#487), likewise.
+      decisionsConfig(cfg.decisions),
+      stores,
     )
     Object.assign(patch, { briefedAt: Date.now(), briefV: BRIEF_VERSION })
     if (presence) patch.presenceSeen = presence.since

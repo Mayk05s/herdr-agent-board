@@ -9,23 +9,32 @@ import { ACCESS_STRINGS } from './access-strings.ts'
 import { ARCHIVE_STRINGS } from './archive-strings.ts'
 import { ASIDE_STRINGS } from './aside-strings.ts'
 import { BACKUP_STRINGS } from './backup-strings.ts'
+import { BG_TASK_STRINGS } from './bg-task-strings.ts'
 import { CAL_STRINGS } from './cal-strings.ts'
 import { CALL_STRINGS } from './call-strings.ts'
 import { COMPACT_STRINGS } from './compact-strings.ts'
+import { DECISION_STRINGS } from './decision-strings.ts'
+import { DESIGN_STRINGS } from './design-strings.ts'
 import { DESK_STRINGS } from './desk-strings.ts'
 import { DESKTOP_STRINGS } from './desktop-strings.ts'
+import { FEATURE_STRINGS } from './feature-strings.ts'
 import { FIRST_LOGIN_STRINGS } from './first-login-strings.ts'
 import { FORK_STRINGS } from './fork-strings.ts'
 import { HELPER_STRINGS } from './helper-strings.ts'
 import { INSTALL_STRINGS } from './install-strings.ts'
+import { JOURNAL_STRINGS } from './journal-strings.ts'
 import { LAUNCH_STRINGS } from './launch-strings.ts'
+import { NODE_STRINGS } from './node-strings.ts'
 import { ONESHOT_STRINGS } from './oneshot-strings.ts'
 import { PRESENCE_STRINGS } from './presence-strings.ts'
 import { PROFILE_STRINGS } from './profile-strings.ts'
+import { RELAY_STRINGS } from './relay-strings.ts'
 import { REMOTE_STRINGS } from './remote-strings.ts'
 import { SECRET_STRINGS } from './secret-strings.ts'
 import { SERVER_STRINGS } from './server-strings.ts'
 import { SETUP_STRINGS } from './setup-strings.ts'
+import { SLASH_STRINGS } from './slash-strings.ts'
+import { SPEND_STRINGS } from './spend-strings.ts'
 import { SYNC_STRINGS } from './sync-strings.ts'
 import { SYSTEM_STRINGS } from './system-strings.ts'
 import { TEAM_STRINGS } from './team-strings.ts'
@@ -33,15 +42,30 @@ import { TERMINAL_STRINGS } from './terminal-strings.ts'
 import { THREAD_STRINGS } from './thread-strings.ts'
 import { TIME_STRINGS } from './time-strings.ts'
 import { TODO_STRINGS } from './todo-strings.ts'
+import { TURN_RESUME_STRINGS } from './turn-resume-strings.ts'
 import { TURN_STRINGS } from './turn-strings.ts'
+import { UPDATE_STRINGS } from './update-strings.ts'
 import { VAULT_STRINGS } from './vault-strings.ts'
+import { VERIFY_STRINGS } from './verify-strings.ts'
 import { WAKE_STRINGS } from './wake-strings.ts'
+import { WATCH_STRINGS } from './watch-strings.ts'
 
 export type Entry = string | string[]
 export type Dictionary = Record<string, Entry>
 
 export const STRINGS: Record<Lang, Dictionary> = {
   en: {
+    'workdesk.status': 'Workdesk · {queue} queued · Last poll {time}',
+    'workdesk.problem.config': 'Check the local Workdesk configuration',
+    'workdesk.problem.tools': 'Waiting for Workdesk coordinator tools',
+    'workdesk.problem.connection': 'Cannot reach the Workdesk adapter',
+    'workdesk.problem.heartbeat': 'Workdesk did not confirm the heartbeat',
+    'workdesk.problem.list': 'Could not read the Workdesk queue',
+    'workdesk.problem.threads': 'Enable Board threads to deliver assignments',
+    'workdesk.problem.master': 'Waiting for a uniquely named master session',
+    'workdesk.problem.claim': 'Could not confirm a Workdesk claim',
+    'workdesk.problem.conflict': 'A task was claimed by another executor',
+    'workdesk.problem.handoff': 'Could not save or queue a Workdesk handoff',
     'sheet.properties': 'Card details',
     'sheet.details': 'Session details',
     'sheet.detailsShow': 'Show details',
@@ -89,12 +113,43 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'meta.contextPct': 'context {pct}% · {tokens}',
     'limits.5h': '5h',
     'limits.7d': '7d',
+    'limits.titleAll': 'Usage',
+    'limits.claudeTitle': 'Claude',
+    'limits.agyTitle': 'Gemini (agy)',
+    'limits.agyPill': 'Gemini',
+    'limits.agyOtherModels': 'Other models',
+    'limits.agyOtherModelsHint': 'Third-party models in Antigravity, such as Claude',
     'limits.hint': 'Claude usage of this account, {time}, as Claude Code reported it to the status line.',
     'limits.hintUsagebar':
       'Claude usage, {time}. From the usagebar cache of the default profile; the board does not check it is the account of these sessions.',
     'limits.stale': 'Claude usage, {time}: an old reading, the windows may have reset since.',
+    'limits.agyHint': 'Gemini usage, {time}, as Antigravity CLI reported it to the status line.',
+    'limits.agyStale': 'Gemini usage, {time}: an old reading, the windows may have reset since.',
+    'limits.agyUnavailable':
+      'No Antigravity usage report yet (unknown). Run board install --agy to capture its status line.',
+    'limits.resetsAt': '{window}: resets {reset}.',
     'limits.forecastOut': '{window}: at this pace it runs out at {at}, before the reset ({reset}).',
     'limits.forecastLasts': '{window}: at this pace it lasts until the reset ({reset}).',
+    'set.housekeeping': 'Housekeeping…',
+    'hk.title': 'Housekeeping',
+    'hk.about': 'Memory guard and leftover browser tab sweep (off by default)',
+    'hk.memory.title': 'Memory guard',
+    'hk.memory.about':
+      'Checks available memory every minute and safely puts idle sessions to sleep below the action threshold (never kills processes or touches working sessions).',
+    'hk.memory.enable': 'Enable memory guard',
+    'hk.memory.warnMb': 'Warning (MB)',
+    'hk.memory.actionMb': 'Sleep idle below (MB)',
+    'hk.tabs.title': 'Leftover browser tabs',
+    'hk.tabs.about':
+      'Every 30 minutes, closes unleased, unpinned, idle browser tabs per profile (never the last tab or pages asking before unload).',
+    'hk.tabs.enable': 'Enable browser tab sweep',
+    'hk.tabs.idleMin': 'Idle minutes',
+    'hk.save': 'Save',
+    'hk.dryRun': 'Dry run now',
+    'hk.dryRunning': 'Checking…',
+    'hk.loading': 'Loading…',
+    'hk.invalidNumber': 'Enter a valid whole number.',
+    'hk.log': 'Recent housekeeping',
 
     'mobile.readOnly': 'No fresh data from herdr: sending and going to sessions wait until it is back',
     'attention.unseen': 'Not viewed',
@@ -167,6 +222,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'att.ask': 'Asks',
     'att.question': 'Asks',
     'att.later': 'Parked',
+    'att.access': 'Access',
     'att.default': 'Waits',
     'card.lookLater': 'look at it later',
     'card.needsDecision': 'needs a decision',
@@ -191,6 +247,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'meter.modelOwn': 'this session only',
     'meter.modelOwnHint': 'Started on {model}, not the profile’s default; the profile keeps its own',
     'meter.effort': 'Effort',
+    'card.effort': 'Effort {level}',
+    'card.contextHint': 'Context its last request carried, of its window',
+    'card.checklist': 'Checklist',
+    'card.checklistProgress': '{done}/{total} done',
+    'card.checklistStep': '{done}/{total}: {current}',
+    'sheet.checklist': 'Checklist',
     'meter.effortHint': 'The effort this session thinks with',
     'meter.unknown': '—',
     'meter.sent': 'Sent /{command}',
@@ -209,6 +271,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sent.to': 'Sent to {name}',
     'sent.files': ['{n} file', '{n} files'],
     'msg.files': ['File', 'Files'],
+    'msg.err.file': 'A file the board did not take in its uploads',
     'busy.waking': 'Waking…',
     'busy.sleeping': 'Putting to sleep…',
     'err.status': 'Error {code}',
@@ -237,6 +300,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.focus': 'Could not go to {name}: {why}',
     'err.emptyMessage': 'Empty message',
     'err.blocked': '{name} waits for a decision in the terminal',
+    'err.blockedNoDialog': 'herdr says {name} waits for a decision, but its screen shows no dialog',
+    'err.anywayUnsent':
+      'The message is typed into {name}, but its screen did not show it in the input box, so it was not sent. Check it in herdr',
     'err.working': '{name} is working',
     'err.draft': '{name} has unsent text in its input box',
     'err.pasteHeld':
@@ -262,7 +328,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.qa.herdrMidway':
       'herdr failed midway ({why}). The dialog of {name} may be partly filled in: finish it in herdr',
     'err.qa.unconfirmed': 'The keys went to {name}, but its screen never showed the dialog closing. Check it in herdr',
+    'err.qa.same':
+      'The keys went to {name}, and its screen still shows the same dialog: it may be asking again, or the keys did not take. Check it in herdr',
     'qa.stopped': 'Stopped midway',
+    'qa.codexAllow': 'Allow once',
+    'qa.codexDeny': 'Deny',
     'qa.perm.more': ['{n} more line: see the terminal screen', '{n} more lines: see the terminal screen'],
     'qa.step.start': 'the start',
     'qa.step.back': 'going back to the first question',
@@ -356,6 +426,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'tb.lanesPick': 'Category: {title}',
     // the same with several lanes on show, {title} their names
     'tb.lanesPicked': 'Categories: {title}',
+    // the folded lanes control's "All" on a phone-wide toolbar, where it says what it filters (#599)
+    'tb.lanesAll': 'All categories',
     'tb.search': 'Search',
     'tb.sleepersTitle': 'Show sleeping sessions',
     'tb.cats': 'Categories',
@@ -430,6 +502,14 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'mokupilot.err.commandShell': 'mokupilot.command in config.json: a program, not cmd or a .cmd or .bat file',
     'mokupilot.err.placeholder': 'mokupilot.command: {name} is not a value the board knows ({session} and {cwd} are)',
     'mokupilot.err.mode': 'Unknown MokuPilot mode: {mode} (auto, local or link)',
+    'mokupilot.err.nodeOffline': 'Node {device} is offline: cannot start a MokuPilot call with its session',
+    'mokupilot.err.nodeApi': 'Node {device} runs an incompatible board version for a MokuPilot call',
+    'mokupilot.err.nodeOld': 'Node {device} does not support MokuPilot calls yet: update the board on that node',
+    'mokupilot.err.nodeLink': 'MokuPilot calls for a node session start from the master computer where MokuPilot runs',
+    'mokupilot.err.nodeCheck': 'Node {device} cannot run this call: {why}',
+    'mokupilot.err.masterOffline': 'Master board is offline: cannot reach sessions on other devices',
+    'mokupilot.err.sessionNotFound': 'Session not found on this board or any online device',
+    'mokupilot.err.bridgeOff': 'MokuPilot node bridge is disabled for this device (enable pilotBridge in config.json)',
     'set.mokupilot': 'MokuPilot…',
     'mokupilot.title': 'MokuPilot',
     'mokupilot.about': 'Where “Call in MokuPilot” starts the call.',
@@ -501,7 +581,15 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'why.ask': 'ASKS',
     'why.question': 'ASKS IN ITS LAST MESSAGE',
     'why.later': 'PARKED BY YOU',
+    'why.access': 'LOST ACCESS',
     'why.default': 'WAITS FOR YOU',
+    'access.limitUntil': 'limit until {when}',
+    'access.limit': 'usage limit reached',
+    'access.loggedOut': 'logged out',
+    'access.loggedOutProfile': 'logged out of the {profile} profile',
+    'access.expired': 'expired login',
+    'access.expiredProfile': 'expired login in the {profile} profile',
+    'access.notifyTitle': 'Lost access: {name}',
     'asked.seen': 'Seen',
     'asked.noReply': 'No reply needed',
     'asked.later': 'You put it here to look at later. It leaves once you write to the session.',
@@ -536,6 +624,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'queue.sending': 'Sending…',
     'queue.failed': 'Not sent',
     'queue.edit': 'Edit',
+    'queue.anyway': 'Send anyway',
     'toast.dismissed': '{name}: no reply needed',
     'toast.unparked': '{name}: off {col}',
     'toast.focused': '{name} is open in herdr',
@@ -615,6 +704,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sched.draft': 'Waits: unsent text in the session’s input box',
     'sched.dialog': 'Waits: a dialog is open in the session',
     'sched.tasks': 'Waits: background tasks run in the session',
+    'sched.nodeOffline': 'Waits: the device is not reachable',
     'sched.mode.onTime': 'On time',
     'sched.mode.idle': 'When free',
     'sched.mode.onTimeHint':
@@ -634,6 +724,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sched.why.draft': 'the input box held unsent text',
     'sched.why.dialog': 'a dialog stayed open',
     'sched.why.tasks': 'background tasks kept running',
+    'sched.why.node-revoked': 'the device was revoked',
+    'sched.why.node-forgotten': 'the device was removed',
     'sched.runs': ['{n} run', '{n} runs'],
     'sched.missedN': ['{n} missed', '{n} missed'],
     'sched.more': ['+{n} more', '+{n} more'],
@@ -647,6 +739,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sched.prompt.clearedFor': 'set for {name} before /clear',
     'sched.prompt.message': 'SendMessage from profile {profile}, answer with SendMessage to {name}',
     'sched.prompt.messageNoReply': 'SendMessage from profile {profile}, no reply path',
+    'sched.prompt.send': 'answer with board send "{name}" "<your answer>"',
+    'sched.prompt.sendFrom': 'from {device}, answer with board send "{name}" "<your answer>"',
     'sched.prompt.restarted': 'restarted as you asked',
     'sched.prompt.restartedOther': 'restarted',
     'sched.prompt.restartedUser': 'restarted by the user',
@@ -708,6 +802,17 @@ export const STRINGS: Record<Lang, Dictionary> = {
   },
 
   ru: {
+    'workdesk.status': 'Workdesk · В очереди {queue} · Последний опрос {time}',
+    'workdesk.problem.config': 'Проверьте локальную настройку Workdesk',
+    'workdesk.problem.tools': 'Ожидаются инструменты координатора Workdesk',
+    'workdesk.problem.connection': 'Нет связи с адаптером Workdesk',
+    'workdesk.problem.heartbeat': 'Workdesk не подтвердил сигнал присутствия',
+    'workdesk.problem.list': 'Не удалось прочитать очередь Workdesk',
+    'workdesk.problem.threads': 'Для передачи поручений включите треды Борды',
+    'workdesk.problem.master': 'Ожидается сессия мастера с однозначным именем',
+    'workdesk.problem.claim': 'Не удалось подтвердить claim в Workdesk',
+    'workdesk.problem.conflict': 'Задачу взял другой исполнитель',
+    'workdesk.problem.handoff': 'Не удалось сохранить или поставить в очередь передачу',
     'sheet.properties': 'Сведения о карточке',
     'sheet.details': 'Сведения о сессии',
     'sheet.detailsShow': 'Показать сведения',
@@ -755,12 +860,43 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'meta.contextPct': 'контекст {pct}% · {tokens}',
     'limits.5h': '5ч',
     'limits.7d': '7д',
+    'limits.titleAll': 'Расход',
+    'limits.claudeTitle': 'Claude',
+    'limits.agyTitle': 'Gemini (agy)',
+    'limits.agyPill': 'Gemini',
+    'limits.agyOtherModels': 'Другие модели',
+    'limits.agyOtherModelsHint': 'Сторонние модели в Antigravity, например Claude',
     'limits.hint': 'Расход Claude по этому аккаунту, {time}, как Claude Code сообщил в строку состояния.',
     'limits.hintUsagebar':
       'Расход Claude, {time}. Из кэша usagebar профиля по умолчанию; доска не проверяет, что это аккаунт этих сессий.',
     'limits.stale': 'Расход Claude, {time}: старые данные, окна могли уже обнулиться.',
+    'limits.agyHint': 'Расход Gemini, {time}, как Antigravity CLI сообщил в строку состояния.',
+    'limits.agyStale': 'Расход Gemini, {time}: старые данные, окна могли уже обнулиться.',
+    'limits.agyUnavailable':
+      'Отчёта о расходе Antigravity пока нет (неизвестно). Запустите board install --agy для строки состояния.',
+    'limits.resetsAt': '{window}: сброс {reset}.',
     'limits.forecastOut': '{window}: в таком темпе кончится в {at}, раньше сброса ({reset}).',
     'limits.forecastLasts': '{window}: в таком темпе хватит до сброса ({reset}).',
+    'set.housekeeping': 'Уборка узла…',
+    'hk.title': 'Уборка узла',
+    'hk.about': 'Контроль памяти и очистка старых вкладок браузера (выключено по умолчанию)',
+    'hk.memory.title': 'Контроль памяти',
+    'hk.memory.about':
+      'Раз в минуту проверяет свободную память и безопасно усыпляет простаивающие сессии ниже порога (процессы не убивает, работающие не трогает).',
+    'hk.memory.enable': 'Включить контроль памяти',
+    'hk.memory.warnMb': 'Предупреждение (МБ)',
+    'hk.memory.actionMb': 'Усыплять ниже (МБ)',
+    'hk.tabs.title': 'Старые вкладки браузера',
+    'hk.tabs.about':
+      'Раз в 30 минут закрывает старые вкладки без аренды и закрепления (никогда последнюю вкладку и страницы с подтверждением закрытия).',
+    'hk.tabs.enable': 'Включить очистку вкладок',
+    'hk.tabs.idleMin': 'Простой (минут)',
+    'hk.save': 'Сохранить',
+    'hk.dryRun': 'Проверить (dry-run)',
+    'hk.dryRunning': 'Проверяю…',
+    'hk.loading': 'Загружаю…',
+    'hk.invalidNumber': 'Введите целое число.',
+    'hk.log': 'Журнал уборки',
 
     'mobile.readOnly': 'Нет свежих данных от herdr: отправка и переход к сессиям подождут, пока они вернутся',
     'attention.unseen': 'Не просмотрено',
@@ -830,6 +966,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'att.ask': 'Спрашивает',
     'att.question': 'Спрашивает',
     'att.later': 'Отложено',
+    'att.access': 'Доступ',
     'att.default': 'Ждёт',
     'card.lookLater': 'посмотреть позже',
     'card.needsDecision': 'нужно решение',
@@ -853,6 +990,12 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'meter.modelOwn': 'только эта сессия',
     'meter.modelOwnHint': 'Запущена на {model}, а не на модели профиля; у профиля осталась своя',
     'meter.effort': 'Усилие',
+    'card.effort': 'Усилие {level}',
+    'card.contextHint': 'Контекст её последнего запроса из всего окна',
+    'card.checklist': 'Чеклист',
+    'card.checklistProgress': 'Готово {done} из {total}',
+    'card.checklistStep': '{done}/{total}: {current}',
+    'sheet.checklist': 'Чеклист',
     'meter.effortHint': 'Усилие, с которым думает эта сессия',
     'meter.unknown': '—',
     'meter.sent': 'Отправлено /{command}',
@@ -870,6 +1013,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sent.to': 'Отправлено в {name}',
     'sent.files': ['{n} файл', '{n} файла', '{n} файлов'],
     'msg.files': ['Файл', 'Файлы', 'Файлы'],
+    'msg.err.file': 'Файла нет среди загруженных на доску',
     'busy.waking': 'Бужу…',
     'busy.sleeping': 'Усыпляю…',
     'err.status': 'Ошибка {code}',
@@ -898,6 +1042,9 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'err.focus': 'Не перешёл в {name}: {why}',
     'err.emptyMessage': 'Пустое сообщение',
     'err.blocked': '{name} ждёт решения в терминале',
+    'err.blockedNoDialog': 'herdr говорит, что {name} ждёт решения, но на экране нет диалога',
+    'err.anywayUnsent':
+      'Сообщение напечатано в {name}, но на экране его не видно в поле ввода, поэтому оно не отправлено. Проверь в herdr',
     'err.working': '{name} сейчас работает',
     'err.draft': '{name}: в поле ввода недописанный текст',
     'err.pasteHeld':
@@ -924,7 +1071,11 @@ export const STRINGS: Record<Lang, Dictionary> = {
       'herdr сломался на полпути ({why}). Диалог {name} может быть заполнен частично: доделай его в herdr',
     'err.qa.unconfirmed':
       'Клавиши ушли в {name}, но на экране так и не было видно, что диалог закрылся. Проверь в herdr',
+    'err.qa.same':
+      'Клавиши ушли в {name}, а на экране всё тот же диалог: либо сессия спрашивает снова, либо клавиши не дошли. Проверь в herdr',
     'qa.stopped': 'Остановлено на полпути',
+    'qa.codexAllow': 'Разрешить один раз',
+    'qa.codexDeny': 'Отклонить',
     'qa.perm.more': [
       'Ещё {n} строка: смотри экран терминала',
       'Ещё {n} строки: смотри экран терминала',
@@ -1019,6 +1170,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     // the lanes control folded into one pill (web/src/components/SegmentPick.tsx)
     'tb.lanesPick': 'Категория: {title}',
     'tb.lanesPicked': 'Категории: {title}',
+    'tb.lanesAll': 'Все категории',
     'tb.search': 'Поиск',
     'tb.sleepersTitle': 'Показывать спящие сессии',
     'tb.cats': 'Категории',
@@ -1089,6 +1241,15 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'mokupilot.err.commandShell': 'mokupilot.command в config.json: программа, а не cmd и не файл .cmd или .bat',
     'mokupilot.err.placeholder': 'mokupilot.command: {name} доска не знает (знает {session} и {cwd})',
     'mokupilot.err.mode': 'Неизвестный режим MokuPilot: {mode} (auto, local или link)',
+    'mokupilot.err.nodeOffline': 'Нода {device} не в сети: нельзя начать звонок MokuPilot с её сессией',
+    'mokupilot.err.nodeApi': 'Нода {device} на несовместимой версии доски для звонка MokuPilot',
+    'mokupilot.err.nodeOld': 'Нода {device} ещё не поддерживает звонки MokuPilot: обнови доску на этой ноде',
+    'mokupilot.err.nodeLink':
+      'Звонок MokuPilot для сессии на ноде запускается с основного компьютера, где установлен MokuPilot',
+    'mokupilot.err.nodeCheck': 'Нода {device} не может запустить этот звонок: {why}',
+    'mokupilot.err.masterOffline': 'Основная доска не в сети: нельзя связаться с сессиями на других устройствах',
+    'mokupilot.err.sessionNotFound': 'Сессия не найдена на этой доске и ни на одном устройстве в сети',
+    'mokupilot.err.bridgeOff': 'Мост MokuPilot для этого устройства выключен (включи pilotBridge в config.json)',
     'set.mokupilot': 'MokuPilot…',
     'mokupilot.title': 'MokuPilot',
     'mokupilot.about': 'Где кнопка «Звонок в MokuPilot» начинает звонок.',
@@ -1159,7 +1320,15 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'why.ask': 'СПРАШИВАЕТ',
     'why.question': 'СПРАШИВАЕТ В ПОСЛЕДНЕМ СООБЩЕНИИ',
     'why.later': 'ОТЛОЖЕНО ТОБОЙ',
+    'why.access': 'НЕТ ДОСТУПА',
     'why.default': 'ЖДЁТ ТЕБЯ',
+    'access.limitUntil': 'лимит до {when}',
+    'access.limit': 'достигнут лимит',
+    'access.loggedOut': 'разлогинен',
+    'access.loggedOutProfile': 'разлогинен в профиле {profile}',
+    'access.expired': 'истёк вход',
+    'access.expiredProfile': 'истёк вход в профиле {profile}',
+    'access.notifyTitle': 'Нет доступа: {name}',
     'asked.seen': 'Посмотрел',
     'asked.noReply': 'Не ждёт ответа',
     'asked.later': 'Ты перенёс сюда, чтобы посмотреть позже. Уйдёт отсюда, когда напишешь сессии.',
@@ -1193,6 +1362,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'queue.sending': 'Отправляется…',
     'queue.failed': 'Не отправлено',
     'queue.edit': 'Изменить',
+    'queue.anyway': 'Отправить всё равно',
     'toast.dismissed': '{name}: ответа не ждёт',
     'toast.unparked': '{name}: убрана из {col}',
     'toast.focused': '{name} открыта в herdr',
@@ -1273,6 +1443,7 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sched.draft': 'Ждёт: в поле ввода сессии недописанный текст',
     'sched.dialog': 'Ждёт: в сессии открыт диалог',
     'sched.tasks': 'Ждёт: в сессии идут фоновые задачи',
+    'sched.nodeOffline': 'Ждёт: устройство не на связи',
     'sched.mode.onTime': 'Вовремя',
     'sched.mode.idle': 'Когда свободна',
     'sched.mode.onTimeHint':
@@ -1292,6 +1463,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sched.why.draft': 'в поле ввода был недописанный текст',
     'sched.why.dialog': 'диалог так и был открыт',
     'sched.why.tasks': 'шли фоновые задачи',
+    'sched.why.node-revoked': 'устройство было отозвано',
+    'sched.why.node-forgotten': 'устройство было удалено',
     'sched.runs': ['{n} запуск', '{n} запуска', '{n} запусков'],
     'sched.missedN': ['{n} пропуск', '{n} пропуска', '{n} пропусков'],
     'sched.more': ['ещё {n}', 'ещё {n}', 'ещё {n}'],
@@ -1309,6 +1482,8 @@ export const STRINGS: Record<Lang, Dictionary> = {
     'sched.prompt.clearedFor': 'поставлено для {name} до /clear',
     'sched.prompt.message': 'SendMessage из профиля {profile}, ответ: SendMessage для {name}',
     'sched.prompt.messageNoReply': 'SendMessage из профиля {profile}, ответить этим путём нельзя',
+    'sched.prompt.send': 'ответ: board send "{name}" "<твой ответ>"',
+    'sched.prompt.sendFrom': 'с {device}, ответ: board send "{name}" "<твой ответ>"',
     'sched.prompt.restarted': 'перезапущена по твоей просьбе',
     'sched.prompt.restartedOther': 'перезапущена',
     'sched.prompt.restartedUser': 'перезапущена пользователем',
@@ -1394,12 +1569,21 @@ for (const code of Object.keys(FORK_STRINGS) as Lang[]) Object.assign(STRINGS[co
 for (const code of Object.keys(TURN_STRINGS) as Lang[]) Object.assign(STRINGS[code], TURN_STRINGS[code])
 // And a side question to a session.
 for (const code of Object.keys(ASIDE_STRINGS) as Lang[]) Object.assign(STRINGS[code], ASIDE_STRINGS[code])
+for (const code of Object.keys(SLASH_STRINGS) as Lang[]) Object.assign(STRINGS[code], SLASH_STRINGS[code])
 // And the user's presence (#172).
 for (const code of Object.keys(PRESENCE_STRINGS) as Lang[]) Object.assign(STRINGS[code], PRESENCE_STRINGS[code])
+for (const code of Object.keys(JOURNAL_STRINGS) as Lang[]) Object.assign(STRINGS[code], JOURNAL_STRINGS[code])
 for (const code of Object.keys(CALL_STRINGS) as Lang[]) Object.assign(STRINGS[code], CALL_STRINGS[code])
 // And tasks (#202).
 for (const code of Object.keys(TODO_STRINGS) as Lang[]) Object.assign(STRINGS[code], TODO_STRINGS[code])
+// And watches (#486).
+for (const code of Object.keys(WATCH_STRINGS) as Lang[]) Object.assign(STRINGS[code], WATCH_STRINGS[code])
+for (const code of Object.keys(UPDATE_STRINGS) as Lang[]) Object.assign(STRINGS[code], UPDATE_STRINGS[code])
+// And decisions (#487).
+for (const code of Object.keys(DECISION_STRINGS) as Lang[]) Object.assign(STRINGS[code], DECISION_STRINGS[code])
 for (const code of Object.keys(THREAD_STRINGS) as Lang[]) Object.assign(STRINGS[code], THREAD_STRINGS[code])
+for (const code of Object.keys(FEATURE_STRINGS) as Lang[]) Object.assign(STRINGS[code], FEATURE_STRINGS[code])
+for (const code of Object.keys(VERIFY_STRINGS) as Lang[]) Object.assign(STRINGS[code], VERIFY_STRINGS[code])
 // And secrets through the board: the owner's form on the card and the board's own store (#273).
 for (const code of Object.keys(SECRET_STRINGS) as Lang[]) Object.assign(STRINGS[code], SECRET_STRINGS[code])
 for (const code of Object.keys(VAULT_STRINGS) as Lang[]) Object.assign(STRINGS[code], VAULT_STRINGS[code])
@@ -1416,6 +1600,10 @@ for (const code of Object.keys(ACCESS_STRINGS) as Lang[]) Object.assign(STRINGS[
 for (const code of Object.keys(FIRST_LOGIN_STRINGS) as Lang[]) Object.assign(STRINGS[code], FIRST_LOGIN_STRINGS[code])
 // And setting up the server's web server from the board.
 for (const code of Object.keys(SERVER_STRINGS) as Lang[]) Object.assign(STRINGS[code], SERVER_STRINGS[code])
+// And making a server a node (#509).
+for (const code of Object.keys(NODE_STRINGS) as Lang[]) Object.assign(STRINGS[code], NODE_STRINGS[code])
+// And setting up the relay on a server for machines behind NAT (#511).
+for (const code of Object.keys(RELAY_STRINGS) as Lang[]) Object.assign(STRINGS[code], RELAY_STRINGS[code])
 // And what the one command says on the server ("Do it myself").
 for (const code of Object.keys(ONESHOT_STRINGS) as Lang[]) Object.assign(STRINGS[code], ONESHOT_STRINGS[code])
 // And the board on a server of the owner's: its install, `board update`, the panel's path B.
@@ -1428,3 +1616,11 @@ for (const code of Object.keys(DESK_STRINGS) as Lang[]) Object.assign(STRINGS[co
 for (const code of Object.keys(COMPACT_STRINGS) as Lang[]) Object.assign(STRINGS[code], COMPACT_STRINGS[code])
 // And the board's own server's state: the head's chip, Settings → Server….
 for (const code of Object.keys(SYSTEM_STRINGS) as Lang[]) Object.assign(STRINGS[code], SYSTEM_STRINGS[code])
+// And the redesigned header, rail, settings panel and provider marks (#651).
+for (const code of Object.keys(DESIGN_STRINGS) as Lang[]) Object.assign(STRINGS[code], DESIGN_STRINGS[code])
+// And continue after restart (#633).
+for (const code of Object.keys(TURN_RESUME_STRINGS) as Lang[]) Object.assign(STRINGS[code], TURN_RESUME_STRINGS[code])
+// And token spend (#636).
+for (const code of Object.keys(SPEND_STRINGS) as Lang[]) Object.assign(STRINGS[code], SPEND_STRINGS[code])
+// And background task tracking (#676).
+for (const code of Object.keys(BG_TASK_STRINGS) as Lang[]) Object.assign(STRINGS[code], BG_TASK_STRINGS[code])

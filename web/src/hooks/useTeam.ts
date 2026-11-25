@@ -12,11 +12,14 @@
 // Each thread's unread messages (GET /api/team/unread, #355) come with it while the payload's count
 // is above 0; the thread on show in a page in front is read (POST /api/team/read { thread }), which
 // takes it off the head's count.
+// What the owner's phone asked and waits for the passkey here (GET /api/team/confirm, #377) comes
+// with it on this computer while the payload's teamWaiting says some does; confirmWaiting opens its
+// window. On the phone, such a send's 428 is told as waiting, not as refused.
 import { useEffect, useState } from 'react'
 import type { Translator } from '../../../src/core/types.ts'
 import { ApiError, api, errorText } from '../api/client.ts'
 import { useT } from '../i18n/I18nProvider.tsx'
-import { remotePage } from '../models/remote-page.ts'
+import { adminHere } from '../models/remote-page.ts'
 import { boardOnServer } from '../models/settings-menu.ts'
 import {
   type AgentsChange,
@@ -27,6 +30,7 @@ import {
   isThreadLines,
   isThreadList,
   isUnread,
+  isWaitingList,
   isWelcomeList,
   keyParts,
   offersTeam,
@@ -35,9 +39,10 @@ import {
   type TeamView,
   type ThreadLine,
   type ThreadView,
+  type Waiting,
   type Welcome,
 } from '../models/team.ts'
-import { confirmError, ownerPost } from '../models/team-confirm.ts'
+import { confirmError, confirmWaiting, ownerPost } from '../models/team-confirm.ts'
 import { useBoardContext } from '../state/BoardProvider.tsx'
 import { Store, useStore } from '../state/store.ts'
 import { useLatest } from './useLatest.ts'
@@ -59,6 +64,8 @@ export interface TeamNow {
   pending: string[]
   /** The agents' drafts that wait for the owner, every thread's (#415), oldest first. */
   drafts: DraftLine[]
+  /** What the owner's phone asked and waits for the passkey here (#377); none on a remote page. */
+  waiting: Waiting[]
 }
 
 /**
@@ -98,11 +105,13 @@ export interface TeamSource {
   addMembers(key: string, peers: string[]): Promise<void>
   /** A new member's welcome settled: their switches and the channels they join (#355). */
   welcome(w: Welcome): Promise<void>
+  /** Opens the confirmation window of what the owner's phone asked (#377); the panel follows. */
+  confirmWaiting(id: string): Promise<void>
   /**
-   * The panel open or not, the payload's teamRev and its unread count: fetched on opening and on
-   * each new revision or count while open.
+   * The panel open or not, the payload's teamRev, its unread count and what waits for the passkey
+   * (#377): fetched on opening and on each new revision or count while open.
    */
-  sync(open: boolean, rev: number, unread?: number): void
+  sync(open: boolean, rev: number, unread?: number, waiting?: number): void
 }
 
 export interface TeamDeps {
@@ -128,6 +137,7 @@ const EMPTY: TeamNow = {
   agents: null,
   pending: [],
   drafts: [],
+  waiting: [],
 }
 
 /** The panel's data without React: useTeam draws from it. */
@@ -136,8 +146,9 @@ export function teamSource(deps: TeamDeps): TeamSource {
   let open = false
   let rev = 0
   let unreadTotal = 0
+  let waitingTotal = 0
   const visible = deps.visible ?? inFront
-  const remote = deps.remote ?? remotePage
+  const remote = deps.remote ?? (() => !adminHere())
   const server = deps.server ?? (() => false)
   // Only the latest fetch is drawn: an older one may come back after it.
   let asked = 0
@@ -181,8 +192,17 @@ export function teamSource(deps: TeamDeps): TeamSource {
       // Each thread's count, asked only while the payload says something is unread.
       const unread =
         unreadTotal > 0 ? { ...(await api.get('/api/team/unread', isUnread, { cache: 'no-store' })).threads } : {}
+      // What the phone asked (#377), asked only while the payload says something waits; a look
+      // that fails lists none, and the panel is drawn all the same.
+      const waiting =
+        !remote() && waitingTotal > 0
+          ? await api
+              .get('/api/team/confirm', isWaitingList, { cache: 'no-store' })
+              .then(w => w.waiting)
+              .catch(() => [] as Waiting[])
+          : []
       if (mine !== asked) return
-      now.set({ ...now.get(), view, threads, thread, lines, agents, unread, pending, drafts })
+      now.set({ ...now.get(), view, threads, thread, lines, agents, unread, pending, drafts, waiting })
       // The thread on show, in a page in front, is read: its messages leave the count. A read that
       // fails leaves the count as it is; the panel stays drawn. A message that lands meanwhile moves
       // teamRev, and the page that shows it is the page that read it.
@@ -248,7 +268,9 @@ export function teamSource(deps: TeamDeps): TeamSource {
           })
         ).thread
       } catch (err) {
-        deps.toast(sendError(err instanceof ApiError ? err.reply.error : undefined, deps.t()), true)
+        const code = err instanceof ApiError ? err.reply.error : undefined
+        // Waiting for the passkey on the computer (#377) is no error: it may still go.
+        deps.toast(sendError(code, deps.t()), code !== 'confirm')
         return false
       }
       if (topic && typeof key === 'string') now.set({ ...now.get(), selected: key, thread: null, lines: [] })
@@ -260,7 +282,8 @@ export function teamSource(deps: TeamDeps): TeamSource {
       try {
         await ownerPost(`/api/team/draft/${encodeURIComponent(id)}/send`, {})
       } catch (err) {
-        deps.toast(sendError(err instanceof ApiError ? err.reply.error : undefined, deps.t()), true)
+        const code = err instanceof ApiError ? err.reply.error : undefined
+        deps.toast(sendError(code, deps.t()), code !== 'confirm')
         void load()
         return false
       }
@@ -280,11 +303,26 @@ export function teamSource(deps: TeamDeps): TeamSource {
       return change(`/api/team/threads/team/${encodeURIComponent(id)}/members`, { add: peers })
     },
     welcome: w => change('/api/team/welcome', w),
-    sync(nextOpen, nextRev, nextUnread = 0) {
-      const ask = nextOpen && (!open || nextRev !== rev || nextUnread !== unreadTotal)
+    async confirmWaiting(id) {
+      const w = now.get().waiting.find(x => x.id === id)
+      if (!w) return
+      try {
+        await confirmWaiting(w.confirm, w.id)
+      } catch (err) {
+        if (!(err instanceof ApiError && err.reply.error === 'cancelled'))
+          deps.toast(
+            confirmError(err, deps.t()) ?? sendError(err instanceof ApiError ? err.reply.error : undefined, deps.t()),
+            true,
+          )
+      }
+      void load()
+    },
+    sync(nextOpen, nextRev, nextUnread = 0, nextWaiting = 0) {
+      const ask = nextOpen && (!open || nextRev !== rev || nextUnread !== unreadTotal || nextWaiting !== waitingTotal)
       open = nextOpen
       rev = nextRev
       unreadTotal = nextUnread
+      waitingTotal = nextWaiting
       if (ask) void load()
     },
   }
@@ -306,7 +344,8 @@ export function useTeam(open: boolean): TeamNow & Omit<TeamSource, 'now' | 'sync
   const offered = offersTeam(data)
   const rev = data?.teamRev ?? 0
   const unread = data?.teamUnread ?? 0
-  useEffect(() => source.sync(open && offered, rev, unread), [source, open, offered, rev, unread])
+  const waiting = data?.teamWaiting ?? 0
+  useEffect(() => source.sync(open && offered, rev, unread, waiting), [source, open, offered, rev, unread, waiting])
   return {
     ...state,
     select: source.select,
@@ -318,5 +357,6 @@ export function useTeam(open: boolean): TeamNow & Omit<TeamSource, 'now' | 'sync
     setAgents: source.setAgents,
     addMembers: source.addMembers,
     welcome: source.welcome,
+    confirmWaiting: source.confirmWaiting,
   }
 }

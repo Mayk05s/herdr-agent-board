@@ -2,8 +2,11 @@
 // when one is due, and which session an entry is for. Storage is src/adapters/schedule-store.ts, sending is
 // src/services/scheduler.ts.
 import { t } from './lang.ts'
+import { parseNodeKey } from './node-key.ts'
 import { CALL_NOTE } from './notices.ts'
+import { TURN_RESUME_KIND } from './turn-resume.ts'
 import type { Item } from './types.ts'
+import { formatPrompt, type RouteItem } from './wake/route.ts'
 import { countRuns } from './when.ts'
 import { longWhen, span } from './when-format.ts'
 
@@ -14,6 +17,20 @@ export const MAX_TEXT = 2000
 export const MAX_REPORT = 16_000
 // Later than this, the prompt says by how much.
 const LATE_MS = 2 * 60_000
+/** Why a master entry for a node session is held without expiring (#695). */
+export const NODE_OFFLINE_WHY = 'node-offline'
+
+/** Master schedule entries held while each device is offline (#695), keyed by device id. */
+export function heldByDevice(entries: readonly { key: string; why?: unknown }[]): Record<string, number> {
+  const counts = Object.create(null) as Record<string, number>
+  for (const e of entries) {
+    if (e.why !== NODE_OFFLINE_WHY) continue
+    const at = parseNodeKey(e.key)
+    if (!at) continue
+    counts[at.device] = (counts[at.device] ?? 0) + 1
+  }
+  return counts
+}
 
 /** The session an entry was set by, or the one it was for before /clear. */
 export type SessionRef = { key: string; name: string }
@@ -39,10 +56,11 @@ export type ScheduleEntry = {
   /**
    * 'call': a MokuPilot call's results (`board call-report`); 'restart': the session restarted
    * once it is free (`board restart` or the web board), the text its note for after; 'sleep': the
-   * session put to sleep once it is free (`board sleep --when-free`), no text; a reminder
-   * without one. A restart also keeps step ('sleep', 'wake', 'note': how far it got), attempts and
-   * retryAt (herdr-wake refused or failed), tasksSince (background tasks hold it) and failed (it
-   * gave up, why: only that note is left to type), among the extra fields.
+   * session put to sleep once it is free (`board sleep --when-free`), no text; 'turn-resume': one
+   * continue after a crash or reboot (#633); a reminder without one. A restart also keeps step
+   * ('sleep', 'wake', 'note': how far it got), attempts and retryAt (herdr-wake refused or failed),
+   * tasksSince (background tasks hold it) and failed (it gave up, why: only that note is left to
+   * type), among the extra fields.
    */
   kind?: string
   /**
@@ -57,10 +75,25 @@ export type ScheduleEntry = {
   fromProfile?: string
   replyTo?: string
   /**
+   * A message sent through the board (#619, core/agent-send.ts): answered with `board send` to
+   * `replyTo`; `fromDevice` names the computer it came from when that is not the receiver's.
+   */
+  replyBy?: 'board'
+  fromDevice?: string
+  /**
    * A sleeping session is not woken for it: it waits until the session is awake (a thread's event,
    * services/work-threads.ts; services/scheduler.ts).
    */
   noWake?: boolean
+  /** In the master's payload, an entry of another device's session (#500): its id and key carry the device's prefix. */
+  device?: string
+  /**
+   * Owner thread post(s) carried by this event (#693): if delivery fails past the wait, the
+   * scheduler records a private system notice on each named thread so it never passes silently.
+   */
+  ownerPosts?: { thread: string; key: string; target: SessionRef; seq?: number }[]
+  /** Telegram messages held for an offline node (#701), formatted with queued_at on delivery. */
+  telegramItems?: RouteItem[]
   [extra: string]: unknown
 }
 
@@ -79,12 +112,44 @@ export const cleanName = (s: unknown): string =>
     .trim()
     .slice(0, 60)
 
+export const MAX_TELEGRAM_HOLD_CHARS = 48_000
+
+/** Strips terminal control characters and bounds total size of held Telegram items (#701). */
+export function cleanTelegramItems(items: readonly RouteItem[], maxTotal = MAX_TELEGRAM_HOLD_CHARS): RouteItem[] {
+  let remaining = maxTotal
+  const out: RouteItem[] = []
+  for (const it of items) {
+    if (remaining <= 0) break
+    const text = cleanText(it.text, remaining)
+    remaining -= text.length
+    const cleanMeta: Record<string, string | undefined> | undefined = it.meta
+      ? Object.fromEntries(
+          Object.entries(it.meta).map(([k, v]) => [k, v === undefined ? undefined : cleanText(v, 512)]),
+        )
+      : undefined
+    out.push({
+      ...it,
+      key: cleanText(it.key, 512),
+      text,
+      ...(it.topic !== undefined && { topic: cleanText(it.topic, 512) }),
+      ...(it.pane !== undefined && { pane: cleanText(it.pane, 256) }),
+      ...(it.queued_at !== undefined && { queued_at: cleanText(it.queued_at, 64) }),
+      ...(cleanMeta !== undefined && { meta: cleanMeta }),
+    })
+  }
+  return out
+}
+
 /**
  * What the session gets: "[board reminder] text", with a note when it is late or stands for
  * several runs. A MokuPilot call's results (kind 'call') come as "[mokupilot call report]", the
  * report on lines of its own, and a closing note that they are for its information.
  */
 export function promptOf(entry: ScheduleEntry, now: number): string {
+  if (entry.kind === 'telegram') {
+    if (Array.isArray(entry.telegramItems) && entry.telegramItems.length) return formatPrompt(entry.telegramItems, now)
+    return entry.text
+  }
   if (entry.kind === 'restart') return restartPrompt(entry)
   const notes: string[] = []
   if (entry.cron) {
@@ -107,6 +172,13 @@ export function promptOf(entry: ScheduleEntry, now: number): string {
       entry.replyTo
         ? t('sched.prompt.message', { profile: entry.fromProfile, name: entry.replyTo })
         : t('sched.prompt.messageNoReply', { profile: entry.fromProfile }),
+    )
+  // A message through the board (#619, core/agent-send.ts): answered the same way, from any computer.
+  else if (setter && entry.replyBy === 'board' && typeof entry.replyTo === 'string' && entry.replyTo)
+    notes.unshift(
+      typeof entry.fromDevice === 'string' && entry.fromDevice
+        ? t('sched.prompt.sendFrom', { device: entry.fromDevice, name: entry.replyTo })
+        : t('sched.prompt.send', { name: entry.replyTo }),
     )
   // The tag stays in English: the hook knows a board prompt by it (entrypoints/hook.ts).
   const from = setter ? ` from ${setter}` : ''
@@ -145,9 +217,9 @@ const folder = (p: unknown): string =>
  * pane and the same Claude, so the same profile; the reminder follows it there. A session there
  * in another profile, or one where either profile is not known, is never followed into (it would
  * be reminded in the wrong account): it comes back as `other`, so the entry waits saying why.
- * Neither when there is none (as before the port). A retry-safe call report (`receipt`) never
- * follows: it is for its own session only. A restart or a sleep does not either: the session
- * after /clear, or another one started in that pane, is not the one it was asked for.
+ * Neither when there is none (as before the port). A retry-safe call report (`receipt`), a
+ * turn-resume continue (`turn-resume`), a restart or a sleep never follows: the session after
+ * /clear, or another one started in that pane, is not the one it was asked for.
  */
 export function targetOf(
   entry: ScheduleEntry,
@@ -156,7 +228,15 @@ export function targetOf(
 ): { item?: Item; other?: Item } {
   const own = items.find(i => i.key === entry.key)
   if (own) return { item: own }
-  if (entry.receipt || entry.kind === 'restart' || entry.kind === 'sleep' || !entry.pane || !entry.cwd) return {}
+  if (
+    entry.receipt ||
+    entry.kind === 'restart' ||
+    entry.kind === 'sleep' ||
+    entry.kind === TURN_RESUME_KIND ||
+    !entry.pane ||
+    !entry.cwd
+  )
+    return {}
   const next = items.find(i => i.pane === entry.pane && i.session && !i.sleeping && folder(i.cwd) === folder(entry.cwd))
   if (!next) return {}
   const was = profileOf(entry.key)

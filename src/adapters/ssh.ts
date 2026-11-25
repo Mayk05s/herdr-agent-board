@@ -348,7 +348,8 @@ export function endLogins(): void {
 
 /**
  * ssh with this argument list, no shell: stdout and stderr read by line; `stdin` written, then
- * closed (null: closed at once), so the sudo password is on ssh's stdin and nowhere else; ended
+ * closed (null: closed at once), so the sudo password is on ssh's stdin and nowhere else (bytes:
+ * the node's plugin archive, which "Add a server" sends up as the admin, #509); ended
  * after `timeoutMs`. With `login`, its password goes to ssh through the board's askpass
  * (openAskpass), and ssh runs in the board's tunnel folder (no .env or bunfig of another folder
  * for the helper's Bun) and, on POSIX, in a session of its own: no terminal to prompt on, and its
@@ -357,7 +358,7 @@ export function endLogins(): void {
 export function spawnRemote(
   bin: string,
   args: string[],
-  stdin: string | null,
+  stdin: string | Uint8Array | null,
   timeoutMs: number,
   login: { password: string } | null = null,
 ): RemoteRun {
@@ -458,7 +459,7 @@ export async function hostKeyPinned(host: string, port: number): Promise<boolean
 /** The tunnel's ssh, recorded so the next board can end it if this one dies without doing so. */
 export interface PidRecord {
   pid: number
-  /** `-R`'s value: what tells this ssh from another program that got its pid later. */
+  /** `-R`'s value (`-L`'s for a node link): what tells this ssh from another program that got its pid later. */
   forward: string
   at: number
 }
@@ -471,15 +472,16 @@ const isPidRecord = (v: unknown): v is PidRecord =>
   v.forward !== '' &&
   typeof v.at === 'number'
 
-export function readPidRecord(): PidRecord | null {
-  return readJson(sshPidFile(), isPidRecord)
+/** The record at `file`: the tunnel's, unless another is named (a node link's, adapters/node-ssh.ts). */
+export function readPidRecord(file: string = sshPidFile()): PidRecord | null {
+  return readJson(file, isPidRecord)
 }
 
-/** The record, or none (null). */
-export function writePidRecord(r: PidRecord | null): void {
-  if (r) mkdirSync(tunnelDir(), { recursive: true })
-  else if (!existsSync(sshPidFile())) return
-  updateJson<PidRecord>(sshPidFile(), () => r, isPidRecord, { mode: 0o600 })
+/** The record, or none (null), at `file` as readPidRecord has it. */
+export function writePidRecord(r: PidRecord | null, file: string = sshPidFile()): void {
+  if (r) mkdirSync(dirname(file), { recursive: true })
+  else if (!existsSync(file)) return
+  updateJson<PidRecord>(file, () => r, isPidRecord, { mode: 0o600 })
 }
 
 /** The command line a process runs with; null when it is gone (or cannot be read). */

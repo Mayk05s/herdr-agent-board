@@ -10,6 +10,7 @@ import {
   fillDeep,
   fillText,
   fingerprintOf,
+  givenFields,
   onlyStore,
   paramOk,
   parseExpires,
@@ -526,4 +527,36 @@ test('the board’s own store: the one sink where config.json defines none and i
     storeTarget({ scope: 'session', target: sid.toLowerCase() }, ['A', 'B']),
     'secrets: A, B (session 0f8fad5b)',
   )
+})
+
+test('a given secret (#507): the fields a template names, masked, once as the sink says; none for a sink that needs a request', () => {
+  const given = conf('linux', {
+    git: {
+      kind: 'file',
+      path: '~/.git-credentials',
+      template: 'https://me:{{token}}@git.example.com',
+      once: ['token'],
+    },
+    api: { kind: 'http', url: 'https://api.example.com/keys', body: { key: '{{key}}', user: '{{user}}' } },
+    'by-host': { kind: 'file', folder: '~', name: '{{host}}.txt', params: { host: 'name' }, template: '{{token}}' },
+    vault: { kind: 'bitwarden', folder: 'Agents', item: 'node' },
+    broken: { kind: 'file', path: 'relative.txt', template: '{{token}}' },
+  }).sinks
+  const of = (id: string) => {
+    const s = given.get(id)
+    if (!s) throw new Error(id)
+    return givenFields(s)
+  }
+  expect(of('git')).toEqual({ ok: true, params: {}, fields: [{ name: 'token', hidden: true, once: true }] })
+  expect(of('api')).toEqual({
+    ok: true,
+    params: {},
+    fields: [
+      { name: 'key', hidden: true },
+      { name: 'user', hidden: true },
+    ],
+  })
+  expect(of('by-host')).toEqual({ ok: false, error: 'secret.err.given', vars: { sink: 'by-host' } })
+  expect(of('vault')).toEqual({ ok: false, error: 'secret.err.given', vars: { sink: 'vault' } })
+  expect(of('broken')).toEqual({ ok: false, error: 'secret.err.sinkBroken', vars: { sink: 'broken' } })
 })

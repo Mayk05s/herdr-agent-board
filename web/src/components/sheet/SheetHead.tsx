@@ -7,15 +7,21 @@
 // is open or folded as the sheet's density says (#345, models/sheet-density.ts). Before a session was
 // ever open, the empty places of the page.
 import { Fragment, type KeyboardEvent, type MouseEvent, useRef } from 'react'
+import { bgTaskActive } from '../../../../src/core/bg-task.ts'
+import type { SessionSpend } from '../../../../src/core/spend.ts'
 import type { Item } from '../../../../src/core/types.ts'
 import { useCollapse } from '../../hooks/useCollapse.ts'
 import type { SheetPick } from '../../hooks/useContextMenus.ts'
 import { useT } from '../../i18n/I18nProvider.tsx'
 import { categoryInfo, catOf, colOf } from '../../models/board-view.ts'
+import { cardChecklist } from '../../models/card.ts'
+import { nodeLook } from '../../models/devices.ts'
 import { linkedSessions } from '../../models/helper-model.ts'
 import { foldLine, sheetHead, type WorkspaceFact } from '../../models/sheet.ts'
+import { spendSheetLine, spendSheetTooltip } from '../../models/spend.ts'
 import { COLUMN_COLORS } from '../../models/toolbar.ts'
 import { useBoardContext } from '../../state/BoardProvider.tsx'
+import { DeviceFacts } from '../devices/DeviceChip.tsx'
 import { ChevronGlyph, MoonGlyph, StarGlyph, UpDownGlyph, WriteGlyph } from '../icons.tsx'
 import { SheetThreads } from '../threads/bits.tsx'
 import type { ScheduleActions } from './ScheduleRow.tsx'
@@ -60,6 +66,8 @@ export interface HeadFold {
 export interface SheetHeadProps {
   item: Item | null
   missing: boolean
+  /** Token spend across this session's transcript (#636); absent or null when not read or 0. */
+  spend?: SessionSpend | null | undefined
   /** Rename where the name is (hooks/useRenameInPlace.ts). */
   onRename?: ((name: HTMLElement) => void) | undefined
   /** Rename the session's herdr workspace where its name is; without it, the name is the line's text. */
@@ -100,9 +108,16 @@ function Fact({
 const NO_CARD: HeadCard = { disabled: true, open: false }
 const WHOLE: HeadFold = { compact: false }
 
+function localToday(boardDate?: string): string {
+  if (boardDate) return boardDate
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export function SheetHead({
   item,
   missing,
+  spend,
   onRename,
   onRenameWorkspace,
   card = NO_CARD,
@@ -133,6 +148,8 @@ export function SheetHead({
   // Where it shows on screen now: a move the board has not confirmed yet shows at once.
   const column = colOf(ui.moves, item)
   const head = sheetHead(item, { missing, now, t })
+  // A session of another device (#502): the device first on the line; none for this computer's.
+  const node = nodeLook(item, data?.devices, now, t)
   const color = COLUMN_COLORS[column]
   const locked = card.disabled || missing
   // Nothing of the card's to show: its place folds away (the reminders as their row shows them, a
@@ -140,7 +157,15 @@ export function SheetHead({
   const schedules = (card.schedule?.held ? card.schedule.held.view.data : data)?.schedules ?? []
   const reminders = schedules.filter(e => e.key === item.key).length
   const linked = linkedSessions(item, key => !!data?.items.some(i => i.key === key))
-  const fields = card.open || !!item.doing || !!item.wait || reminders > 0 || linked.length > 0
+  const checklist = cardChecklist(item, t)
+  const fields =
+    card.open ||
+    !!item.doing ||
+    !!item.wait ||
+    reminders > 0 ||
+    linked.length > 0 ||
+    !!checklist ||
+    bgTaskActive(item.bgTasks)
   // On a phone (session-head.css) the fields fold into the line that matters most, and that line
   // opens them as the pencil does elsewhere, the empty ones to fill included; with nothing to show
   // it reads as the pencil's own words.
@@ -262,6 +287,12 @@ export function SheetHead({
       <div className="sheet-details" id="sheet-details" ref={details} data-folded={shape.compact ? '' : undefined}>
         <div className="sheet-details-inner">
           <p className="sheet-meta" id="sheet-meta" title={head.metaTitle}>
+            {node && (
+              <span className="sheet-device">
+                <DeviceFacts node={node} />
+              </span>
+            )}
+            {node && head.meta.length > 0 && <span className="sep"> · </span>}
             {/* Each fact whole on its line: the line breaks between them, after a separator, never inside
                 one. A narrow column stacks them, without the separators (session-head.css). */}
             {head.meta.map((part, i) => (
@@ -272,6 +303,15 @@ export function SheetHead({
               </Fragment>
             ))}
           </p>
+          {spend && spend.total.total > 0 && (
+            <p
+              className="sheet-spend"
+              id="sheet-spend"
+              title={spendSheetTooltip(spend, localToday(data?.time?.date), t)}
+            >
+              {spendSheetLine(spend, localToday(data?.time?.date), t)}
+            </p>
+          )}
           <button
             type="button"
             className="sheet-fold"

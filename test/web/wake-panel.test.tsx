@@ -10,6 +10,7 @@ import { translator } from '../../src/core/i18n/translator.ts'
 import type { BoardPayload, BoardProfile } from '../../src/core/payload.ts'
 import type { Switched, WakeSettingsView, WakeView } from '../../src/core/wake/view.ts'
 import { timeOf } from '../../src/core/when-format.ts'
+import { LimitsPop } from '../../web/src/components/LimitsPop.tsx'
 import { ProfilesPanel } from '../../web/src/components/profiles/ProfilesPanel.tsx'
 import { Toolbar } from '../../web/src/components/Toolbar.tsx'
 import { WakeNote } from '../../web/src/components/wake/WakeNote.tsx'
@@ -26,7 +27,8 @@ import { type Host, hostElements, listenLikeReact } from './support/react-events
 
 const VP = { w: 1600, h: 1000 }
 const NOW = Date.now()
-const SINCE = NOW - 3_600_000
+// An hour before NOW, on NOW's day: a run since an earlier day says the day too (tested below).
+const SINCE = Math.max(NOW - 3_600_000, new Date(NOW).setHours(0, 0, 0, 0))
 
 const RUNNING: WakeView = { on: true, state: 'running', since: SINCE, asleep: 4, port: 12421, downSince: null }
 const CRASHED: WakeView = {
@@ -56,12 +58,12 @@ const textOf = (n: Node): string => (n.kind === 'text' ? n.text : n.children.map
 const texts = (els: Element[]): string[] => els.map(textOf)
 
 /** The panel as drawn for a payload's wake (none: not in the payload), with more of the payload when given. */
-function panelNodes(wake: WakeView | undefined, lang = 'en', more: Partial<BoardPayload> = {}): Node[] {
+function panelNodes(wake: WakeView | undefined, lang = 'en', more: Partial<BoardPayload> = {}, now = NOW): Node[] {
   return renderInBoard(
     <PanelProvider viewport={() => VP}>
       <WakePanel open={false} onClose={() => {}} />
     </PanelProvider>,
-    board({ data: payload({ lang: lang === 'ru' ? 'ru' : 'en', ...(wake && { wake }), ...more }) }),
+    board({ data: payload({ lang: lang === 'ru' ? 'ru' : 'en', ...(wake && { wake }), ...more }), now }),
     lang,
   )
 }
@@ -163,6 +165,17 @@ describe('the panel as drawn', () => {
     expect(textOf(find([ru], el => hasClass(el, 'wake-state')))).toBe(
       `Работает с ${timeOf(SINCE, translator('ru'))}, 4 спят`,
     )
+  })
+
+  test('running since an earlier day: the state line says the day', () => {
+    const now = new Date(2025, 0, 10, 0, 30).getTime() // Friday 00:30, local time, weeks from the real clock
+    const since = new Date(2025, 0, 9, 23, 39).getTime() // Thursday 23:39
+    const line = (lang: string) =>
+      textOf(
+        find([byId(panelNodes({ ...RUNNING, since }, lang, {}, now), 'wake-sheet')], el => hasClass(el, 'wake-state')),
+      )
+    expect(line('en')).toBe(`Running since Thu ${timeOf(since, translator('en'))}, 4 asleep`)
+    expect(line('ru')).toBe(`Работает с чт ${timeOf(since, translator('ru'))}, 4 спят`)
   })
 
   test('off: the switch off and the sessions still asleep; not running: Start', () => {
@@ -536,19 +549,18 @@ describe('the toolbar’s quiet note', () => {
     )
   const notesIn = (nodes: Node[]) => findAll(nodes, el => el.attrs.get('id') === 'wake-note')
 
-  test('on and not running for more than a minute: "Wake stopped", beside the setup note', () => {
-    const nodes = toolbarOf(payload({ wake: CRASHED }), () => {})
-    const [note] = notesIn(nodes)
+  test('on and not running for more than a minute: marks Status with an alert and renders "Wake stopped" inside the Status popover', () => {
+    const bar = toolbarOf(payload({ wake: CRASHED }), () => {})
+    expect(hasClass(byId(bar, 'limits'), 'alert')).toBe(true)
+    const pop = renderInBoard(
+      <LimitsPop anchor={{ current: null }} unified onWake={() => {}} />,
+      board({ data: payload({ wake: CRASHED }), now: NOW, ui: { limitsOpen: true } }),
+    )
+    const [note] = notesIn(pop)
     if (!note) throw new Error('no note')
     expect(textOf(note)).toBe('Wake stopped')
     expect(note.attrs.get('title')).toBe('Sleep and wake is on but not running: open its settings')
-    // Drawn as "Setup incomplete" is, right after it.
-    expect(note.attrs.get('class')).toBe('setup-note wake-note')
-    const controls = find(nodes, el => hasClass(el, 'toolbar-actions')).children.filter(
-      (n): n is Element => n.kind === 'element',
-    )
-    const at = controls.findIndex(el => el.attrs.get('id') === 'wake-note')
-    expect(controls[at - 1]?.attrs.get('id')).toBe('next-attention')
+    expect(note.attrs.get('class')).toBe('status-pop-alert')
   })
 
   test('otherwise the toolbar is as it was: running, down less than a minute, off, or no wake at all', () => {

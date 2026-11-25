@@ -14,30 +14,74 @@ import { callAgentsGate, taskBoard } from '../adapters/mokupilot-call.ts'
 import { dayGate } from '../adapters/mokupilot-day.ts'
 import { contextDir } from '../adapters/paths.ts'
 import type { LiveHit } from '../adapters/profile-homes.ts'
+import { peekWakeSessions } from '../adapters/wake-files.ts'
+import { AGY_AGENT, isAgyItem, isAgySession } from '../core/agy.ts'
+import { bgTaskFromFooter, bgTaskStuckMin, summarizeBgTasks } from '../core/bg-task.ts'
 import { attentionOf, busy, columnOf, isAgentStatus, PINS } from '../core/board.ts'
 import { besideParents, type CallAgent, type CallView } from '../core/call-agent.ts'
 import { categoryFor } from '../core/categories.ts'
 import { isCodexItem } from '../core/codex.ts'
 import { compactView } from '../core/compact.ts'
+import { type CardDecision, cardDecisionOf, decisionsConfig } from '../core/decisions.ts'
 import { waitingTool } from '../core/held-question.ts'
 import { type HelperSummary, summarize } from '../core/helpers.ts'
 import { t } from '../core/lang.ts'
+import { slugName } from '../core/launch/names.ts'
 import { relate } from '../core/links.ts'
+import { lostAccessLine } from '../core/lost-access.ts'
+import { modelCheck, modelsConfig } from '../core/model-check.ts'
+import { nodeConfig } from '../core/nodes.ts'
 import { isPiItem, isPiSessionFile, PI_AGENT, piSessionId } from '../core/pi.ts'
-import { sessionProfile } from '../core/profiles.ts'
+import { DEFAULT_PROFILE, sessionProfile } from '../core/profiles.ts'
 import { pendingOf, requestsOf, type SecretView, secretViews } from '../core/secrets.ts'
 import { numberTodos, type Todo, todosOf } from '../core/todos.ts'
 import type { AgentStatus, Attention, Card, Config, Item, Pin, ToolCall, TranscriptInfo } from '../core/types.ts'
+import { agySleeperPane } from '../core/wake/agy.ts'
 import { piSleeperPane } from '../core/wake/pi.ts'
+import { asciiKey, keyFor } from '../core/wake/topics.ts'
 import { archivedFiles, getArchived, hides, isArchived, settleReturned } from './archive.ts'
 import type { Deps } from './deps.ts'
 import { secretsOf } from './secrets.ts'
 
 const numberOf = (value: unknown): number | undefined => (typeof value === 'number' ? value : undefined)
 
+/**
+ * Automatic display name for an Antigravity (`agy`) pane (#650): `agy` does not update the
+ * terminal title, so prefer herdr's agent name, a non-numeric tab label (set by `spawn-agent
+ * --name`), pane label, or conversation title before falling back to the shell's terminal title.
+ */
+export function agyAutoName(opts: {
+  agentName?: string | undefined
+  tabLabel?: string | undefined
+  paneLabel?: string | undefined
+  title?: string | undefined
+  terminalTitle?: string | undefined
+  paneId: string
+}): string {
+  const herdrName = opts.agentName?.trim() || ''
+  const rawTab = opts.tabLabel?.trim() || ''
+  const tabLabel = rawTab && !/^\d+$/.test(rawTab) ? rawTab : ''
+  // Keep spawn-agent's original capitalization when herdr's lowercased slug matches the tab label.
+  if (herdrName && tabLabel && slugName(tabLabel) === herdrName) return tabLabel
+  if (herdrName) return herdrName
+  if (tabLabel) return tabLabel
+  const paneLabel = opts.paneLabel?.trim() || ''
+  if (paneLabel) return paneLabel
+  const title = opts.title?.trim() || ''
+  if (title) return title
+  return opts.terminalTitle?.trim() || opts.paneId
+}
+
 /** MokuPilot's call agents (#326), read only where it is not turned off and has run here (looked up once a minute). */
 const callAgentsHere = callAgentsGate()
 const daySessionHere = dayGate()
+
+/** A card's open decision (#487), only while config.json turns decisions on and the card still asks. */
+const decisionField = (cfg: Config, card: Card): { decision?: CardDecision } => {
+  if (card.decision === undefined || !card.ask || !decisionsConfig(cfg.decisions)) return {}
+  const decision = cardDecisionOf(card.decision)
+  return decision ? { decision } : {}
+}
 
 /** The panes its card says wake closed as it went to sleep (#204, services/wake/follow.ts), when it has any. */
 /** A card's tasks (#202) for its item, when it has any. */
@@ -125,7 +169,14 @@ function pinOf(key: string, status: AgentStatus, card: Card): Pin | '' {
 }
 
 /** What the user is asked, for the card. */
-function askedText(attention: Attention, card: Card, info: TranscriptInfo, tool: ToolCall | null): string {
+function askedText(
+  attention: Attention,
+  card: Card,
+  info: TranscriptInfo,
+  tool: ToolCall | null,
+  lostLine = '',
+): string {
+  if (attention === 'access') return lostLine
   if (attention === 'ask') return card.ask || secretAsk(card)
   if (attention === 'question') return info.question ?? ''
   if (attention !== 'decision' || !tool?.pending) return ''
@@ -140,6 +191,8 @@ interface ContextFile {
   usedPercentage: number | undefined
   size: number | undefined
   model: string | undefined
+  /** The effort its last run reported; null: that run had none; undefined: written before effort was kept. */
+  effort: string | null | undefined
 }
 
 const contextCache = new Map<string, { mtimeMs: number; data: ContextFile }>() // session -> file
@@ -152,6 +205,7 @@ function asContextFile(value: unknown): ContextFile {
     usedPercentage: numberOf(d.usedPercentage),
     size: numberOf(d.size),
     model: typeof d.model === 'string' && d.model ? d.model : undefined,
+    effort: typeof d.effort === 'string' && d.effort ? d.effort.slice(0, 20) : 'effort' in d ? null : undefined,
   }
 }
 
@@ -165,6 +219,10 @@ interface ContextFill {
   contextSize: number | null
   model: string | null
   effort: string | null
+  /** `effort` is what Claude's status line last reported (#193): the card shows only that one. */
+  effortLive?: true
+  /** When `model` was reported: the status line's last run (its file's time), else its assistant line's time (server only). */
+  modelAt: number | null
 }
 
 const effortCache = new Map<string, { mtimeMs: number; effort: string | null }>()
@@ -200,6 +258,7 @@ function contextOf(session: string | null, info: TranscriptInfo, settingsDir: st
     contextSize: null,
     model: info.model ?? null,
     effort: info.effort ?? effortFromSettings(settingsDir, info.model ?? null),
+    modelAt: info.model ? (info.modelAt ?? null) : null,
   }
   if (!session) return own
   const file = join(contextDir(), `${session.replace(/[^A-Za-z0-9_-]/g, '_')}.json`)
@@ -218,11 +277,18 @@ function contextOf(session: string | null, info: TranscriptInfo, settingsDir: st
   // The transcript can be newer (a reply the status line has not run for yet): its tokens win then.
   const fresh = !info.activity || (d.at !== undefined && d.at >= info.activity - 5000)
   return {
-    context: (fresh && d.tokens) || own.context,
+    // A zero it counted is a count; no count leaves the transcript's.
+    context: fresh && d.tokens != null ? d.tokens : own.context,
     contextPct: fresh ? (d.usedPercentage ?? null) : null,
     contextSize: d.size ?? null,
     model: d.model ?? own.model,
-    effort: own.effort,
+    // The status line's effort is the live one (a session-only /effort too, #193), and it runs again
+    // on every change: what it said wins, none included, so a level it stopped reporting is not kept.
+    // A file from before it was kept leaves the transcript's and the settings' as they were.
+    effort: d.effort !== undefined ? d.effort : own.effort,
+    ...(typeof d.effort === 'string' && { effortLive: true as const }),
+    // The status line rewrites the file on every run, before the first reply too (a model, no tokens).
+    modelAt: d.model ? st.mtimeMs : own.modelAt,
   }
 }
 
@@ -270,6 +336,8 @@ type Base = Pick<
   | 'pipe'
   | 'fromFile'
   | 'day'
+  | 'bgTasks'
+  | 'tgKey'
 >
 
 export interface CollectOptions {
@@ -279,6 +347,9 @@ export interface CollectOptions {
   links?: LinksIndex | null
   /** Told every pane in herdr's snapshot with the terminal it holds (null: herdr did not say), once collected. */
   seen?: (panes: ReadonlyMap<string, string | null>) => void
+  /** Called when a background agy footer probe observes a task count change (#676). */
+  onBgChange?: () => void
+  observed?: (native: Awaited<ReturnType<typeof snapshot>>, items: readonly Item[]) => void
 }
 
 /**
@@ -288,25 +359,59 @@ export interface CollectOptions {
  */
 export async function collect(
   deps: Deps,
-  { helpers = false, links = null, seen: panesSeen = () => {} }: CollectOptions = {},
+  { helpers = false, links = null, seen: panesSeen = () => {}, onBgChange, observed }: CollectOptions = {},
 ): Promise<Item[]> {
   const { cfg } = deps
+  const isNode = nodeConfig(cfg.node) !== null
+  // The model rule (#429): null while config.json has none, and then nothing below reads it.
+  const models = modelsConfig(cfg.models)
   const [snap, asleep] = await Promise.all([snapshot(), deps.wake.sleepers()])
   // The registries of every profile, hidden ones too (their running sessions keep their names and
   // titles), and of the folder the board's own env points to.
   const profiles = deps.profiles()
+  const shownProfileCount = profiles.list.filter(p => !p.hidden).length
   const dirs = [profiles.inheritedDir, ...profiles.list.map(p => p.dir)]
   const searched = [...new Set(dirs.map(dir => deps.homes.forDir(dir)))]
   const live = deps.homes.liveSessions(dirs)
   const cards = allCards()
   const labels = new Map(snap.workspaces.map(w => [w.workspace_id, w.label]))
+  const hasAgyPane = snap.panes.some(p => p.agent === AGY_AGENT)
+  const tabLabels = hasAgyPane ? new Map(snap.tabs.map(tab => [tab.tab_id, tab.label ?? ''])) : null
+  const agentNames = hasAgyPane ? new Map((snap.agents ?? []).map(a => [a.pane_id, a.name ?? ''])) : null
+  const now = Date.now()
+  const stuckMin = bgTaskStuckMin(cfg.bgTaskStuckMin)
+  const agyMeta = new Map<
+    string,
+    {
+      session: string | null
+      info: TranscriptInfo | null
+      runningSubagent: boolean
+      footerCount: number | null
+    }
+  >()
+  if (hasAgyPane) {
+    for (const p of snap.panes) {
+      if (p.agent !== AGY_AGENT) continue
+      const rawSession = p.agent_session?.value ?? null
+      // If herdr's PreInvocation hook reported an agy subagent UUID, resolve back to its root conversation (#650).
+      const session = rawSession ? (deps.agy.rootSession(rawSession) ?? rawSession) : null
+      const info = session ? deps.agy.transcriptInfo(session) : null
+      const runningSubagent = !!session && deps.agy.hasRunningSubagent(session)
+      const st = isAgentStatus(p.agent_status) ? p.agent_status : 'unknown'
+      const footerCount =
+        st !== 'blocked' && st !== 'working' && !runningSubagent && !info?.bgTasks?.length && deps.agyFooter
+          ? deps.agyFooter.peek(p.pane_id, p.terminal_id ?? '', now, onBgChange)
+          : null
+      agyMeta.set(p.pane_id, { session, info, runningSubagent, footerCount })
+    }
+  }
   const items: Item[] = []
   const seen = new Set<string>()
   const archived = archivedFiles()
 
   // A MokuPilot call agent (#326) runs with no pane and no hook: its card is told the Claude folder
   // MokuPilot started it in, where its records are, unless its own card says one.
-  const add = (base: Base, call?: CallAgent, parent?: Item): void => {
+  const add = (base: Base, call?: CallAgent, parent?: Item, preloadedAgy?: TranscriptInfo | null): void => {
     if (isArchived(archived, base.key)) {
       const record = getArchived(base.key)
       if (hides(record, base)) return
@@ -319,6 +424,11 @@ export async function collect(
       }
     }
     const saved = cards.get(base.key) ?? {}
+    // Moved to another device (#616, services/move-out.ts): its card there is the one; this one,
+    // asleep here, is left out until it comes back (a move back clears the mark) or runs here again.
+    // One that stays awake carries the mark in `movedTo` (#642) so the master drops it by the mark.
+    let moved = movedOf(saved)
+    if (base.sleeping && moved) return
     const pin = pinOf(base.key, base.status, saved)
     const hit = base.session ? live.get(base.session) : undefined
     // A MokuPilot day session (#331) has no hook to report its profile either: the folder whose
@@ -332,38 +442,83 @@ export async function collect(
     // A pi session's records are its session file, its key: none of Claude's folders has them.
     const pi = isPiItem(base) ? (deps.pi.transcriptInfo(base.session) ?? {}) : null
     const codex = isCodexItem(base) ? (deps.codex.transcriptInfo(base.session) ?? {}) : null
+    const agy = isAgyItem(base)
+      ? preloadedAgy !== undefined
+        ? (preloadedAgy ?? {})
+        : (deps.agy.transcriptInfo(base.session) ?? {})
+      : null
     const { home, path } =
-      pi || codex ? { home: null, path: null } : recordsOf(deps, card, base.session, base.cwd, hit, searched)
-    const info = codex ?? pi ?? home?.transcriptInfo(path) ?? {}
+      pi || codex || agy ? { home: null, path: null } : recordsOf(deps, card, base.session, base.cwd, hit, searched)
+    const info = agy ?? codex ?? pi ?? home?.transcriptInfo(path) ?? {}
     // The name given to a pi session (/name) is what herdr and pi know it by, as a Claude's /rename.
     const autoName = pi?.name || base.name
     const guess = categoryFor(cfg, base.cwd)
     // A Claude session's question form can be the hook's still (core/held-question.ts).
-    const tool = pi || codex ? (info.tool ?? null) : waitingTool(base.status, info, card.asking)
+    const tool = pi || codex || agy ? (info.tool ?? null) : waitingTool(base.status, info, card.asking)
+    // A fork or call starts from copied transcript history: ignore lost-access errors recorded before it began.
+    const rawLost = info.lostAccess
+    const floorAt = call ? call.started : typeof card.forkAt === 'number' ? card.forkAt : 0
+    const lostAccess = rawLost && (!floorAt || !rawLost.at || rawLost.at >= floorAt) ? rawLost : undefined
+    // Latest active TodoWrite checklist (#637): Claude sessions only, ignoring copied fork/call lines.
+    const rawChecklist = !pi && !codex && !agy && base.agent === 'claude' ? info.checklist : undefined
+    const checklist =
+      rawChecklist && (!floorAt || !rawChecklist.at || rawChecklist.at >= floorAt) ? rawChecklist : undefined
     // A call agent's last words go to the call, its questions too: only its `board ask` asks the user.
-    const told: TranscriptInfo = call ? { ...info, question: '' } : info
+    const { lostAccess: _ignored, ...restInfo } = info
+    const told: TranscriptInfo = {
+      ...(call ? { ...restInfo, question: '' } : restInfo),
+      ...(lostAccess && { lostAccess }),
+    }
     const attention = attentionOf(base.status, card, told)
+    const sp = sessionProfile(card, profiles.list)
+    const profileRow = !pi && !codex && !agy && sp.profile ? profiles.list.find(p => p.id === sp.profile) : undefined
+    const lostProfileTitle =
+      profileRow && (shownProfileCount >= 2 || profileRow.hidden || profileRow.id !== DEFAULT_PROFILE)
+        ? profileRow.title || profileRow.id
+        : null
+    const lostLine = lostAccess ? lostAccessLine(lostAccess, lostProfileTitle, t) : ''
     const callOf = call ? callView(call, base.key) : null
     // Its own words on the board, else what its task board says it does.
     const doing = card.doing || callOf?.tasks.find(x => x.status === 'doing')?.text || ''
-    const context = contextOf(codex ? null : base.session, info, home?.root ?? null) // Codex has no Claude status line file.
+    const { modelAt, ...context } = contextOf(codex || agy ? null : base.session, info, home?.root ?? null) // Codex and Antigravity have no Claude status line file.
+    const name = card.name || autoName
+    // A call agent goes in its parent's lane, unless its own card says another.
+    const category = card.category || parent?.category || guess || 'other'
+    // Its model against the rule (#429), once this start has reported one: a model read before it
+    // started is the one it had before a restart or a wake.
+    const fresh = !base.since || (modelAt ?? 0) >= base.since
+    const modelWrong =
+      models && fresh ? modelCheck({ ...base, name, category, model: context.model }, card, models) : null
     // Auto-compact (#378): a Claude session in a pane of its own, only where it or Settings has a
     // limit, instructions or a run to show.
     const compact =
       base.agent === 'claude' && !base.day && !call ? compactView(card, cfg.compact, context.contextSize) : null
+    const transcriptPath = agy ? deps.agy.transcriptPath(base.session) : path
     let own: HelperSummary | null = null
-    if (helpers && path) {
+    if (helpers && agy && base.session) {
+      try {
+        own = summarize(deps.agy.sessionHelpers(base.session))
+      } catch {}
+    } else if (helpers && path) {
       try {
         own = summarize(helpersOf(path, { alive: !!base.alive, since: base.since ?? null }))
       } catch {} // helpers that cannot be read leave the session's card as it was
     }
+    const itemActivity = info.activity ?? base.activity ?? 0
+    // Resumed locally since the move (#642): clear the stale mark so it stays a normal local card.
+    if (!base.sleeping && moved && moved.at !== null && Math.max(base.since ?? 0, itemActivity) > moved.at) {
+      moved = null
+      try {
+        writeCard(base.key, { moved: '' })
+      } catch {} // its record is locked: the next refresh clears it
+    }
     items.push({
       ...base,
+      ...(moved && { movedTo: moved.to, ...(moved.at !== null && { movedAt: moved.at }) }),
       // A name given on the board beats the one herdr and Claude know it by; autoName is theirs.
-      name: card.name || autoName,
+      name,
       autoName,
-      // A call agent goes in its parent's lane, unless its own card says another.
-      category: card.category || parent?.category || guess || 'other',
+      category,
       categorySet: !!card.category,
       doing,
       // A card written before doingAt (#321): its last change, the latest the doing can be from.
@@ -383,19 +538,25 @@ export async function collect(
             recap: info.recap ?? '',
             recapAt: info.recapAt ?? null,
           }),
+      // its last words are an API error (#489, the away journal's "stopped on an error"); off the payload
+      ...(info.apiError && { apiError: true as const }),
+      ...(lostAccess && { lostAccess }),
       ...context,
       tool,
       attention,
-      question: askedText(attention, card, told, tool),
-      askSince: attention === 'ask' ? (card.askSince ?? null) : null,
+      question: askedText(attention, card, told, tool, lostLine),
+      askSince: attention === 'ask' ? (card.askSince ?? null) : attention === 'access' ? lostAccess?.at || null : null,
       activity: info.activity ?? base.activity ?? 0,
       column: columnOf(base.status, card, told),
       pin, // the column the user dragged it to, or ''
       auto: columnOf(base.status, { ...card, pin: '' }, told), // where it would be without the pin
       ...(card.favorite === true && { favorite: true }), // the user keeps it in sight
       ...todosField(card), // its tasks (#202), when it has any
+      ...(checklist && { checklist }), // its active TodoWrite checklist (#637), Claude only
+      ...(base.bgTasks && !base.sleeping && { bgTasks: base.bgTasks }), // running background tasks (#676), agy only
       ...(compact && { compact }), // its auto-compact (#378), when there is any
       ...secretsField(cfg, card), // what it asks the user to fill in (#273), when it does
+      ...decisionField(cfg, card), // its open question's options and default (#487), while decisions are on
       helpers: own, // its subagents, forks, workflow agents and teammates in short, or null
       // a fork's card says whose fork it is, and when it started; a call agent's file says it
       ...(typeof card.forkOf === 'string'
@@ -404,9 +565,10 @@ export async function collect(
       ...(callOf && { call: callOf }), // a MokuPilot call agent (#326): its call and its task board
       // the model its start asked for (#380), when not the profile's default
       ...(typeof card.modelWant === 'string' && card.modelWant && { modelAsked: card.modelWant }),
-      transcript: path,
+      ...(modelWrong && { modelWrong }), // another model than config.json's `models` expects (#429)
+      transcript: transcriptPath,
       ...formerPanes(card), // panes wake closed as it went to sleep (#204), for the links
-      ...sessionProfile(card, profiles.list), // its profile, as its hooks reported it
+      ...sp, // its profile, as its hooks reported it
       claudeRoot: home?.root ?? null, // the folder its records were read from
     })
   }
@@ -422,7 +584,9 @@ export async function collect(
 
   for (const p of snap.panes) {
     if (!p.agent) continue
-    const session = p.agent_session?.value ?? null
+    const agyPane = p.agent === AGY_AGENT
+    const meta = agyPane ? agyMeta.get(p.pane_id) : undefined
+    const session = agyPane ? (meta?.session ?? null) : (p.agent_session?.value ?? null)
     if (dayPane(p, session)) {
       dayWorkspace ||= labels.get(p.workspace_id ?? '') ?? ''
       continue
@@ -431,23 +595,52 @@ export async function collect(
     if (seen.has(key)) continue
     seen.add(key)
     const reg = session ? live.get(session)?.session : null
-    add({
-      key,
-      session,
-      pane: p.pane_id,
-      workspace: labels.get(p.workspace_id ?? '') ?? '',
-      agent: p.agent,
-      name: reg?.name || p.terminal_title_stripped || p.label || p.pane_id,
-      cwd: p.cwd ?? reg?.cwd ?? '',
-      status: isAgentStatus(p.agent_status) ? p.agent_status : 'unknown',
-      sleeping: false,
-      focused: p.pane_id === snap.focused_pane_id,
-      activity: numberOf(reg?.statusUpdatedAt) ?? 0,
-      // Its Claude process: whether it runs, since when, and the pipe other sessions write to.
-      alive: !!reg,
-      since: numberOf(reg?.startedAt) ?? null,
-      pipe: typeof reg?.messagingSocketPath === 'string' ? reg.messagingSocketPath : '',
-    })
+    let status: AgentStatus = isAgentStatus(p.agent_status) ? p.agent_status : 'unknown'
+    if (agyPane && status !== 'blocked' && meta?.runningSubagent) status = 'working'
+    const footerRemaining = meta?.footerCount ? meta.footerCount - (meta.info?.daemonBgTasks?.length ?? 0) : 0
+    const bgTasks = agyPane
+      ? meta?.info?.bgTasks?.length
+        ? summarizeBgTasks(meta.info.bgTasks, stuckMin, now)
+        : footerRemaining > 0
+          ? bgTaskFromFooter(footerRemaining, null, stuckMin, now)
+          : null
+      : null
+    if (bgTasks && status !== 'blocked') status = 'working'
+    const name = agyPane
+      ? agyAutoName({
+          agentName: agentNames?.get(p.pane_id) || p.name,
+          tabLabel: p.tab_id ? tabLabels?.get(p.tab_id) : undefined,
+          paneLabel: p.label,
+          title: session ? deps.agy.sessionTitle(session) : undefined,
+          terminalTitle: p.terminal_title_stripped,
+          paneId: p.pane_id,
+        })
+      : reg?.name || p.terminal_title_stripped || p.label || p.pane_id
+    const tgKey = isNode && p.agent === 'claude' ? keyFor(snap, p.pane_id, p.cwd ?? reg?.cwd ?? '') : ''
+    add(
+      {
+        key,
+        session,
+        pane: p.pane_id,
+        workspace: labels.get(p.workspace_id ?? '') ?? '',
+        agent: p.agent,
+        name,
+        cwd: p.cwd ?? reg?.cwd ?? '',
+        status,
+        sleeping: false,
+        focused: p.pane_id === snap.focused_pane_id,
+        activity: numberOf(reg?.statusUpdatedAt) ?? 0,
+        // Its Claude process: whether it runs, since when, and the pipe other sessions write to.
+        alive: !!reg,
+        since: numberOf(reg?.startedAt) ?? null,
+        pipe: typeof reg?.messagingSocketPath === 'string' ? reg.messagingSocketPath : '',
+        ...(bgTasks && { bgTasks }),
+        ...(tgKey && { tgKey }),
+      },
+      undefined,
+      undefined,
+      agyPane ? (meta?.info ?? null) : undefined,
+    )
   }
 
   if (day && dayReg && !seen.has(day.session)) {
@@ -483,6 +676,7 @@ export async function collect(
   }
 
   const panes = new Map(snap.panes.map(p => [p.pane_id, p]))
+  let wakeEntries: ReturnType<typeof peekWakeSessions> | null = null
   for (const s of asleep) {
     if (!s.session || seen.has(s.session)) continue
     if (s.agent === PI_AGENT) {
@@ -510,12 +704,46 @@ export async function collect(
       })
       continue
     }
+    if (s.agent === AGY_AGENT) {
+      // An Antigravity (`agy`) session asleep (#631), from wake's answer or its file: shown whether
+      // its pane is still its own (then with it) or not (it wakes in a new tab).
+      if (!isAgySession(s.session)) continue
+      seen.add(s.session)
+      const name = s.name ?? ''
+      const cwd = s.cwd ?? ''
+      const own = s.fromFile ? agySleeperPane(snap, { pane: s.pane ?? '', name, cwd })?.pane_id : s.pane
+      const ws = own ? panes.get(own)?.workspace_id : undefined
+      add({
+        key: s.session,
+        session: s.session,
+        pane: own || null,
+        workspace: (ws === undefined ? undefined : labels.get(ws)) ?? s.workspace ?? '',
+        agent: AGY_AGENT,
+        name: name || deps.agy.sessionTitle(s.session) || s.session.slice(0, 8),
+        cwd,
+        status: 'sleeping',
+        sleeping: true,
+        focused: false,
+        activity: Date.parse(s.slept_at ?? '') || 0,
+        ...(s.fromFile && { fromFile: true }),
+      })
+      continue
+    }
     const pane = panes.get(s.pane ?? '')
     // One from wake's session file only where herdr shows its pane as a shell: not one whose pane
     // runs Claude (or another agent) again, nor one whose pane is gone. Its workspace is herdr's.
     // One whose pane wake closed (#204) has none: it wakes in a new tab, its workspace the file's.
     if (s.fromFile && s.pane && (!pane || pane.agent)) continue
     seen.add(s.session)
+    let tgKey = ''
+    if (isNode) {
+      if (s.pane && pane) tgKey = keyFor(snap, s.pane, pane.cwd ?? s.cwd ?? '')
+      else {
+        wakeEntries ??= peekWakeSessions()
+        const freedTopic = wakeEntries[s.session]?.freed?.topic
+        tgKey = freedTopic || asciiKey(s.cwd ?? '')
+      }
+    }
     add({
       key: s.session,
       session: s.session,
@@ -529,6 +757,7 @@ export async function collect(
       focused: false,
       activity: Date.parse(s.slept_at ?? '') || 0,
       ...(s.fromFile && { fromFile: true }),
+      ...(tgKey && { tgKey }),
     })
   }
 
@@ -577,5 +806,16 @@ export async function collect(
     }
   }
   panesSeen(paneTerminals(snap))
+  observed?.(snap, items)
   return items
+}
+
+/** The card's move mark (`to` device and optional `at` timestamp), or null when unmarked (#616, #642). */
+function movedOf(card: Card): { to: string; at: number | null } | null {
+  const m = card.moved
+  if (typeof m !== 'object' || m === null) return null
+  const raw = m as { to?: unknown; at?: unknown }
+  const to = typeof raw.to === 'string' && raw.to.trim() ? raw.to.trim() : ''
+  if (!to) return null
+  return { to, at: typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : null }
 }

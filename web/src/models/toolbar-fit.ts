@@ -11,6 +11,18 @@ export const ROW_GAP = 16
  */
 export const FILTERS_MIN = 420
 
+/**
+ * The widest toolbar that is a phone's (#599): there, in two rows, the actions start at the row's
+ * start with More and Settings at its end, and the filters go two to a line in equal halves,
+ * search beside the last or on a line of its own (styles/toolbar.css, `data-narrow`). A phone held
+ * upright leaves the toolbar 400 px at most; a wider one keeps the two rows it had, its pills on
+ * one line with search.
+ */
+export const NARROW_MAX = 480
+
+/** Whether a toolbar `width` px wide in two rows is a phone's. */
+export const narrowToolbar = (width: number, rows: boolean): boolean => rows && width > 0 && width <= NARROW_MAX
+
 /** What the one row is made of, in px. */
 export interface RowSizes {
   /** The summary at the start of the row: 0 while it is not shown (it is only on a wide board). */
@@ -43,6 +55,8 @@ export const TOOLBAR_PRIORITY: readonly string[] = [
   'todos-open',
   'team-open',
   'threads-open',
+  'decisions-open',
+  'journal-open',
   'new-session',
   'presence-call',
   'sched-open',

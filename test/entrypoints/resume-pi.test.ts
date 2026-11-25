@@ -20,16 +20,21 @@ interface Set {
   project: string
 }
 
-/** The board's config, a fake `pi` on PATH, a pi session file in a folder with spaces, Cyrillic and %. */
-function setUp(box: Sandbox): Set {
+// The project folder has spaces, Cyrillic and %. On Windows the fake pi is pi.cmd, as npm installs
+// the real one, and Bun passes no % to a .cmd: there the board runs it through cmd.exe (#491).
+const WINDOWS = process.platform === 'win32'
+const PROJECT = 'Проект x 50%'
+
+/** The board's config, a fake `pi` on PATH, a pi session file in a folder named `name`. */
+function setUp(box: Sandbox, name = PROJECT): Set {
   const home = box.env.USERPROFILE as string
   for (const dir of [join(home, '.claude'), join(home, '.claude-work')]) mkdirSync(dir, { recursive: true })
   const cfgDir = join(box.env.APPDATA as string, 'herdr/plugins/config/agent-board')
   mkdirSync(cfgDir, { recursive: true })
   writeFileSync(join(cfgDir, 'config.json'), JSON.stringify({ language: 'en', port: 9 }))
-  const project = join(home, 'Проект x 50%')
+  const project = join(home, name)
   mkdirSync(project, { recursive: true })
-  const folder = join(home, '.pi', 'agent', 'sessions', '--home-Проект x 50%--')
+  const folder = join(home, '.pi', 'agent', 'sessions', `--home-${name}--`)
   mkdirSync(folder, { recursive: true })
   const file = join(folder, `2026-10-21T07-47-07-681Z_${ID}.jsonl`)
   writeFileSync(file, `${JSON.stringify({ type: 'session', version: 3, id: ID, cwd: project })}\n`)
@@ -67,13 +72,9 @@ async function resumePi(
   return { code, out: `${stdout}${stderr}`.trim(), pi }
 }
 
-// #184: these three fail on Windows (board resume --pi exits 1 where 5 is expected), not analysed
-// yet. `it` is `test` skipped on Windows until #184 is fixed; the fourth passes there and runs.
-const it = test.skipIf(process.platform === 'win32')
-
-it('board resume --pi: the session’s file, its options but not its model, name or message, its account and folder', async () => {
+async function wakesOnItsAccount(name = PROJECT): Promise<void> {
   const box = await sandbox()
-  const s = setUp(box)
+  const s = setUp(box, name)
   const work = join(s.home, '.claude-work')
   sleeper(box, s, {
     argv: ['pi', '--model', 'claude-bridge/claude-opus-5-5', '--no-mcp', '--name', 'billing', 'Read the brief'],
@@ -84,9 +85,17 @@ it('board resume --pi: the session’s file, its options but not its model, name
   expect(r.code).toBe(5)
   expect(r.pi).toEqual({ args: ['--no-mcp', '--session', s.file], configDir: work, cwd: s.project })
   expect(box.calls()).toEqual([])
-})
+}
 
-it('board resume --pi: slept on the personal account, a shell on Work’s: back on the personal one', async () => {
+test('board resume --pi: the session’s file, its options but not its model, name or message, its account and folder', () =>
+  wakesOnItsAccount())
+
+// A folder with no character cmd.exe treats as special: pi.cmd starts as it did before #491.
+test.skipIf(!WINDOWS)('board resume --pi on Windows: a folder without % starts pi.cmd as before', () =>
+  wakesOnItsAccount('Проект x 50'),
+)
+
+test('board resume --pi: slept on the personal account, a shell on Work’s: back on the personal one', async () => {
   const box = await sandbox()
   const s = setUp(box)
   sleeper(box, s, { account: join(s.home, '.claude') })
@@ -95,7 +104,7 @@ it('board resume --pi: slept on the personal account, a shell on Work’s: back 
   expect(r.pi?.args).toEqual(['--session', s.file])
 })
 
-it('board resume --pi: one wake does not know is found by its id, with the shell’s env as it is', async () => {
+test('board resume --pi: one wake does not know is found by its id, with the shell’s env as it is', async () => {
   const box = await sandbox()
   const s = setUp(box)
   const r = await resumePi(box, ['--pi', ID.toUpperCase()], s, { CLAUDE_CONFIG_DIR: '/x' })

@@ -36,12 +36,15 @@ PowerShell-style names work too (`-Name -Cwd -Label -BriefFile -Brief -Workspace
 - An agent on another model than the profile's default: `--model <id or alias>` (`opus`, `sonnet`, `haiku`, or a full name; pi's `provider/id` for pi). It goes on that session's command line only. Never type `/model` into the new session for this: Claude saves it as the default of every later session in the profile, and someone has to put it back by hand.
 - Do not start Claude with `herdr agent start --kind claude` or a bare `claude` in a pane: it gets no name, no brief, and the permission mode and launcher this computer uses are skipped.
 - A new folder may show Claude's "trust this folder" dialog: spawn-agent stops and says so; the user answers it in that tab.
+- Where the board has other devices, a worker may run on one of them when its folder is a pushed git checkout and its brief names no file of this computer: paths inside the repository, the branch pushed.
+- A line ending in `device=<device> session=<id>` means it runs on that device (`agent=@<device>:<session>` is the board's name for it); `queued=<id> name=<Name> waiting=<device>:<why>` (exit 0) means every device is full and the board starts it once one has room.
 - A one-off session that has finished can be taken off the board with `board archive --session <name>` (its tab closes; the user can bring it back from the board's archive), but only one you started, or when the user asks. Its board reminders wait with it, parked: `board schedule --session <name>` lists them, `board schedule --move <id>` moves one to you, `board unschedule <id>` removes one.
 
 ## Talk to another session
 
 Use `ListAgents` to see the sessions and `SendMessage` to reach one by name. A reply comes back to you as a message of its own.
 
+- Other agents (`agy`, `pi`, Codex) and other devices: in Claude Code, `ListAgents` and `SendMessage` reach them through the board; in Antigravity (`agy`), use the `agent-board` MCP tools `ListAgents` and `SendMessage` (installed by `install.ts --agy`); from any shell, `board agents` and `board send "<name|key>" "<text>"` do the same.
 - A session that sits idle for an hour is put to sleep (herdr-wake, if installed): its pane stays, marked 💤. It is still the same session. `ListAgents` lists the sleeping ones too, and a `SendMessage` to one wakes it first (10 to 30 seconds), then delivers. Do not reroute its work or call it gone.
 - Waking without a message: `curl -s -X POST http://127.0.0.1:12421/wake -d '{"target":"<name>"}'` (herdr-wake's API; `GET /sleeping` lists who sleeps). On the board's own server (`board doctor` says "Server mode") add `-H "X-Board-Key: $(cat ~/.local/state/herdr/plugins/agent-board/local-key)"`.
 - Putting sessions to sleep that you coordinate: see the next section, one call for all of them.

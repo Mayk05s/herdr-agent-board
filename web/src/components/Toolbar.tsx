@@ -1,167 +1,108 @@
-// The toolbar: the board's summary at the start of the row while the board is wide enough for it, the
-// filters (the lanes control, the profile switch when two or more profiles are shown, search) and
-// the actions (new session, categories, the schedule, Tasks, the calendar, Time, the archive, Next,
-// the presence switch, the quiet notes, the usage pill), then More, Settings (the gear) and the
-// live dot; the read-only banner and the column heads under it. The page's name is a heading for
-// screen readers only (#351): it carried nothing a sighted user needed, and its room goes to the
-// actions. When the whole of it fits the toolbar is one row, the filters beside the actions; else two,
-// the actions on top and the filters under them, and the lanes scroll the filters away (#347,
-// hooks/useToolbarCollapse.ts): a button with the filters' count stands for them while they are
-// folded, and brings them back. The actions in the row are as many as its width holds, in
-// the order of models/toolbar-fit.ts; the rest are in More (hooks/useToolbarFit.ts), which lists them
-// with their counts. The lanes control and the profile switch each fold into a pill where the row has no
-// room for all of their segments (hooks/useSegmentFolds.ts). The icon-only buttons' labels carry their
-// text keys (`data-i18n`, as upstream's page wrote them): the stylesheet hides a label beside its
-// icon by that, leaving it the button's name. On the board's own server its chip (components/server)
-// sits before the usage pill.
-
-import { type RefObject, useEffect, useLayoutEffect, useRef } from 'react'
+// The Hybrid B+C header (#651):
+// - Row 1 (46px desktop / 48px phone): search, quiet Profile & Device dropdowns, promoted imminent
+//   call chip, Away journal trigger, composite Status & Usage readout, Next (N), primary + New (Shift+N).
+//   On phone, a menu button at the left opens the navigation rail drawer.
+// - Row 2 (36px): flat typographic lane tabs (1 click per lane, +N more overflow on desktop, horizontal
+//   scroll strip on phone) + quiet board summary at far right on wide desktop. Folds smoothly on scroll
+//   (useToolbarCollapse + useCollapse), surfacing a compact restore button (#toolbar-peek) in Row 1.
+// - Below Row 2: connection banner, optional workdesk line, and the 5 column heads.
+// On the board's own server its state's chip (components/server) sits in Row 1 before Status & Usage.
+// A board too narrow for its columns becomes a staircase (hooks/useStairs.ts, styles/stairs.css).
+import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useBoardView } from '../hooks/useBoardView.ts'
 import { useCollapse } from '../hooks/useCollapse.ts'
 import { useColumnWidths } from '../hooks/useColumnWidths.ts'
-import { useNextAttention } from '../hooks/useNextAttention.ts'
 import { useScrolled } from '../hooks/useScrolled.ts'
-import { useSegmentFolds } from '../hooks/useSegmentFolds.ts'
 import type { SegmentPicks } from '../hooks/useSegmentPicks.ts'
 import type { SettingsMenu } from '../hooks/useSettingsMenu.ts'
 import type { SetupNoteState } from '../hooks/useSetupNote.ts'
 import { useStairs } from '../hooks/useStairs.ts'
 import { useToolbarCollapse } from '../hooks/useToolbarCollapse.ts'
-import { useToolbarFit } from '../hooks/useToolbarFit.ts'
 import type { ToolbarMenu } from '../hooks/useToolbarMore.ts'
 import { useT } from '../i18n/I18nProvider.tsx'
+import { deviceOptions, pickedDevice } from '../models/devices.ts'
 import { litLanes } from '../models/lane-picks.ts'
-import { presenceSwitch } from '../models/presence.ts'
 import { pickedProfile, profileOptions } from '../models/profiles.ts'
-import { openMine, proposedCount } from '../models/todos.ts'
-import {
-  attentionCount,
-  columnHeads,
-  documentTitle,
-  laneOptions,
-  scheduleBadge,
-  summaryParts,
-} from '../models/toolbar.ts'
+import { adminHere } from '../models/remote-page.ts'
+import { offersWakeSettings } from '../models/settings-menu.ts'
+import { columnHeads, documentTitle, laneOptions, summaryParts } from '../models/toolbar.ts'
 import { filterCount, filterText } from '../models/toolbar-collapse.ts'
-import { moreAlert, moreEntries, TOOLBAR_PRIORITY } from '../models/toolbar-fit.ts'
-import { toolbarEntries } from '../models/toolbar-menu.ts'
+import { isWakeView, noteShown } from '../models/wake.ts'
 import { useBoardContext } from '../state/BoardProvider.tsx'
-import { BackupNote } from './BackupNote.tsx'
 import { ColumnsHead } from './ColumnsHead.tsx'
 import { CalendarButton } from './calendar/CalendarButton.tsx'
 import { classNames } from './class-names.ts'
-import {
-  AlarmIcon,
-  ArchiveIcon,
-  FilterIcon,
-  GearIcon,
-  MoreIcon,
-  PlusIcon,
-  SearchIcon,
-  TagIcon,
-  TasksIcon,
-  TeamIcon,
-  ThreadsIcon,
-  TimeIcon,
-} from './icons.tsx'
+import { DeviceSwitch } from './devices/DeviceSwitch.tsx'
+import { CloseIcon, FilterIcon, JournalIcon, MenuIcon, PlusIcon, SearchIcon } from './icons.tsx'
 import { Lanes } from './Lanes.tsx'
-import { Limits } from './Limits.tsx'
-import { LiveDot } from './LiveDot.tsx'
 import { NextAttention } from './NextAttention.tsx'
-import { PresenceSwitch } from './PresenceSwitch.tsx'
 import { ProfileSwitch } from './ProfileSwitch.tsx'
-import { SetupNote } from './SetupNote.tsx'
+import { StatusControl } from './StatusControl.tsx'
 import { Summary } from './Summary.tsx'
 import { ServerChip } from './server/ServerChip.tsx'
-import { WakeNote } from './wake/WakeNote.tsx'
 
 export interface ToolbarProps {
-  /** The usage pill, which the popover is placed under and gives the focus back to. */
+  /** The status/usage button, which the popover is placed under and gives focus back to. */
   limitsAnchor: RefObject<HTMLButtonElement | null>
   onNewSession?: (from: HTMLElement) => void
   onCategories?: () => void
   onSchedule?: () => void
-  /** The archive's panel: sessions taken off the board, to find and bring back (it opens and closes). */
   onArchive?: () => void
-  /** The quiet "Setup incomplete" note (hooks/useSetupNote.ts). */
   setup?: SetupNoteState
-  /** The backup's note (#233): Settings → Backup… on the board on this computer; none elsewhere. */
   onBackup?: (() => void) | undefined
-  /** Opens Settings → Sleep and wake…, from the quiet "Wake stopped" note (components/wake/WakeNote.tsx). */
   onWake?: () => void
-  /** Settings, the gear's menu (hooks/useSettingsMenu.ts). */
   settings?: SettingsMenu
-  /** The menus of the lanes control and the profile switch folded into pills (hooks/useSegmentPicks.ts). */
   picks?: SegmentPicks
-  /** More's menu: the actions that left the row (hooks/useToolbarMore.ts). */
   more?: ToolbarMenu
-  /** Tasks (#202): their panel opens and closes; the button shows while the board has them on. */
   onTodos?: () => void
-  /** Time (#233): its panel, while the board has time tracking on. */
   onTime?: () => void
-  /** The Team panel (#355), while the page offers the team: the button carries the unread count. */
   onTeam?: () => void
-  /** Threads (#392), while the payload carries them: the button counts what needs the owner. */
   onThreads?: () => void
-  /** The calendar (#328): its panel, while the board has the calendar on. */
+  onDecisions?: () => void
   onCalendar?: () => void
+  journal?: { label: string; open: boolean; onToggle: () => void }
+  /** Phone drawer toggle for the left navigation rail. */
+  onOpenDrawer?: () => void
+  /** True when any Place or system alert needs attention (dot on phone drawer button). */
+  railAlert?: boolean
   /** The board's own server's state (Settings → Server…'s panel), out of its chip; its page only (models/server-state.ts offersServer). */
   onServer?: (() => void) | undefined
 }
 
-/** The first filter that can take the focus: the lanes' pill, else a lane, else search (the lanes control folded hides the rest). */
-function focusFilters(row: HTMLElement | null): void {
-  const first = ['#lanes-pick', '#lanes:not([hidden]) button', '#search']
-    .map(selector => row?.querySelector<HTMLElement>(selector))
+function focusFilters(container: HTMLElement | null): void {
+  const first = ['#lanes button:not([hidden])', '#lanes-pick', '#search']
+    .map(selector => container?.querySelector<HTMLElement>(selector))
     .find(el => !!el)
   first?.focus()
 }
 
-/** The usage pill's words as a line: its parts (a profile, a window) one after another, as it draws them. */
-const usageText = (pill: Element | null): string =>
-  Array.from(pill?.children ?? [])
-    .map(part => part.textContent?.trim() ?? '')
-    .filter(Boolean)
-    .join(' ') ||
-  (pill?.textContent?.trim() ?? '')
-
 export function Toolbar({
   limitsAnchor,
   onNewSession,
-  onCategories,
-  onSchedule,
-  onArchive,
   setup,
-  onBackup,
   onWake,
-  settings,
   picks,
-  more,
-  onTodos,
-  onTime,
-  onTeam,
-  onThreads,
   onCalendar,
+  journal,
+  onOpenDrawer,
+  railAlert = false,
   onServer,
 }: ToolbarProps) {
   const t = useT()
   const { data, ui, dispatch, canMutate, canEdit, now } = useBoardContext()
-  const { visible, categoryOf, anyProfile } = useBoardView()
+  const { visible, categoryOf, anyProfile, anyDevice } = useBoardView()
   const lanes = data && laneOptions(data.categories, visible, ui.filter, categoryOf, t)
   const profiles = data && profileOptions(data.profiles, anyProfile, t)
   const profile = pickedProfile(ui.profile, data?.profiles)
+  const devices = data && deviceOptions(data.devices, anyDevice, t)
+  const device = pickedDevice(ui.device ?? 'all', data?.devices)
+
   const fit = useRef<HTMLDivElement>(null)
-  const row = useRef<HTMLDivElement>(null)
   const filters = useRef<HTMLDivElement>(null)
-  const actions = useRef<HTMLDivElement>(null)
-  const moreButton = useRef<HTMLButtonElement>(null)
-  const folded = useSegmentFolds(row, JSON.stringify([lanes, ui.filter, profiles, profile]))
+  const [phoneSearchOpen, setPhoneSearchOpen] = useState(false)
   const scrolled = useScrolled()
-  const { rows, over } = useToolbarFit(fit, actions)
-  const collapse = useToolbarCollapse(filters, rows)
+  const collapse = useToolbarCollapse(filters, true)
   useCollapse(filters, collapse.collapsed)
-  const openNext = useNextAttention()
-  const badge = scheduleBadge(data?.schedules ?? [], now)
   const parts = data && summaryParts(data.items, t)
   const heads = data ? columnHeads(data.columns, visible, ui.filter, categoryOf, t, ui.moves) : []
   useColumnWidths(heads)
@@ -172,283 +113,212 @@ export function Toolbar({
     if (data) document.title = documentTitle(data.items)
   }, [data])
 
-  // The usage popover and the setup list go under their pill, or under More while it is in it (a
-  // button out of the row has no place on the page). Set on every draw: a pill drawn anew has its own again.
-  const leftOver = TOOLBAR_PRIORITY.filter(id => over.has(id))
+  // Anchor SetupPop under the Status button when setup warnings exist.
   const noteRef = setup?.noteRef
   useLayoutEffect(() => {
-    const find = (id: string) => row.current?.querySelector<HTMLButtonElement>(`#${id}`) ?? null
-    limitsAnchor.current = over.has('limits') ? moreButton.current : find('limits')
-    if (noteRef) noteRef.current = over.has('setup-note') ? moreButton.current : find('setup-note')
+    if (noteRef) noteRef.current = limitsAnchor.current
   })
 
-  const openTasks = data?.todos ? openMine(data.items) : 0
-  /** What More lists for the actions in it (the pill's own words, read when More is pressed). */
-  const entriesFor = (usage: string, server = '') =>
-    moreEntries(
-      toolbarEntries(
-        {
-          canMutate,
-          schedule: badge,
-          tasks: data?.todos ? { open: openTasks, proposed: proposedCount(data.items) } : null,
-          next: data ? attentionCount(visible, ui.filter, categoryOf, ui.viewed) : 0,
-          team: onTeam ? { unread: data?.teamUnread ?? 0 } : null,
-          threads: onThreads && data?.threads ? { needsOwner: data.threads.needsOwner } : null,
-          usage,
-          server,
-          presence: presenceSwitch(data?.presence, t),
-        },
-        t,
-      ),
-      leftOver,
-    )
-  const alert = moreAlert(entriesFor(''))
+  // Wake's alert where its switches are: this computer's page, owner-admin (#694), the board's own server.
+  const wakeDown =
+    offersWakeSettings(!adminHere(), data) && noteShown(isWakeView(data?.wake) ? data.wake : undefined, now) && !!onWake
+  const alertCount = (setup?.shown ? 1 : 0) + (data?.backup?.problem ? 1 : 0) + (wakeDown ? 1 : 0)
 
-  /** An entry of More chosen: what its button does, with More as the place it came from. */
-  function pick(id: string, from: HTMLElement): void {
-    if (id === 'new-session') onNewSession?.(from)
-    else if (id === 'cats-open') onCategories?.()
-    else if (id === 'sched-open') onSchedule?.()
-    else if (id === 'todos-open') onTodos?.()
-    else if (id === 'cal-tb') onCalendar?.()
-    else if (id === 'time-open') onTime?.()
-    else if (id === 'team-open') onTeam?.()
-    else if (id === 'threads-open') onThreads?.()
-    else if (id === 'archive-open') onArchive?.()
-    else if (id === 'next-attention') openNext()
-    else if (id === 'limits') dispatch({ type: 'limits', open: !ui.limitsOpen })
-    // Presence's buttons and the quiet notes act on state of their own: the button is pressed.
-    else row.current?.querySelector<HTMLElement>(`#${id}`)?.click()
-  }
-
+  const activeLaneOptions = ui.filter.length ? (lanes ?? []).filter(l => litLanes(ui.filter).includes(l.id)) : []
   const filtersOn = {
-    lanes: ui.filter.length ? (lanes ?? []).filter(l => litLanes(ui.filter).includes(l.id)).map(l => l.title) : [],
+    lanes: activeLaneOptions.map(l => l.title),
     profile: profile === 'all' ? null : (profiles?.find(p => p.id === profile)?.title ?? null),
     query: ui.query.trim(),
+    ...(device !== 'all' && { device: devices?.find(d => d.id === device)?.title ?? null }),
   }
+  const activeCount = filterCount(filtersOn)
   const filterLabel = filterText(filtersOn)
   const peek = filterLabel ? t('tb.filtersOn', { text: filterLabel }) : t('tb.filters')
+  const firstActiveLane = activeLaneOptions[0]
 
   return (
     <header className={classNames('toolbar', scrolled && 'scrolled', collapse.collapsed && 'folded')}>
-      {/* The row's own width: the window's, also beside a panel docked at a side (styles/beside.css). */}
       <div className="toolbar-fit" ref={fit}>
-        <div className="toolbar-row" ref={row}>
-          {/* The name of the page is for screen readers; the summary hides in a narrower toolbar. */}
-          <div className="titles">
-            <h1 className="sr-only">{t('tb.title')}</h1>
-            <Summary parts={parts} />
-          </div>
-          <div className="controls">
-            <div
-              className="toolbar-filters"
-              id="toolbar-filters"
-              ref={filters}
-              data-folded={collapse.collapsed ? '' : undefined}
+        <h1 className="sr-only">{t('tb.title')}</h1>
+
+        {/* Row 1: Slim command bar (46px desktop, 48px phone) */}
+        <div className={classNames('tb-top', phoneSearchOpen && 'phone-search-open')}>
+          <div className="tb-left">
+            {onOpenDrawer && (
+              <button
+                type="button"
+                className="tb-btn tb-icon tb-menu-btn"
+                id="rail-toggle"
+                aria-label={t('nav.openMenu')}
+                title={t('nav.openMenu')}
+                onClick={onOpenDrawer}
+              >
+                <MenuIcon />
+                {railAlert && <span className="tb-menu-dot" aria-hidden="true" />}
+              </button>
+            )}
+
+            <button
+              type="button"
+              className={classNames('tb-btn tb-peek', activeCount > 0 && 'on')}
+              id="toolbar-peek"
+              hidden={!collapse.collapsed}
+              aria-expanded={!collapse.collapsed}
+              aria-controls="toolbar-filters"
+              title={peek}
+              aria-label={peek}
+              onClick={e => {
+                collapse.open()
+                if (e.detail === 0) requestAnimationFrame(() => focusFilters(fit.current))
+              }}
             >
-              <Lanes
-                options={lanes}
-                picked={ui.filter}
-                onPick={id => dispatch({ type: 'toggleLane', id })}
-                folded={folded.has('lanes')}
-                picks={picks}
+              <FilterIcon />
+              {firstActiveLane ? (
+                <>
+                  {firstActiveLane.color && (
+                    <span className="lane-dot" style={{ '--lane': firstActiveLane.color }} aria-hidden="true" />
+                  )}
+                  <span className="tb-peek-text">
+                    {activeLaneOptions.length > 1
+                      ? `${firstActiveLane.title} +${activeLaneOptions.length - 1}`
+                      : firstActiveLane.title}
+                  </span>
+                </>
+              ) : (
+                <span className="n">{activeCount || ''}</span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              className="tb-btn tb-icon tb-phone-search-toggle"
+              aria-label={t('tb.search')}
+              aria-expanded={phoneSearchOpen}
+              onClick={() => {
+                setPhoneSearchOpen(was => !was)
+                requestAnimationFrame(() => document.getElementById('search')?.focus())
+              }}
+            >
+              <SearchIcon />
+            </button>
+
+            <label className="search tb-search">
+              <SearchIcon />
+              <input
+                id="search"
+                type="search"
+                placeholder={t('tb.searchPlaceholder')}
+                autoComplete="off"
+                spellCheck={false}
+                value={ui.query}
+                onChange={e => dispatch({ type: 'query', text: e.currentTarget.value })}
               />
-              {profiles && (
+              {ui.query ? (
+                <button
+                  type="button"
+                  className="search-clear"
+                  aria-label={t('sheet.closeLabel')}
+                  onClick={() => dispatch({ type: 'query', text: '' })}
+                >
+                  <CloseIcon />
+                </button>
+              ) : (
+                <span className="kbd search-kbd" aria-hidden="true">
+                  /
+                </span>
+              )}
+            </label>
+
+            {profiles && (
+              <div className="tb-pick">
                 <ProfileSwitch
                   options={profiles}
                   picked={profile}
                   onPick={id => dispatch({ type: 'profile', id })}
-                  folded={folded.has('profiles')}
+                  folded
                   picks={picks}
                 />
-              )}
-              <label className="search">
-                <SearchIcon />
-                <input
-                  id="search"
-                  type="search"
-                  placeholder={t('tb.search')}
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={ui.query}
-                  onChange={e => dispatch({ type: 'query', text: e.currentTarget.value })}
+              </div>
+            )}
+            {devices && (
+              <div className="tb-pick">
+                <DeviceSwitch
+                  options={devices}
+                  picked={device}
+                  onPick={id => dispatch({ type: 'device', id })}
+                  folded
+                  picks={picks}
                 />
-              </label>
-            </div>
-            <div className="toolbar-actions" ref={actions}>
-              {/* The filters, folded: one button with how many are on; it opens them again. */}
+              </div>
+            )}
+          </div>
+
+          <div className="tb-right">
+            {data?.calendar && <CalendarButton onOpen={() => onCalendar?.()} onlySoon />}
+            {journal && (
               <button
                 type="button"
-                className={classNames('pill-toggle icon-only', filterCount(filtersOn) > 0 && 'on')}
-                id="toolbar-peek"
-                hidden={!collapse.collapsed}
-                aria-expanded={!collapse.collapsed}
-                aria-controls="toolbar-filters"
-                title={peek}
-                aria-label={peek}
-                onClick={e => {
-                  collapse.open()
-                  // From the keys: the focus goes to the filters, which the button leaves.
-                  if (e.detail === 0) requestAnimationFrame(() => focusFilters(row.current))
-                }}
+                className={classNames('tb-btn journal-open', journal.open && 'on')}
+                id="journal-open"
+                aria-expanded={journal.open}
+                aria-controls={journal.open ? 'away-strip' : undefined}
+                title={t('journal.buttonHint')}
+                onClick={() => journal.onToggle()}
               >
-                <FilterIcon />
-                <span className="n">{filterCount(filtersOn) || ''}</span>
+                <JournalIcon />
+                <span>{journal.label}</span>
               </button>
-              {/* New sessions go through herdr: they wait for fresh data like going to a session does. */}
-              <button
-                type="button"
-                className="pill-toggle icon-only new-session"
-                id="new-session"
-                disabled={!canMutate}
-                title={t(canMutate ? 'launch.toolbarHint' : 'mobile.readOnly')}
-                onClick={e => onNewSession?.(e.currentTarget)}
-              >
-                <PlusIcon />
-                <span data-i18n="launch.toolbar">{t('launch.toolbar')}</span>
-              </button>
-              <button
-                type="button"
-                className="pill-toggle icon-only"
-                id="cats-open"
-                title={t('tb.catsTitle')}
-                onClick={() => onCategories?.()}
-              >
-                <TagIcon />
-                <span data-i18n="tb.cats">{t('tb.cats')}</span>
-              </button>
-              <button
-                type="button"
-                className={badge.due ? 'pill-toggle icon-only due' : 'pill-toggle icon-only'}
-                id="sched-open"
-                title={t('tb.schedTitle')}
-                onClick={() => onSchedule?.()}
-              >
-                <AlarmIcon />
-                <span data-i18n="tb.sched">{t('tb.sched')}</span>
-                <span className="n" id="sched-count">
-                  {badge.count || ''}
-                </span>
-              </button>
-              {data?.todos && (
-                <button
-                  type="button"
-                  className="pill-toggle icon-only"
-                  id="todos-open"
-                  title={t('todo.openHint')}
-                  onClick={() => onTodos?.()}
-                >
-                  <TasksIcon />
-                  <span>{t('todo.open')}</span>
-                  <span className="n">{openTasks || ''}</span>
-                  {proposedCount(data.items) > 0 && (
-                    <span className="n confirm" title={t('todo.toConfirmHint')}>
-                      {t('todo.toConfirm', { n: proposedCount(data.items) })}
-                    </span>
-                  )}
-                </button>
-              )}
-              {onThreads && data?.threads && (
-                <button
-                  type="button"
-                  className={data.threads.needsOwner > 0 ? 'pill-toggle icon-only unread' : 'pill-toggle icon-only'}
-                  id="threads-open"
-                  title={
-                    data.threads.needsOwner > 0 ? t('wt.needsHint', { n: data.threads.needsOwner }) : t('wt.openHint')
-                  }
-                  onClick={() => onThreads()}
-                >
-                  <ThreadsIcon />
-                  <span>{t('wt.title')}</span>
-                  <span className="n">{data.threads.needsOwner || ''}</span>
-                </button>
-              )}
-              {onTeam && (
-                <button
-                  type="button"
-                  className={(data?.teamUnread ?? 0) > 0 ? 'pill-toggle icon-only unread' : 'pill-toggle icon-only'}
-                  id="team-open"
-                  title={
-                    (data?.teamUnread ?? 0) > 0 ? t('team.unread', { n: data?.teamUnread ?? 0 }) : t('team.openHint')
-                  }
-                  onClick={() => onTeam()}
-                >
-                  <TeamIcon />
-                  <span>{t('team.title')}</span>
-                  <span className="n">{data?.teamUnread || ''}</span>
-                </button>
-              )}
-              {data?.calendar && <CalendarButton onOpen={() => onCalendar?.()} />}
-              {data?.time && (
-                <button
-                  type="button"
-                  className="pill-toggle icon-only"
-                  id="time-open"
-                  title={t('time.openHint')}
-                  onClick={() => onTime?.()}
-                >
-                  <TimeIcon />
-                  <span>{t('time.open')}</span>
-                </button>
-              )}
-              <button
-                type="button"
-                className="pill-toggle icon-only"
-                id="archive-open"
-                title={t('archive.openHint')}
-                onClick={() => onArchive?.()}
-              >
-                <ArchiveIcon />
-                <span data-i18n="archive.open">{t('archive.open')}</span>
-              </button>
-              <NextAttention />
-              <PresenceSwitch />
-              {setup && <SetupNote setup={setup} />}
-              <BackupNote onOpen={onBackup} />
-              {onWake && <WakeNote onOpen={onWake} />}
-              {onServer && <ServerChip onOpen={onServer} />}
-              <Limits anchor={limitsAnchor} />
-              {/* What left the row. It is there (its attribute hides it) so its width is known. */}
-              <button
-                type="button"
-                className="pill-toggle icon-only toolbar-more"
-                id="toolbar-more"
-                ref={moreButton}
-                data-over=""
-                aria-haspopup="menu"
-                aria-expanded={more?.expanded ?? false}
-                title={t(alert ? 'tb.moreAlert' : 'tb.more')}
-                aria-label={t(alert ? 'tb.moreAlert' : 'tb.more')}
-                onClick={e => {
-                  const from = e.currentTarget
-                  const usage = usageText(row.current?.querySelector('#limits') ?? null)
-                  const server = row.current?.querySelector('#server-chip')?.getAttribute('aria-label') ?? ''
-                  more?.open(from, e.detail === 0, entriesFor(usage, server), id => pick(id, from))
-                }}
-              >
-                <MoreIcon />
-                <span className="more-dot" aria-hidden="true" hidden={!alert} />
-              </button>
-              <button
-                type="button"
-                className="pill-toggle icon-only"
-                id="settings"
-                aria-haspopup="menu"
-                aria-expanded={settings?.expanded ?? false}
-                title={t('set.hint')}
-                onClick={e => settings?.open(e.currentTarget, e.detail === 0)}
-              >
-                <GearIcon />
-                <span data-i18n="set.title">{t('set.title')}</span>
-              </button>
-              <LiveDot />
-            </div>
+            )}
+            {onServer && <ServerChip onOpen={onServer} />}
+            <StatusControl anchor={limitsAnchor} alerts={alertCount} />
+            <div className="tb-sep" aria-hidden="true" />
+            <NextAttention />
+            <button
+              type="button"
+              className="tb-btn tb-primary new-session"
+              id="new-session"
+              disabled={!canMutate}
+              title={t(canMutate ? 'launch.toolbarHint' : 'mobile.readOnly')}
+              onClick={e => onNewSession?.(e.currentTarget)}
+            >
+              <PlusIcon />
+              <span>{t('tb.newShort')}</span>
+            </button>
           </div>
         </div>
+
+        {/* Row 2: Flat typographic lane strip (36px, folds smoothly on scroll) */}
+        <div
+          className="toolbar-filters"
+          id="toolbar-filters"
+          ref={filters}
+          data-picks={1 + (profiles ? 1 : 0) + (devices ? 1 : 0)}
+          data-folded={collapse.collapsed ? '' : undefined}
+        >
+          <Lanes options={lanes} picked={ui.filter} onPick={id => dispatch({ type: 'toggleLane', id })} picks={picks} />
+          <Summary parts={parts} />
+        </div>
       </div>
+
       <p id="connection-state" role="status" hidden={canMutate}>
         {t(canEdit ? 'mobile.readOnly' : 'live.off')}
       </p>
+      {data?.workdesk && (
+        <p className="workdesk-status" role="status">
+          {t('workdesk.status', {
+            queue: data.workdesk.queue ?? '-',
+            time:
+              data.workdesk.polledAt === null
+                ? '-'
+                : new Date(data.workdesk.polledAt).toLocaleTimeString(t.lang, {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hourCycle: 'h23',
+                  }),
+          })}
+          {data.workdesk.problem && <> · {t(`workdesk.problem.${data.workdesk.problem}`)}</>}
+        </p>
+      )}
       <ColumnsHead heads={heads} only={ui.column} />
     </header>
   )

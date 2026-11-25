@@ -69,7 +69,7 @@ test('lanes control: All, then the categories with sessions on show and those pi
   const visible = [item({ key: 'a', category: 'other' }), item({ key: 'b', category: 'other' })]
   expect(laneOptions(CATEGORIES, visible, [], categoryOf, t)).toEqual([
     { id: 'all', title: 'All', n: 2 },
-    { id: 'other', title: 'OTHER', n: 2 },
+    { id: 'other', title: 'OTHER', n: 2, color: '#000' },
   ])
   expect(laneOptions(CATEGORIES, visible, ['unused'], categoryOf, t).map(o => [o.id, o.n])).toEqual([
     ['all', 2],
@@ -154,6 +154,6 @@ test('schedule badge and the tab title', () => {
   expect(scheduleBadge([], 1000)).toEqual({ count: 0, due: false })
   expect(scheduleBadge([entry(2000)], 1000)).toEqual({ count: 1, due: false })
   expect(scheduleBadge([entry(2000), entry(1000)], 1000)).toEqual({ count: 2, due: true })
-  expect(documentTitle([item({ key: 'a', column: 'work' })])).toBe('Agent board')
-  expect(documentTitle([item({ key: 'a', column: 'me' }), item({ key: 'b', column: 'me' })])).toBe('(2) Agent board')
+  expect(documentTitle([item({ key: 'a', column: 'work' })])).toBe('MokuBoard')
+  expect(documentTitle([item({ key: 'a', column: 'me' }), item({ key: 'b', column: 'me' })])).toBe('(2) MokuBoard')
 })

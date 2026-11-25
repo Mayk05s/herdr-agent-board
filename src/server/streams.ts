@@ -1,7 +1,9 @@
 // What the board's remote listeners share (server/remote.ts: Tailscale and serve; server/tunnel.ts:
-// the owner's domain): a path decoded, what they refuse whoever calls, and event streams that end
-// the moment the caller's pairing or login does.
+// the owner's domain): a path decoded, what they refuse whoever calls, what a desk may ask of
+// /api/remote, and event streams that end the moment the caller's pairing or login does.
+import { isRecord } from '../adapters/json-store.ts'
 import {
+  DESK_REMOTE_OPS,
   deskFocus,
   desktopOnly,
   localOnly,
@@ -12,7 +14,7 @@ import {
   secretsPath,
 } from '../core/remote.ts'
 import { vaultOwnerPath } from '../core/vault.ts'
-import { json } from './http.ts'
+import { json, readBody } from './http.ts'
 import { namedEvent } from './sse.ts'
 
 /** The path decoded; null when it does not decode (a 400). */
@@ -31,11 +33,14 @@ export function decoded(raw: string): string | null {
  * core/vault.ts vaultOwnerPath). `ownServer` is the board's own server's login listener, whose page
  * is the owner's own: the secrets, the vault, Settings → Backup…, Settings → Time tracking… and
  * Settings → Sleep and wake… by there (ownServerSettings), and with `teamOwner` and `owner` the Team
- * panel's switches (ownServerTeam), the rest of what is local still refused.
+ * panel's switches (ownServerTeam), the rest of what is local still refused. `ownerAdmin` (#694:
+ * the owner's own strong login while remote.ownerAdmin is on) opens all that is local; the secret
+ * store and the vault stay the board's own server's.
  * The routes match a string path decoded and a RegExp one as it came, so both spellings are
  * checked, or an encoded letter (/api/fs/%6Fpen, /api/%61ccess) would get by. A desk
- * (RemoteDevice.desk) may focus herdr and reach /api/remote, whose ops the listener narrows for it
- * (DESK_REMOTE_OPS).
+ * (RemoteDevice.desk) may focus herdr and reach /api/remote, whose ops deskOpRefusal narrows for it
+ * (DESK_REMOTE_OPS): a listener that passes `desk` must call deskOpRefusal right after this, or a
+ * desk gets every op of /api/remote. The tunnel never passes it (test/server/tunnel.test.ts says so).
  */
 export function remoteRefusal(
   raw: string,
@@ -45,15 +50,18 @@ export function remoteRefusal(
     ownServer = false,
     teamOwner = false,
     owner = false,
-  }: { desk?: boolean; ownServer?: boolean; teamOwner?: boolean; owner?: boolean } = {},
+    ownerAdmin = false,
+  }: { desk?: boolean; ownServer?: boolean; teamOwner?: boolean; owner?: boolean; ownerAdmin?: boolean } = {},
 ): Response | null {
   const focus = desk && deskFocus(raw) && deskFocus(path)
   if (!focus && (desktopOnly(raw) || desktopOnly(path))) return json(403, { error: 'desktop' })
-  const pairing = desk && raw === '/api/remote' && path === '/api/remote'
-  const local = (p: string): boolean => localOnly(p) && !(ownServer && ownServerSettings(p))
   if (!ownServer && (secretsPath(raw) || secretsPath(path))) return json(403, { error: 'local' })
   // the owner's password vault and the answers to a login fill: the board's own server's domain only
   if (!ownServer && (vaultOwnerPath(raw) || vaultOwnerPath(path))) return json(403, { error: 'local' })
+  // Headless master (#694): owner's own strong login with remote.ownerAdmin on may use localOnly admin routes.
+  if (ownerAdmin) return null
+  const pairing = desk && raw === '/api/remote' && path === '/api/remote'
+  const local = (p: string): boolean => localOnly(p) && !(ownServer && ownServerSettings(p))
   // The owner's own login, with the team on, reads and writes the team as on the computer (#355);
   // on the board's own server, whose domain page is the owner's only one, the Team panel's
   // switches, welcome, Trust and a channel's members too (ownServerTeam). Both spellings each time.
@@ -64,6 +72,27 @@ export function remoteRefusal(
   const threads = owner && ownerThreads(raw) && ownerThreads(path)
   if (!pairing && !team && !threads && (local(raw) || local(path))) return json(403, { error: 'local' })
   return null
+}
+
+/**
+ * What a desk is refused of POST /api/remote once remoteRefusal let it through: every op but
+ * answering the phones that ask and unpairing (DESK_REMOTE_OPS). A body that is not a JSON object
+ * (null, a string, a broken or oversized one) is no such op: refused like any other, never a 500.
+ */
+export async function deskOpRefusal(req: Request, raw: string): Promise<Response | null> {
+  if (req.method !== 'POST' || raw !== '/api/remote') return null
+  const body = await readBody(req.clone()).catch(() => null)
+  return DESK_REMOTE_OPS.has(isRecord(body) ? body.op : undefined) ? null : json(403, { error: 'local' })
+}
+
+const SAFE_OP = /^[a-z0-9][a-z0-9._-]{0,47}$/i
+
+/** Short `op` field from a mutating JSON request for the audit log, without reading or logging any other field (#694). */
+export async function adminOpOf(req: Request): Promise<string | undefined> {
+  if (req.method === 'GET' || req.method === 'HEAD') return undefined
+  const body = await readBody(req.clone()).catch(() => null)
+  const op = isRecord(body) ? body.op : undefined
+  return typeof op === 'string' && SAFE_OP.test(op) ? op : undefined
 }
 
 /**

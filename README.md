@@ -1,7 +1,7 @@
 # agent-board
 
 A [herdr](https://herdr.dev) plugin: a kanban of the Claude Code sessions running in herdr, and
-of the [pi](#pi) and [Codex](#codex) ones.
+of the [pi](#pi), [Codex](#codex) and [Antigravity CLI (`agy`)](#antigravity-cli-agy) ones.
 Lanes are categories (one per client, say, plus Personal and Other), columns are Working /
 Needs me / Waiting on others / Done / Idle. Sessions put to sleep
 ([Sleep and wake](#sleep-and-wake)) are on it too (one line, `z`). In English and Russian; see
@@ -181,8 +181,50 @@ from SessionStart and UserPromptSubmit in Codex's `hooks.json`; remove an enclos
 only if it is then empty. Keep herdr's and other handlers. Do not restore the whole backup over
 hooks installed later. The shared `board` and `spawn-agent` commands can stay for Claude.
 
-Codex session actions follow separately under [#126](https://github.com/MokuTeam/herdr-agent-board/issues/126).
+Codex sessions now offer [Fork](#fork). Sleep, wake, restart, archive and other session actions
+follow separately under [#126](https://github.com/MokuTeam/herdr-agent-board/issues/126).
 Claude Code and pi keep their existing hooks, brief and readers.
+
+## Antigravity CLI (`agy`)
+
+For panes herdr reports as `agy`, the board reads the session transcript in
+`~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/logs/transcript.jsonl`
+(`ANTIGRAVITY_APP_DATA_DIR` changes the app data folder) and session titles, workspace paths,
+subagent helpers and history from `conversation_summaries.db`. The card shows the title, last
+prompt, the agent's last words, its last tool, model, effort and context tokens; the session panel
+shows the conversation (with clickable file chips), subagent helpers and slash commands
+(Antigravity built-ins plus `.agents/skills` and `~/.gemini/config/skills`). Thinking blocks,
+system metadata wrappers and tool outputs stay out of the thread. A missing or unreadable
+transcript or database leaves the card and live terminal available.
+
+To install the board's Antigravity CLI hooks, skills and commands, run from this checkout:
+
+```sh
+bun src/entrypoints/install.ts --agy
+```
+
+This adds `SessionStart` and `PreInvocation` handlers under the `"agent-board"` key in
+`~/.gemini/config/hooks.json` (`ANTIGRAVITY_CONFIG_DIR` changes the config folder), preserving
+herdr's `"herdr"` hook group and any other hooks, with the first `hooks.json.bak-agent-board` kept
+beside it. It also registers the `"agent-board"` stdio MCP server (`board mcp --agents`, exposing
+`ListAgents` and `SendMessage` across Claude, Antigravity, pi, Codex and connected nodes, #628) in
+`~/.gemini/config/mcp_config.json`, preserving every other MCP server with a
+`mcp_config.json.bak-agent-board` backup. It installs the `herdr-agents` and `agent-board-team`
+skills (and `agent-board-threads` when threads are on) into `~/.gemini/config/skills`, puts
+`board` and `spawn-agent` into `~/.local/bin`, and asks herdr to install its `antigravity-cli`
+identity hook (`herdr integration install antigravity-cli`). The ordinary install without `--agy`
+keeps managing Claude only.
+
+With `agy` on PATH or `launch.agy` set in `config.json`, the "New session" window and
+`spawn-agent --agent agy` offer Antigravity alongside Claude Code (and `"default": "agy"` in
+`launch` makes it the default). Antigravity sessions also support Stop (`Esc`), `/rename`, and
+Archive & Return (`agy --conversation <id>`). Without `--session`, `board` resolves the pane's
+reported root `agy` conversation via `ANTIGRAVITY_CONVERSATION_ID`, keeping mixed Claude/Antigravity
+environments and subagents separated.
+
+To remove these hooks, delete the `"agent-board"` key from `~/.gemini/config/hooks.json`, keeping
+`"herdr"` and any other keys, and the `agent-board` entry under `mcpServers` in
+`~/.gemini/config/mcp_config.json`.
 
 ## Web board
 
@@ -218,7 +260,10 @@ goes to the board as `POST /api/reveal` with `{ "pane": "<id>" }` or `{ "key": "
   folded a funnel button stands for them, saying how many are on and which; with reduced motion
   they cross-fade instead of sliding. Where the row has no room for all of the lanes, they fold
   into one pill naming the lane on show with its count; it opens every lane, with its count, in a
-  menu. The profile switch folds the same way, on its own.
+  menu. The profile switch folds the same way, on its own. On a phone the actions start at the
+  row's start with More and Settings at its end, and the filters go two to a line, search beside
+  the last or on a line of its own; a pill showing "All" names what it filters and leaves out
+  the count every pill would share.
 - Settings (the gear): appearance (as the system has it, light or dark; kept in this browser),
   style (Classic, the board's own, or Terminal: a terminal-style look with a One Dark palette,
   One Light in the light theme, monospace and 1px outlines, and the terminal board's keys, see
@@ -332,6 +377,9 @@ goes to the board as `POST /api/reveal` with `{ "pane": "<id>" }` or `{ "key": "
 - A side question (the bubble in the message box, or a message that starts with `/btw`): typed
   into the session as Claude Code's own `/btw`, answered in a card over the box, while nothing
   goes into the session's conversation; see [Side questions](#side-questions).
+- Slash commands in the message box: a `/` at its start lists the session's commands over the
+  box, filtered as you type, the ones sent most from this browser first; see
+  [Slash commands](#slash-commands).
 - Stop (a working card, and the sheet's send button while the message box is empty) and Send
   now (on a message waiting in the session's queue): the turn interrupted, or the queue taken
   into the turn at once, as Esc and Ctrl+Enter do in Claude Code's terminal; see
@@ -396,9 +444,10 @@ goes to the board as `POST /api/reveal` with `{ "pane": "<id>" }` or `{ "key": "
   document's HTML is then cleaned on the page's own thread, which takes about a second for one of
   tens of thousands of paragraphs. One over 20 MB (a document) or 10 MB (a spreadsheet), unpacked
   to more than 150 MB or 120 MB, read for over a minute, broken or with a password says so,
-  beside the button that opens it with the system. The unpacked size is the one the zip's own
-  directory gives: a zip that understates a part is unpacked before the library notices (see
-  #230), and only the one-minute limit holds it. Columns are not limited before the reading: a
+  beside the button that opens it with the system. The unpacked size is what the parts really
+  unpack to, not what the zip's own directory says: the worker unpacks them under the limit,
+  stopping past it, and mammoth or SheetJS get them stored again in a zip of its own making, so
+  neither reads the file's own headers (#230). Columns are not limited before the reading: a
   sheet of thousands of columns under those limits can take tens of seconds and a gigabyte or more
   of memory on the computer before it is shown or the minute runs out.
 - Images and SVG in the quick look zoom as in Preview and Photos: Ctrl+wheel or a trackpad
@@ -530,6 +579,33 @@ profile: started for …" in red, and herdr notifies you. That session is not st
 board tags a session's line the same way, before its age ("wrong profile" in red there); it has no
 switch, so it tags as "All profiles" does.
 
+**The model a session runs.** A profile whose default model is set wrong starts every session on
+it, and `board restart` or a wake resumes a session on the model it had. To be told, name the model
+family every session should run on in config.json; without the key nothing changes:
+
+```json
+"models": {
+  "expect": "opus",
+  "sessions": { "monitor": "sonnet" },
+  "lanes": { "ops": ["sonnet", "haiku"] }
+}
+```
+
+The board compares families (`opus`, `sonnet`, `haiku`, `fable`), so a version bump or `[1m]` is
+the same model. It reads the model a session runs from the status line, else from its last
+assistant message, and only once the session's current start has reported one: a model read before
+a restart or a wake is not held against it. A session started on a model of its own
+(`spawn-agent --model`, the new-session window's Model field) is expected on that one, or on the
+rule's own family. `sessions`
+(by name, key or session id) and `lanes` (by lane id) allow more families there, `"any"` every
+model. A session on another family gets a red tag after its profile tag ("Sonnet, expected Opus",
+the full model in its tooltip; "wrong model" on the terminal board) and one herdr notification per
+start while the board runs: a later turn does not notify again, a restart that brings it back on
+that model does, and so does a restart of the board. The
+tag goes when it runs on the expected family again (`/model opus`), or when you pick "This model is
+fine here" in its card's menu, which allows the family it runs now on that card (another family
+warns again; the card route's `modelOk: false` takes it back). A model of no known family (another provider's, through pi) is never judged.
+
 **On the web board**, with two or more profiles shown:
 
 - The profile switch in the toolbar, by the lanes: "All profiles" or one profile, each with the
@@ -616,6 +692,48 @@ there takes, one toast for them all; its check **Also make it <lane>'s usual pro
 lane's usual profile too (as Categories does), so new sessions there start in it. The page sends
 it as `POST /api/move` with `{ "targets": ["<key>", ...], "profile": "<id>", "whenFree": true }`,
 which answers `{ ok, results }` as `board move` has them (`src/server/routes/move.ts`).
+
+**Moving a session to another device** (a board that is a master, with `nodes` in config.json and
+the device's link up; docs/design/nodes), with its session id and conversation:
+
+```sh
+board move Atlas --device server-1   # to a node, by its device id
+board move Atlas --device local      # back to this computer
+board move Atlas --device server-1 --dry-run   # what would go, uncommitted changes listed
+```
+
+The folder travels by git: the session's folder must be in a checkout with a remote the device can
+clone, on a branch that is pushed. What is not committed (changed, new and deleted files, untracked
+ones too) goes with it as a small bundle of those files: at most 2000 of them, 5 MB a file and 20 MB
+together. `--dry-run` lists them first, and moves nothing. A link, a merge conflict or a submodule
+with changes is refused with the reason, and so is anything over the caps, a branch not pushed, a
+detached HEAD or a checkout with no remote. Ignored files (`node_modules`, a venv, build output,
+caches, `.env`) never travel; the target rebuilds what it needs, and a secret goes the way a node
+gets secrets. A session at work is refused too ("try again when it is free"): its conversation must be
+whole before it is copied, and `--when-free` stays a profile move's. A free one is put to sleep
+first, as `board sleep` does. On a node the repository is the clone under `node.workRoot` by its
+address, as a placed start has it, cloned when missing; back on this computer it is the checkout the
+session left. Either is fetched, and the branch found: the checkout itself when it is on it, else
+the worktree that has it, else a new worktree beside it. It is only fast-forwarded: a checkout
+there with commits of its own on the branch is refused, and so is one with changes, unless they are
+exactly the ones that went from it with this session (a move back, its card remembers each file's
+hash); those are replaced. The changes that come are written on the commit they were made on, which
+the checkout there must be at. They stay at the source too: copied, not moved. The transcript, the
+session's own folder and its file history go into the device's profile (a device's `profiles` map
+names it) under the project folder of the new path, the source profile's trust in the folder with
+them, and the session is resumed there with its name and lane, as Return from the archive resumes
+one. Its reminders go with it; the threads here follow its new key. Once its start there is on its
+way, the old card is marked moved and leaves the board, and its pane closes. Anything that fails
+before that leaves the session where it was (woken again when it was awake). Per-project memory is
+not carried: it is keyed by the folder's path. The master carries the files between the two boards
+(up to 120 MB a file), so a move between two nodes works the same.
+
+On a master, a Claude card's menu has **Device ▸** with each device, the one it runs on checked and
+one not reachable grayed; another one moves it there, the card says "Moving to …" meanwhile and a
+toast says how it went. It asks first what the move would take: uncommitted changes that would go
+are listed in a toast whose **Move with them** moves it. The page sends it as `POST /api/move` with
+`{ "targets": ["<key>"], "device": "<id>" }` (`local` for this computer, `"dryRun": true` for the
+list), which answers `{ ok, results }` as `board move` has them; a board without devices answers 409.
 
 While the separate herdr-wake plugin does the waking (installed, and not switched over yet), it
 resumes a session with the env of its pane's shell, as before, and the board keeps its old rule:
@@ -832,7 +950,8 @@ spawn-agent --name <Name> --cwd <folder> [--label <tab label>]
             [--brief-file <utf-8 file> | --brief <text>] [--workspace <herdr workspace id>]
             [--timeout-sec 120] [--session-id <uuid> | --resume <uuid>] [--fork <uuid>]
             [--pane <herdr pane id>] [--profile <id>] [--model <id or alias>]
-            [--agent claude|pi] [--trust]
+            [--agent claude|pi|codex] [--trust]
+            [--effort <level>] [--approval on-request|never] [--sandbox <mode>]   (codex only)
 ```
 
 PowerShell's spelling works too: `-Name`, `-Cwd`, `-Label`, `-BriefFile`, `-Brief`, `-Workspace`,
@@ -857,14 +976,39 @@ when taken), types `/rename <Name>`, then the brief. It prints
 pane=<pane id> name=<Name> agent=<herdr name>
 ```
 
-which is how the board knows who started whom. It fails (exit code 1, the reason on stderr) when
+`--agent codex` starts Codex CLI: `launch.codex` (default `codex`) typed into a new tab, for a new
+session only. It takes no `--resume`, `--fork`, `--session-id`, `--profile`, `--config-dir`,
+`--keep-env` or `--trust` (Codex picks its own session id, has no Claude profile and asks about the
+folder in its own dialog), and is refused with them. `--model` is Codex's own; `--effort <level>`
+is `-c model_reasoning_effort=<level>` and needs a `--model` whose levels Codex's `models_cache.json`
+lists; `--approval` (`on-request`, `never`) and `--sandbox` (`read-only`, `workspace-write`,
+`danger-full-access`) are `-a` and `-s`. With none of them Codex runs on the user's `config.toml`;
+`--dangerously-bypass-approvals-and-sandbox` is not offered. Codex is started with `--no-daemon`
+when it takes the option: without it the session runs in Codex's shared background server, in its
+env, and herdr never learns the session's id (no card, no hooks, no `board` for the agent). When
+`codexHome` is set in config.json (`install.ts --codex --codex-home`), the new tab gets
+`CODEX_HOME=<that folder>`, from the board's window too; `--pane` is then refused, as a pane keeps
+the env it has. Codex has no session id until its first prompt, so the card of a session started
+on a model (`modelWant`) is written once the brief went in; the output line ends with ` kind=codex`.
+
+which is how the board knows who started whom. With `nodes` in config.json (a board with other
+devices to place sessions on) and the board answering on its port, a new session (no
+`--resume`, `--fork`, `--pane`, `--session-id` or `--trust`) is the board's to place: it posts the
+start to `POST /api/launch` as an agent's (`byHand: false`) and prints the same line when the
+session runs here, `pane=@<device>:<pane> name=<Name> agent=@<device>:<session> device=<device>
+session=<id>` when it runs on a node, or `queued=<launch id> name=<Name> waiting=<device>:<kind>`
+(exit 0) when every device is full. With the board down, without `nodes`, or with a launcher of
+the owner's own (`launch.command`, `launch.agent`), it starts the session itself as above. The
+spawn-agent the board runs as its launcher never asks the board back. It fails (exit code 1, the reason on stderr) when
 the folder is not there, Claude is not ready in time, or Claude waits for a dialog first (the
 folder trust): answer it in that tab, then name and brief the session there. `--trust` answers
 two such dialogs with Yes instead: the folder-trust one when it names `--cwd` itself, and "Allow
 external CLAUDE.md file imports?" when every file it lists is in the user's own Claude folders.
 Any other dialog still stops the start. A brief that does not get through fails it too, saying
 so: the session runs, send the brief by hand rather than start another. A `/rename` that does
-not take is only a warning. `--pane` starts Claude in that
+not take is only a warning, unless its line stays in Claude's input box: then the brief is not
+typed after it (the two would go as one, the name taking the brief) and the start fails as a brief
+that did not get through. `--pane` starts Claude in that
 pane instead of a new tab; it must be at a shell prompt, not running an agent. `--resume` brings
 back a session that ended (`launch.claude` with `--resume <uuid>`, run in the folder the session
 ran in): it keeps its name, so no `/rename` is typed; the board's [archive](#archive) uses it.
@@ -906,13 +1050,20 @@ other folder is refused) or `--keep-env` (the env as herdr makes it) instead of 
 one of the three goes at a time.
 
 Details it takes care of: `/rename` runs without a turn, so herdr calls it stalled, and the
-screen is read for "Session renamed" instead. Right after it Claude can drop typed text, and a
+screen is read for "Session renamed" instead. When that does not show and the `/rename` line is
+still in the input box (Claude can drop its Enter at a slow start), it gets one more Enter, twice
+at most. Right after it Claude can drop typed text, and a
 short turn can end before herdr sees it working: a brief herdr calls stalled gets an Enter when
 it is still on screen (or shows as a pasted-text chip), else it is typed again, three times at
 most. A brief that starts with a dash goes with a space before it, or herdr would take it for an
 option. From PowerShell prefer `--brief-file` for a brief with quotes or `&` in it: the `.cmd`
-goes through cmd.exe. From Git Bash, a brief that starts with `/` (a slash command) reaches it
-as a path (MSYS rewrites such arguments for Windows programs): use `--brief-file` there too.
+goes through cmd.exe. From Git Bash, a brief that starts with `/` (a slash command) arrives as
+typed: the sh shim turns Git Bash's argument conversion off, and spawn-agent converts only its
+folder and file options (`--cwd`, `--brief-file`, `--config-dir`) itself, as Git Bash would
+have. `board` does the same for its own file and folder words since #532. Set `MSYS_NO_PATHCONV`
+or `MSYS2_ARG_CONV_EXCL` yourself and the shim leaves the arguments to Git Bash and that setting,
+as before. A spawn-agent shim written before #490, or a board shim written before #532, still lets
+Git Bash convert them: run the install again.
 
 `launch.claude` is typed at the tab's shell prompt (PowerShell, bash, zsh, fish): plain words as
 they are, other arguments in single quotes, which those shells take literally (in fish, keep a
@@ -929,7 +1080,7 @@ removed when the board starts again.
 
 ## Fork
 
-"Fork" in the sheet's row of actions (or under "⋯") and in a Claude session's card menu: a small
+"Fork" in the sheet's row of actions (or under "⋯") and in a Claude or Codex session's card menu: a small
 window grown out of the button or the card, with the fork's name (the session's with "· fork"
 after it, ready to type over) and an optional first message. Fork (Enter in the name, Ctrl+Enter
 in the message) starts a new session in a new tab of the session's workspace, in its folder (the
@@ -953,8 +1104,22 @@ without arguments that pick the session (`--resume`, `--continue`, `--session-id
 its own session (or another's, with `--session`) with `board fork [--name "<Name>"] ["<note>"]`:
 the web board starts it as its Fork does, the note is its first message.
 
+A Codex fork uses `herdr agent start --kind codex` and `codex fork <id>`, independently
+of `launch.claude`, `launch.command`, `launch.agent` and Claude profiles. It needs the source's local
+rollout in the board's `CODEX_HOME` (default `~/.codex`); the new Codex uses herdr's shell environment
+and its Codex configuration. Keep those pointed at the same Codex home. The folder comes from the
+rollout header and is set when the tab is created, so folder names and messages do not travel through
+the Codex shell command. After herdr reports a distinct new id, the board writes the fork's name,
+lane and source link and sends the optional first message with `herdr agent prompt`, without waiting
+for that first turn to finish. Without a message the fork waits for input. A delayed identity leaves
+one pending launch, rather than offering Retry for a live fork; Dismiss stops waiting. A startup
+dialog waits for the user in herdr. The board does not answer it or type a Claude command into it. This needs
+herdr's Codex identity integration, but does not require installing the board's Codex brief hook.
+The board records links for Codex forks it starts; discovering forks made elsewhere is still pending.
+Fork is offered for Codex only when the board finds its command on PATH; the route checks this too.
+
 `POST /api/session/<key>/fork` with `{ name?, message? }` (the page only, like a launch), and the
-board payload's `fork`. Code: `src/services/launch/fork.ts`, `web/src/hooks/useFork.ts`,
+board payload's `fork` (Claude) and `codexFork` (Codex). Code: `src/services/launch/fork.ts`, `web/src/hooks/useFork.ts`,
 `web/src/components/fork/ForkPop.tsx`.
 
 ## When a card is under "Needs me"
@@ -1106,6 +1271,36 @@ error, busy? }` (the page only, with herdr's data recent enough to act on); the 
 `aside` says whether the board can ask. Code: `src/core/aside.ts` (the overlay on the screen),
 `src/services/aside.ts` (the steps through herdr), `web/src/hooks/useAside.ts`,
 `web/src/components/sheet/Aside.tsx`.
+
+## Slash commands
+
+A `/` at the start of the message box, while the box has the focus, lists the session's slash
+commands over the box: each with what it takes (`[instructions]`) and what it does. Typing
+filters it (the name first, then a word in it, then the description); among equals the ones sent
+most from this browser (localStorage) come first, then the rest by name. ↑ and ↓ move, Tab or
+Enter completes the box with the command and a space, Esc closes the list; Enter on a name typed
+whole, or on a row found by its description alone, sends the message as before. A tap on a row
+completes it on a phone. After a command that takes something, what it takes shows as grey text
+after the caret until it is typed.
+
+Where the list comes from, by the session's agent:
+
+- Claude Code: its own commands (those that end the session or its login left out), the
+  profile's `commands/` and `skills/` (the profile the session's records are in), and the
+  session folder's `.claude/commands` and `.claude/skills`; a name only once, the folder's
+  first. A skill with `user-invocable: false` is not listed.
+- pi: its prompt templates (`prompts/` in its folder, `PI_CODING_AGENT_DIR` or `~/.pi/agent`,
+  and the session folder's `.pi/prompts`), its skills as `/skill:<name>` (its folder, `.pi/skills`,
+  `~/.agents/skills`, `.agents/skills`), then its own commands.
+- Codex: its own commands. Any other agent: none, and the box is as it was.
+
+A message that does not start with `/` asks the server for nothing. `GET
+/api/session/<key>/commands` answers `{ commands: [{ name, description, hint?, source }] }`,
+`source` one of `builtin`, `user`, `project`; it reads the head of each file (at most 8 KB,
+regular files only, at most 1000 entries a folder). Through the tunnel, a card working in the
+board's own files gets no commands from its folder. Code: `src/core/slash-commands.ts`,
+`src/adapters/slash-commands.ts`, `web/src/models/slash.ts`, `web/src/hooks/useSlash.ts`,
+`web/src/components/sheet/SlashMenu.tsx`.
 
 ## Stop and Send now
 
@@ -1325,7 +1520,12 @@ the board then have in their transcripts.
 
 `GET /api/links/log?since=<seq>&limit=<n>` answers `{ edges, next }`: the lines after `since` (0,
 or none: from the first), at most `limit` (1 to 1000, 1000 when not given), and the `seq` to ask
-after next time. For the board on this computer only: a remote listener refuses it. Code:
+after next time. On a desktop master, this is for the board on this computer only; when
+`remote.ownerAdmin` is enabled on a headless master, the owner's authorised strong login may also
+read it remotely, and every mutating remote admin action unlocked by `remote.ownerAdmin` is
+written here with `kind: "admin"`, `method`, `path`, `op` (when the JSON body has a short `op`),
+`status`, `via`, `who`, `from`, and `at` (never request bodies or secrets). If the audit store is
+not writable, mutating remote admin requests are refused with 503. Code:
 `src/adapters/edge-log.ts`, `src/server/routes/links.ts`, `promptsOf` in
 `src/core/transcript-links.ts`.
 
@@ -1377,6 +1577,17 @@ an hour to sleep, when it is on). The board's entries are files, and the board k
 - An entry belongs to the session it is for. After `/clear`, which gives the session a new id,
   it goes to the Claude session now in the same pane and folder (the folder herdr gives the
   pane, not the shell's after a `cd`), and the prompt says it was set before `/clear`.
+- `board agents [--json]` (#628) lists every reachable session on the board with its `[ref]`,
+  agent kind (`claude`, `agy`, `pi`, `codex`), device/node and state, marking `(this session)`. On
+  a node it asks the master over the uplink (master's and this node's sessions only) and falls back
+  to the node's local board when the master is offline or older. `board mcp --agents` exposes
+  `ListAgents` and `SendMessage` over stdio JSON-RPC using the same path.
+- `board send <name|key> "<text>"` (#619) sends a message to any session on the board, this
+  computer's or a node's, due now and typed in once it is free, waking it first if it sleeps.
+  A name two sessions share takes the ref the error lists (`"Name [1a2b3c4d]"`). The receiver's
+  prompt says how to answer: `board send "<sender> [<ref>]" "<answer>"`, from whichever computer
+  it runs on. On a node the command goes to the master over the uplink; with the master away it
+  fails and says so.
 - `--session` sets one for another session; the tag then names who set it,
   `[board reminder from <name>] <text>`, since the receiver takes it as a prompt. Control
   characters are taken out of the text.
@@ -1386,6 +1597,9 @@ an hour to sleep, when it is on). The board's entries are files, and the board k
 - With no board running the scheduler, `board remind` says so; the entry goes out once one runs.
 - At most two sleeping sessions are woken at once. An entry cancelled while its session wakes
   up is not sent.
+- Plain one-off reminders for one Claude session due in the same minute, with the same `--idle`,
+  go as one prompt, a line each with its own tag, so the session spends one turn on them. Cron
+  entries, restarts, sleeps and call reports always go on their own.
 - A run for a sleeping session waits while wake is slow to answer, or down and herdr cannot be
   reached, without the wait counting against `scheduleWaitMin` and without the session counting as
   gone: no reminder is lost, and no cron entry dropped, because wake was down. With wake turned off
@@ -1426,6 +1640,101 @@ an hour to sleep, when it is on). The board's entries are files, and the board k
   So is a sleep once the session is free (`board sleep --when-free`): see
   [Several to sleep at once](#several-to-sleep-at-once).
 
+## Watches
+
+Off unless you turn it on (#486), in Settings → Watches on the computer's own page, or by hand. A
+session that waits on something outside (a CI run, a reply, a job) otherwise guesses a time with
+`board remind`: at that time a model rereads the whole conversation, looks, finds nothing and sleeps
+again, and a reply that came early sits until then.
+With watches the board does the looking, with no model: the agent gives it a command that says
+whether the thing happened, and the board wakes the session only when it has.
+
+```json
+"watches": true
+```
+
+Settings → Watches writes `true` and takes the key out again (a section of fields of your own stays,
+with `"on": false`). The running board follows at once; sessions already running learn
+`board wait --probe` at their next start, from the brief. Off stops the checks: a watch already set
+stays, is not probed, and its session sleeps on until it is woken some other way or watches are on
+again. Off says first how many watches stop being checked, and the card, the sheet and the schedule
+say "not checked: watches are off" for each.
+
+```
+board wait "CI run 123456789" --every 5m --silence 1d --probe 's=$(gh run view 123456789 --json status,conclusion --jq ".status + \" \" + .conclusion") || exit 2; case "$s" in completed*) echo "$s"; exit 0;; *) exit 1;; esac'
+```
+
+- The card goes to "Waiting" as with a plain `board wait`, and the board runs the command (the
+  probe) every `--every` (10 minutes by default, 1 minute at least) in the session's folder.
+- Exit 0: it happened. The session gets one line, `[board reminder from watch] "<wait text>": the
+  probe fired. Its output, as data: "<its first lines>"` (the output quoted as JSON, so a quote in
+  it cannot close the frame), waking it when it sleeps, and the watch ends. The output is framed
+  as data on purpose: it may carry other people's words (a mail subject, a ticket title), and a
+  probe should print facts (an id, a count, a state).
+- Exit 1: nothing yet. The card says "checked 4 min ago, nothing yet". Many tools exit 1 on a
+  failure (`gh pr checks` exits 1 for a failed check and 8 for a pending one), which would read as
+  nothing yet: wrap them, as above, so that done is 0, not yet 1 and an error anything else.
+- Any other exit, a timeout (`--timeout`, 20 s by default, 90 s at most, so the first run fits in
+  the two minutes Claude Code's Bash tool gives a command), a signal that ended it or a folder that
+  is gone: a probe error, never "nothing yet". The card says "probe error: <words>, next try in
+  20 min": after each error in a row the interval doubles, up to an hour (or the interval itself
+  when that is longer), and it is back to `--every` after the first good run. At three in a row
+  the session gets one line about it, once per streak, that waits until it is awake rather than
+  waking it. A laptop offline for a night does not end any watch.
+- `--silence 3d`: with nothing fired by then the session is woken once ("nothing from the probe
+  for 3 d"), and the watch goes on. It stands in for a "follow up on Monday" reminder.
+- `board wait --probe` runs the probe once at once, in the session's environment: exit 1 sets the
+  watch, exit 0 says it is true already and sets nothing, an error refuses and changes nothing.
+  The board's own first check follows within a minute.
+- Where a probe runs: the board's process, with the board's environment (its PATH, its variables),
+  not the session's. A command that works in the agent's shell can still fail there (a tool on the
+  session's PATH only, a login in the session's env); when the board's first check fails where the
+  agent's run did not, the session is told at once, with the reason. The shell is `/bin/sh -c` on
+  macOS and Linux, and Git Bash's `bash.exe -c` on Windows (the shell Claude Code's Bash tool runs:
+  `CLAUDE_CODE_GIT_BASH_PATH` when set, else Git's usual folders, else the one beside `git.exe` on
+  PATH; never `System32\bash.exe`, which is WSL's). Without Git Bash `--probe` is refused. No
+  console window shows for a run. Its input is closed, its timeout ends what it started, and the
+  board's runs get `BOARD_WATCH_ID` in their environment.
+- One watch per session, and only for the session's own wait: `--probe` with `--session` naming
+  another session is refused, so a command one session sets never runs in another's folder. The
+  wait text is 500 characters at most with `--probe`.
+- `board doing`, `board done`, `board clear` and a new `board wait` end it, and also a watch
+  the session before a /clear left in the same pane, by the rule the scheduler follows it with: its
+  session is nowhere on the board (a sleeping one counts as there), and the pane's new session has
+  the same folder and profile.
+- A sleeping session gets at most one line of each kind from a watch while the last one waits to
+  be delivered, however many error streaks pass.
+  `board schedule` lists it with its whole command line, and `board unschedule <id>` removes it;
+  the sheet and the schedule panel show the command too, with a cancel button and nothing else.
+- Safety: a probe runs unattended with your rights, outside the session's permission mode. A watch
+  is made only by the `board` command on this computer: no route the page, a phone, the tunnel or
+  Team reaches makes or changes one (the page can cancel one). The brief tells agents a probe must
+  only read. A permission rule that lets a session run `board` without asking therefore lets it
+  set any command as a probe: with watches on, keep `board wait --probe` behind your approval
+  where that matters. The whole command line shows on the page (also on a phone and through the
+  tunnel), in `board schedule` and in the schedule's log, so a probe should not carry a token.
+- At most four probes run at once, and a watch never runs twice at the same time (its file is
+  claimed, so a second board does not run it either). A watch survives a restart of the board.
+- A session that is gone from the board (closed, put in the archive) is not probed, and is looked
+  for again within five minutes; after /clear the watch follows the session in the same pane and
+  folder, as a reminder does. Gone for `scheduleWaitMin` (240) minutes, the watch is removed and
+  logged as missed.
+- Clearing the card's wait on the page (Clear, or editing the wait away) leaves the watch: the
+  agent's own `board doing`, `done`, `clear` or a new `wait` end it, and the page's cancel on
+  the watch (in the sheet or the schedule panel) removes it.
+- One file per watch in `%LOCALAPPDATA%\herdr\plugins\agent-board\schedule\watches\<id>.json`,
+  beside the schedule's entries rather than among them: a board from before watches does not see
+  them. When a probe fires, its watch becomes a plain reminder under the same id.
+- Turned off again, watches stay in their folder unrun (`board schedule` says so); the page shows
+  none, and `board wait --probe` takes the flags as words, as before.
+- With nodes (#500): a watch runs on the board of the computer its session is on, while that
+  board's `watches` is on. The node's payload still carries its watch entries; the master drops
+  them on receipt, so its page does not show them. A master on an older build shows them as plain
+  reminders due at their next check.
+- On Windows a probe ended from outside (Task Manager, `taskkill`) exits 1, which reads as
+  nothing yet; the board's own timeout is an error.
+- Not here yet: a probe that calls an MCP server, and starting a new session when one fires.
+
 ## Restart
 
 A Claude session that restarts stays the same session: Claude exits and resumes in its pane
@@ -1455,6 +1764,11 @@ agent cannot reconnect from inside its own turn (`/mcp` is a menu in its own ter
   skills and CLAUDE.md are loaded anew.
 - How far it got is kept in the entry (`step`): a board that stops halfway leaves the session
   asleep at worst, and the next one wakes it and types the note.
+- Pane names from a script of your own: when `~/.local/bin/herdr-name-for-cwd` exists (another path
+  in env `BOARD_NAME_FOR_CWD`; on Windows a `.cmd` or `.exe`), the board runs it with the
+  session's folder after the wake and names the pane's agent what it prints (`herdr agent
+  rename`), before it types the note. No script, nothing printed, an error or no answer in 5
+  seconds: no rename. Without the script nothing of this runs.
 - Wake refusing or failing is tried again, three times in all. Then an agent hears
   `[board reminder] restart did not happen: <why>. Your note for after it: <note>` once it is
   free; so it does when background tasks held it for 10 minutes. Asked again meanwhile, the new
@@ -1734,9 +2048,27 @@ reply comes back the same way (or why it cannot: the caller has no Claude name, 
 hidden). A running session counts only when herdr runs it (`/awake`); a ref of 8 or more hex
 characters after the name picks one session among several of that name; a name that still fits
 several is refused with each listed, with its ref. Only a text message goes this way, and one
-longer than 2000 characters is refused, not cut. Neither runs on any other tool, nor on every
-prompt, and neither asks anything while wake is off. The install does not write them
-beside the separate herdr-wake plugin's: it says so, and "Switch over…" moves them.
+longer than 2000 characters is refused, not cut. On a board with nodes (config.json `nodes`, #619),
+ListAgents also lists the sessions on the nodes, each with its node, its ref and whether it is
+live or asleep, and `SendMessage` to a name that only a node's session has (nothing on this
+computer, in any profile) goes through the board the same way: a reminder due now for its key,
+which the scheduler sends through the node, "[board reminder from <caller's name on the board>;
+from <this computer>, answer with board send "<name> [<ref>]" "<your answer>"] <text>". A card
+whose pane an awake card of another session holds now is not offered. A name nothing on this
+computer has makes SendMessage read the board's payload once, and a name a node's session shares
+with something Claude Code alone knows (a teammate in the same process) goes to the node's.
+On a node (config.json `node`, #639) it is the other way round: ListAgents also lists the master's
+sessions, as its `board agents` gives them (MokuPilot's day among them), and `SendMessage` to a
+name nothing on the node has is the master's `board send` from that session, so the answer comes
+back to it. A name the master has no session for, or a master that is away, leaves the call to
+Claude Code as before.
+Without `nodes` or local non-Claude agent setups (`launch.agy`/`pi`/`codex`, `codexHome`, or
+Antigravity's `~/.gemini` files, #628) neither hook asks the board anything. Where local non-Claude
+sessions (`agy`, `pi`, `codex`) are present on this machine, `ListAgents` lists them with their
+agent kind and `[ref]`, and `SendMessage` to one queues through the board the same way (own-profile
+Claude sessions still take precedence). Neither runs on any other tool, nor on every prompt, and
+neither asks anything while wake is off. The install does not write them beside the separate
+herdr-wake plugin's: it says so, and "Switch over…" moves them.
 
 **pi sessions** sleep and wake too, when asked: "Put to sleep" on a pi card, `board sleep` (several
 at once, `--when-free`), and Wake, a message or a reminder for a sleeping one, or a Telegram
@@ -1904,6 +2236,8 @@ it); Claude keeps the conversation on disk, so it can come back.
   --session <id|name|pane>` (and `--all`) lists them, marked parked; `board unschedule <id>`
   removes one; `board schedule --move <id>` moves one to the session that runs it (`--session`: to
   that one, which must be on the board), as Return would put it back, the prompt saying whose it was.
+  The archive's panel lists them under the session's row, each with when it is due once Return puts
+  it back, Move (to a session on the board; it asks "Move to …?" first) and Unschedule (two clicks).
 - The card file stays as it was (name, lane, notes), so the session comes back with them, also
   when you resume it by hand elsewhere.
 - Many at once: the menu of the "Idle" column (its head, or a lane's "Idle" in a narrow window)
@@ -2080,6 +2414,92 @@ read and the view has no `calls`, so the board is as it was. A call the board se
 are no longer read. On a call the state
 keeps `before`, the state the call returns to (`src/adapters/mokupilot-call.ts`).
 
+## Away journal
+
+Off unless you turn it on. The board is a snapshot: back after hours away you see every card, and
+nothing says which of them moved. With the journal on, the board notes each card's change of state
+(the column it went to, when, and the line it carried) and tells you what changed while you were
+gone. No model runs for it, and nothing is typed into a session.
+
+`journal` in config.json turns it on:
+
+```json
+"journal": { "returnMinutes": 15 }
+```
+
+`true` is the same with the default of 15 minutes: how long an absence lasts before your return
+shows the list on the page. Settings → Away journal on the computer's own page turns it on and off
+with no restart; off keeps a `returnMinutes` you wrote as `{ "returnMinutes": 30, "on": false }`,
+and on brings it back. When journal.db does not open, Settings shows the journal on with the error.
+
+What the list says, one line per session that changed, in this order:
+
+1. waits on you (its question), and then how many cards were already waiting on you before you
+   left and still are, as a count ("and 2 more were waiting on you before");
+2. stopped on an error (its last words are Claude Code's own API error message);
+3. finished (what it finished). A session that finished and then started on the next task, or went
+   to sleep, is still listed as finished, with that line; a later finish wins over an earlier error;
+4. waits on someone else (what it waits for);
+5. the rest only counted: "and 7 more moved: 5 working, 2 idle".
+
+Twenty session lines at most, then "and N more". A card no longer on the board waits on no one,
+so it is not listed as waiting. Asked for a time before the journal began recording (it was just
+turned on), the list says so instead of reporting that nothing changed. A time the board was down
+later on is not reported that way: what changed meanwhile is recorded at its first refresh after
+the restart, with that refresh's time.
+
+The list covers this computer's sessions only: the cards of other devices (`nodes`) that the
+board shows beside them are not recorded.
+
+When the list is shown:
+
+- on the page, after a return: a "While you were away, 23:56 to 08:10" strip under the toolbar,
+  each row opening its card. Dismiss it and it stays dismissed (on every page and the phone) until
+  the next return; the toolbar's "Since 23:56" closes it on that page or opens the list of that
+  absence again, up to now. A return where no card moved shows no strip, even when some were
+  already waiting on you before you left.
+- `board journal [--since <when> | --away] [--json]` prints it. `--away` (the default) lists since
+  you last went away; `--since` takes a time of day (`23:56`, the last one, so yesterday's when it
+  is not that late yet), a time back (`3h`, `90m`), a date (`2026-11-20`, from its midnight) or a
+  date and time (`2026-11-20 23:00`); any other time ahead of now is refused. `--json` gives
+  `{ ok: true, since, rows: [{ key, name, lane, kind, line, at }], more, rest: { work, idle }, before }`,
+  with `recordedFrom` (when the journal began recording) when that is after `since`, and
+  `{ ok: false, error, message }` when it cannot answer (`off`, `usage`, `since`, `no_absence`).
+- `GET /api/journal?since=<ms>` or `?away=1` gives `{ journal }` in the same shape, and the board's
+  payload carries the strip as `journal: { strip, last }` for the page and the phone.
+  `POST /api/journal` with `x-board: 1` and `{ "op": "dismiss" }` dismisses the strip. Like
+  presence, both answer the remote page and a paired phone: the lines are the cards' own texts,
+  which the board's payload carries to them anyway.
+
+What counts as away and back:
+
+- With [presence](#presence) on, presence decides: away is its switch to away, back its switch
+  from away to here. A call taken while away is still away, and one taken while here is no
+  absence. Whether the page is on show says nothing then (a full-screen terminal hides the browser
+  all day long).
+- Without presence, the board's live streams decide: the page drops its stream while it is hidden,
+  so no stream at all for `returnMinutes` and then one opening is a return. A client that keeps a
+  stream open all day (a page left on show, say, on another screen or a phone) means no return is
+  ever seen. The other way round, a board window covered by others for `returnMinutes` while you
+  sit at the terminal counts as an absence too, and showing it again as a return. Presence is the
+  way to get the strip reliably.
+
+The records live in `journal.db` in the board's state folder, a file of its own beside `board.db`:
+it is the history of the live board, so a restore of `board.db` does not roll it back and a card's
+move does not trigger the backup. A refresh where nothing moved writes nothing. Each card's last
+state is kept too, so a restart of the board records only what really changed while it was down,
+and the first refresh after you turn the journal on notes the cards as they are without calling
+that a change. Moves older than 30 days are pruned, and so are the states of cards gone from the
+board for that long. With `journal` absent nothing is opened, read or shown: no file, nothing in
+the payload, no toolbar button, and `board journal` says it is off (`src/core/journal.ts`,
+`src/adapters/journal-store.ts`, `src/services/journal.ts`, `src/server/routes/journal.ts`,
+`src/entrypoints/journal-cli.ts`).
+
+The event store of the Workdesk coordinator (`board-events.db`, #447) is not reused for it: that one
+is on only with `boardEvents`, sees only panes with one unique Claude id and no sleepers, has no
+split between finished and waiting on someone else, keeps no line, and is pruned by its reader's
+acknowledgements. The journal follows its pattern (a file of its own) instead.
+
 ## Tasks
 
 An experiment (#202), off unless you turn it on. An agent answers with five points: two are
@@ -2156,9 +2576,11 @@ state folder.
 
 Settings → Threads turns it on (#410): Off, Only me, or Me and agents; with Team on, also whether
 they are shared over Team or kept on this board. It writes config.json and copies the agents' skill
-for threads (`agent-board-threads`) into each shown profile, as the install does. Off takes the key
-out of config.json (a hand-written `events` goes with it) and keeps the stored threads and the
-copied skill. Only on the computer: a phone or the tunnel's page has no such row. By hand:
+for threads (`agent-board-threads`) into each shown profile, as the install does. Off keeps the
+stored threads and the copied skill, and keeps the section's settings (`agents`, `share: false`,
+`cases`, `verify`, `events`) under `"on": false`, so on brings them back (#597); `"threads": true`
+goes out of config.json. Only on the computer: a phone or the tunnel's page has no such row. By
+hand:
 
 ```json
 "threads": true
@@ -2188,12 +2610,65 @@ MokuPilot, or with `"mokupilot": false`, nothing of it is read.
 The session that creates a thread hears of its status changes; a session hears no line about its own
 change, and several changes before a line goes out are one line. A sleeping session is not woken for
 a line (unless its watch asked for `--wake`): it gets the line when it is next awake. A MokuPilot day
-session gets it through its inbox.
+session gets it through its inbox. Its watches follow the day (#403): when the day goes on in a new
+conversation (MokuPilot rotated a long one, or a new day started after a day MokuPilot ran as its
+agent), the web board moves the earlier conversation's watches to the new one, with a line still
+pending for it, so the new one hears the same threads without watching them again. The owner watch
+is MokuPilot's to move.
 
 With the key absent nothing changes: no brief line, nothing in the payload, nothing in the hook that
 runs on every prompt, the tables in `board.db` stay empty, and no task board is read. Not yet:
 sharing a thread with a teammate (phase 4 of the design) and MokuPilot's own side of phase 3 (in its
 repository).
+
+**Verified done** (#492). In **Settings → Features → Threads → Verified done** (shown while
+threads are on), the switch turns verification on (`"verify": true` when using defaults) and off
+again, and **Configure** opens its section to set and clear every field under `threads.verify`:
+- **Model**: the profile's default, a Claude alias (`sonnet`, `opus`, `haiku`), or a custom model name (`model`).
+- **Profile for non-Claude workers**: auto, a shown Claude profile on this computer, or a per-device map when nodes are configured (`profile`).
+- **Lanes verified automatically**: checkboxes for the board's lanes; leave empty to verify only threads created with `--verify` (`lanes`).
+- **Checklist**: the default checklist, `docs/agents/verify-checklist-code.md`, or a custom file, with optional per-lane overrides (`brief`).
+- **Time limit (minutes)** and **Max running at once**: `limitMin` (default 30, 1 to 1440) and `max` (default 2, 1 to 10).
+
+Off keeps all configured values under `"on": false` in `threads.verify`, so turning it back on
+brings them back. The board's next tick follows changes written from Settings or by hand in
+`config.json`, no restart. Off sends every held done to you ("verification was switched off") and
+ends its verifier as a verdict does: it is archived once it is free.
+
+In `config.json` by hand, `"threads": { "verify": { "model": "opus" } }` enables the same options.
+Once on, a thread can ask for verification: `board thread new --verify`, `board thread set <key> --verify on|off`, or
+`"lanes": ["<id>"]` for every new thread of a lane. `board thread post <key> --accept "<check>"` adds an
+acceptance line (what must be true for done; ten at most). A session's `done` on such a thread is
+held: the thread stays open, its head says "done proposed, verification running", and nobody who
+watches it hears "done" yet. Within a tick the web board starts a fresh verifier (only the web board
+sweeps: with the terminal board alone a held done waits until the web board runs), as `board fork`
+starts a session: a Claude session in the worker's folder, lane and workspace (when the worker runs on a
+node, pinned to that node in its folder on that node, and archived there once free), on the configured
+model, under a session id the board chose and wrote into the thread first. Its first message is a
+fixed brief: the thread (title, acceptance lines, the held done's words, files, links, the last
+entries), a checklist (`docs/agents/verify-checklist.md`, general; `"brief"` names another file,
+or one per lane, such as `docs/agents/verify-checklist-code.md` for code), and the rule that it
+changes nothing and ends with one verdict. Only that session, from itself, runs
+`board thread verdict <key> pass --file <report> "<line>"` (a pass needs its report),
+`fail "<line>"` (back to the worker, who hears one line; the second fail in a row goes to you) or
+`unsure "<what it could not check>"` (to you, no fail). A pass closes the thread and its watchers
+hear "done (verified)". No verdict within `"limitMin"` (30), or a verifier that could not start
+(including a node that is offline, cannot start Claude, or has no usable profile), and
+the thread comes to you with the reason. Two verifiers run at once at most (`"max"`); the others wait
+their turn. After its verdict the verifier is archived once it is free. You can confirm a held done
+or keep it open on the panel at any time: kept open, it goes back to its worker, who hears one line,
+and its verifier ends as after a verdict. The verifier is always Claude Code:
+for a Claude worker in the worker's profile, for a non-Claude worker (`agy`, `pi`, Codex) on the
+master in `"profile"`, else the one profile the board shows; with several shown and no `"profile"`,
+the thread comes to you saying so. For a non-Claude worker on a node, `"profile"` can map device
+ids (`{ "local": "work", "server-1": "default" }`) or use the device's `profiles` mapping; without
+one for that device, it uses the node's own default Claude profile (or its only usable one). A launcher that cannot start Claude under a given session id (`launch.agent`
+that is not Claude, or whose arguments pick the session; a `launch.command` without `{sessionId}`)
+cannot start verifiers: the thread comes to you saying so. The verdict's identity check (the
+command's own session, in the pane herdr says it runs in, on the node too when the verifier runs
+there; no pane, or no answer from herdr, is a
+refusal that says why) keeps a confused agent from passing its own work; it is no wall against a hostile process on your computer. With the key absent, a done is a done
+as before and nothing is read for it.
 
 On the page, while threads are on, a **Threads** pill beside Tasks counts what needs you and opens
 the threads panel: the list by status on the left, one thread on the right (one screen at a time
@@ -2205,6 +2680,190 @@ key in a card, an entry or a message opens it. `http://127.0.0.1:<port>/#thread=
 thread from anywhere (`board thread link` prints it), and `board thread open <key>` brings the
 board's window up on it. The routes are `/api/threads` (docs/design/threads, 5.3); away from the
 computer only your own logins reach them.
+
+### Case files
+
+Off unless you turn them on inside threads (#488): Settings → Threads → Case files (shown while
+threads are on), or `"threads": { "cases": true }` by hand. Sessions already running learn the case
+commands at their next start, from the brief. A case (a ticket, a
+migration, anything that lives for weeks) keeps its state in a thread instead of in whichever
+conversation touched it last, so a short check starts a fresh, small session from the thread
+instead of waking a large sleeper.
+
+```
+board thread new --ref ABC-12 "Import mapping for the order feed"
+board thread post atlas-12 --state "Mapped 217 rows. Next: the 2019 prices. Waits on: the price list."
+board thread brief atlas-12          # the case for a fresh session, without a model
+spawn-agent --thread atlas-12        # a new session from that brief, made the assignee
+```
+
+- **A reference**: `--ref` on `new` and `set` (`none` clears it); `list --ref` finds every thread
+  with it, closed ones too. A link and the id it ends in count as the same reference. A second open
+  thread with the same reference is named in the reply line, and made all the same.
+- **A state**: `post --state` (and `done --state`), several lines, 2,000 characters and 30 lines at
+  most, with its date and author. `show` puts the newest under the head; earlier ones stay in the feed.
+- **Its sessions**: every session that created, held or wrote into the thread, read from the feed,
+  with its id and whether it is up, asleep, archived or gone, in `show`, `brief` and the panel.
+- **The brief**: `board thread brief <key>` (up to 6,000 characters): title, reference, state,
+  sessions with ids and folders, their open reminders, files by path, links, the last entries.
+- **A fresh start**: `spawn-agent --thread <key>` starts a Claude session with the brief (and
+  `--brief` as the task after it), in `--cwd` or else the folder of a session that held the case
+  (the assignee, then the earlier ones), and makes it the assignee. It is named after the key
+  (`atlas-12-2` while a session has that name). It always starts on this computer: with `nodes` it
+  is not placed on a node, and from a node's session it is refused.
+- **A nudge**: `board wait`, `board done` and `board sleep --self` add a line when a case the session
+  holds has no state or one older than its work. They refuse nothing.
+
+On a shared thread nothing of a case crosses to a teammate's board: the reference and the state are
+not on the wire, an entry with only case fields is private, and the session list names sessions on
+this computer only. A teammate's entries are quoted in the brief, as in `show`. A node's session
+reaches a case as any `board thread` command, through the board's computer. The master shows it on
+its device: up or asleep while it hears the node, "last seen up" with the time of its copy while the
+node is off line, and "state not known here" where it has none of the node's cards. The nudge does
+not reach a node's session in this phase: `board wait`, `done` and `sleep --self` there read the
+node's own config and database, which hold no threads. With `cases` absent the commands, `show`,
+`list`, the routes and the brief are what they were; the database gets two empty columns.
+
+## Decisions
+
+Off unless you turn it on (#487). A question blocks its session until you read it, also when the
+agent has a sound recommendation and the choice is easy to undo. With decisions on, an agent can ask
+with two to four options, mark the one it recommends, and give a time after which it goes with that
+one if you have not answered:
+
+```
+board ask "Merge now or after the review?" --option "Merge now" --option "After review" --recommend 1 --default-after 2h
+```
+
+The card and the session's sheet show the options as buttons, the recommended one marked, and
+"default in 1 h 12 min" with **Hold**. A click types the label into the session (waking it if it
+sleeps) the way a message from the board goes, and clears the question as your reply does; your own
+words in the session, or in the text field beside the buttons, answer it too. Hold cancels the default
+and keeps the question.
+
+When the time passes with no answer and nothing typed by you since, the board types one line into the
+session and records it:
+
+```
+[board reminder from decisions] no answer in 2 h: go with your recommendation "Merge now"
+```
+
+`--default-after` needs `--recommend` and takes 5 min to 72 h (`30m`, `2h`, `1h30m`). The brief tells
+agents a default is only for a choice that is easy to undo, never for something that cannot be undone
+or that goes out to another person: those ask without it. `board thread ask` takes the same flags.
+Options and a default are for a session's own question: `board ask --session <another>` with them is
+refused, since the default would be typed in with nobody asking.
+
+A **Decisions** pill in the toolbar counts what waits on you across lanes and opens the queue: each
+question with its options, the recommendation, how long ago it was asked and the time to its default,
+answered right there. A default that ran is never silent: until you open the panel again, its top says
+what went by default since you last looked (the question and what the session went with), and the pill
+carries a mark. The phone gets the same queue. `board decisions [--json]` prints it for a day assistant.
+
+Every decision is kept in the board's database (question, options, the answer, whether you or the
+default gave it, or the question was withdrawn, and when): the session's sheet lists its own, and
+`board decisions --done` the recent ones. Only what you type counts as your answer: a board
+reminder, a restart's note, a Team notice, a task notification or Code Mode's background result
+leaves the question open, and a prompt that clears the card's question as before without being yours
+(another session's message, a teammate's, a slash command such as the board's own `/compact`)
+records it as withdrawn. The page's Dismiss, the terminal board and a Codex session's hook clear the
+question as before; the record calls it withdrawn once the web board next tidies up, so only while
+the web board runs.
+
+Decisions are this computer's. A device's sessions (#501) ask on their own board: the master shows
+their question on the card and in the queue with no buttons (Open goes to the session), and a
+default never runs on the master for a device's session. A thread's default writes the board's line
+in the thread as a private entry, so on a shared thread the peers get none of it.
+
+```json
+"decisions": true
+```
+
+Settings → Decisions on the computer's own page turns them on and off, and under it allows a default
+answer or not, with no restart; sessions already running learn the options at their next start, from
+the brief. Off keeps `"defaults": false` aside as `"on": false`. A default already set does not run
+while decisions are off: at its time it is dropped (the log says so), and Off says first how many
+will not run. `board ask` with `--option`, `--recommend` or `--default-after` while they are off
+takes the flags as words of the question and says so. By hand, `"decisions": true`, or
+`"decisions": { "defaults": false }` for the options, the queue and the record without anything
+deciding by itself: `--default-after` is refused with one line. With the key absent nothing changes:
+`board ask` takes every word as the question, the brief, the payload and the hook are as before, and
+the table in `board.db` stays empty. Not yet: the queue in a messenger with buttons, and approvals an
+agent can check.
+
+## Workdesk assignments
+
+To let the web board hand assignments from Workdesk to project masters, turn on Board threads
+and add a `workdesk` section to the board's local `config.json`. Use the executable, arguments
+and local CA path from the installed Workdesk coordinator MCP configuration. The adapter reads
+its own private connection file. The board does not need the credential or certificate contents.
+
+```json
+{
+  "threads": true,
+  "workdesk": {
+    "executable": "/path/to/node",
+    "args": ["/path/to/master-mcp.mjs", "/path/to/private/project-master.json"],
+    "caFile": "/path/to/workdesk-root.pem",
+    "intervalSec": 120,
+    "masters": { "Board": "Board-codex-master" },
+    "fallback": "Coordinator-backup"
+  }
+}
+```
+
+The executable and optional CA path are absolute. The board launches it directly with the
+argument array. It polls every 120 seconds by default and reports presence to Workdesk on each
+poll, including when the queue is empty. The toolbar shows the remaining assignments, last poll
+time and any problem. A board without this setting does not run the watcher.
+
+The default masters are `BoxMap-master`, `MokuPilot-master`, `CV-master`, `Board-master`,
+`Tripio-master` (for Tripio, Трипио and Hermes), `LessonPilot-master` and `Workdesk-master`. Set
+`masters` to override individual projects and `fallback` for unlisted projects. The board
+claims a card only after it can resolve one named Claude Code or Codex session. It saves a local
+thread for the Workdesk ID and uses the regular reminder and wake path to tell its assignee.
+The thread includes the card's executor model. The master uses Codex by default or Claude Opus
+when selected, reports each stage to Workdesk, and sends the result for the owner's acceptance.
+
+For a scoped acceptance test, set `onlyTaskId` to the positive Workdesk ID of the test card.
+The board polls the catalogue and only claims and dispatches that card. Remove `workdesk` to
+pause the watcher, or remove `onlyTaskId` to process the full queue.
+
+To publish a topology snapshot alongside the heartbeat, set `workdesk.topology` to
+`{ "deviceId": "mac" }` on that physical device. Use its explicit Workdesk device ID. The
+watcher sends only confirmed local Workdesk handoffs and uses its existing Herdr collection.
+Older MCP servers and incomplete observations still get the regular presence heartbeat.
+A scoped `onlyTaskId` run also sends presence only, so it cannot replace a whole device snapshot.
+
+A master with a local Workdesk handoff can record an explicit worker launch with
+`spawn-agent --workdesk-worker ...`, or attach an existing worker with
+`board workdesk workers link <SID>`. The caller must be the actual master, and the worker SID
+must be the native Herdr ID. Use `unlink <SID>` to release a worker. Run
+`board workdesk workers complete` once the full roster is known and `incomplete` when it is not.
+The explicit spawn flag sets coverage to incomplete until confirmed again. Only linked Claude Code
+and Codex sessions in Herdr's working or blocked state count. Missing or incomplete coverage
+is shown as unknown in Workdesk. A complete roster with no active workers shows zero.
+
+### Workdesk owner dialogue metadata
+
+Set `workdeskDialog` to an object to enable the metadata poller. It uses the existing
+`workdesk` executable, arguments and CA file. Set `workdeskDialog.intervalSec` to change
+the dialogue poll interval (60 seconds by default). The W1 interval, project routing
+and topology continue to use `workdesk`. Optional `workdeskDialog.onlyTaskId` limits
+local notices to one task while keeping other discovered metadata for later.
+
+The adapter must advertise `list_owner_events`, `read_owner_messages` and
+`ack_owner_messages`. This stage only calls the event index and, for a pinned older
+handoff, the normal assignment list. An older handoff can have a full pin in
+`workdeskDialog.legacyBindings`, with `taskId`, `assignmentId`, `threadId` and
+`sessionId`. The watcher checks the assignment, original Board thread and current
+native assignee. A bound local thread receives a generic notice. Shared and mirrored
+threads receive no notice.
+
+`GET /api/board` shows `workdeskDialog.delivery: "awaiting_recipient"`,
+`pending`, `more`, `polledAt`, and per-reason `blocked` counts. Event metadata and
+its cursor survive a restart. This stage keeps owner content in Workdesk and leaves
+all delivery acknowledgments pending.
 
 ## Secrets
 
@@ -2274,7 +2933,9 @@ board secret file NAME               (in a session) the same in a file of its ow
 you answer or it expires (30 minutes by default, a day at most), so an agent runs it in the
 background, and prints `ok · <id> · <where> · <time>`, or `declined` / `expired`; `--no-wait`
 returns at once, then `board secret status <id> [--wait]`. Also `board secret cancel <id>`,
-`board secret requests` (this session's) and `board secret sinks` (what each takes).
+`board secret requests` (this session's) and `board secret sinks` (what each takes). A session has
+at most five requests waiting and asks at most ten times in ten minutes, cancelled ones counted, so
+a loop of asks cannot push the audit's lines out (#275).
 
 - **Into the store** (no `secrets.sinks` in config.json: the one sink there is is `store`, so no
   `--sink`): each `--field` is a variable's name, as `board secret set` takes one (`PATH`,
@@ -2336,11 +2997,15 @@ whole value must match), and otherwise a **field**, which you type. A file's nam
 - `file`: `path`, or `folder` and `name` (absolute or `~/…`; the folder must be there). `format`
   `json` puts the template under the keys of `at` and keeps the file's other keys (the file is
   written again as JSON, two spaces; without `at` the template is the whole file); `env` sets its
-  variables and keeps the file's other lines; `netrc` and `text` are the whole file. The file is
-  written in place, never through a temp file, and made yours alone before anything goes in (mode
-  600; on Windows an existing file's own entries reset, inheritance off, full control to your user
-  only, and the rights read back: anything else and nothing is written). A link or a folder where
-  the file goes is refused.
+  variables and keeps the file's other lines; `netrc` and `text` are the whole file. The values
+  go into a new file beside it (`.<name>.<random>.tmp`, made by the write alone), made yours alone
+  before anything goes in (mode 600; on Windows inheritance off, full control to your user only,
+  and the rights read back: anything else and nothing is written), then renamed over the file: a
+  crash midway leaves the old file whole, and at worst that file beside it, as private. So the
+  folder must be writable, and the file that takes the name is a new one (a hard link to it, or
+  its owner and other rights, do not carry over). A link or a folder where the file goes is
+  refused; the file is read through a handle that must be the plain file seen there, and a link
+  put there meanwhile is replaced by the rename, never written through (#275).
 - `bitwarden`: an item by name in `folder` (made when missing), created or updated, with
   `organization` and `collection` (both, or neither) for a new item of an organization. The fields
   a request names are the item's `username`, `password`, `totp`, `notes`, `uri`, or custom fields
@@ -2348,7 +3013,8 @@ whole value must match), and otherwise a **field**, which you type. A file's nam
   the session you paste into the form (`bw unlock --raw`), in bw's environment only, for this one
   write: it is kept nowhere. The item goes to `bw` on its stdin, never on its command line.
 - `env` (Windows): your user's environment variables (`vars`: their names, or one regular
-  expression), set by Windows PowerShell with the values on its stdin; new programs see them.
+  expression), set by Windows PowerShell with the values on its stdin; new programs see them. All
+  are set or none: the old values are read first and put back when one fails.
 - `http`: `method` (POST, PUT, PATCH), `url`, `headers`, `auth` (`{ "user", "password" }`, basic),
   `body` (JSON with templates in its strings, or text). The scheme and host are written out in
   full (https; http only for localhost): parameters go into the path and the query, encoded, and
@@ -2375,10 +3041,11 @@ the new place. **Decline** answers the agent without a write.
 sealed into its file, and from there to the sessions it is for, as above): not to the
 agent, the card, the board's payload or its event stream, board.db, a log, an error text (a
 failure of bw or PowerShell is said by its step and exit code, never by what it printed; a
-server's answer is not read), a temp file or the backup; the board holds
+server's answer is not read), a temp file anywhere but the one beside the sink's file that becomes
+it, or the backup; the board holds
 it in memory for the one write. No route returns one. The request on its card holds the title, the
 sink, the parameters and the field names; the audit (`secrets/audit.jsonl` in the state folder, a
-megabyte, then the one before) has a line for each step: who asked, the sink, the fields, the
+megabyte, then it moves aside and five of those are kept) has a line for each step: who asked, the sink, the fields, the
 parameters, when, what came of it. The route is guarded as the board's other changes (X-Board, the
 board's own Origin; through the phone's pairing or the tunnel's login), and only your submit
 writes: an agent's request writes nothing. It does not guard against an agent that works against
@@ -2595,7 +3262,15 @@ The board is opened on `127.0.0.1`, and a passkey cannot belong to an IP, so the
 opens in a small window of the board's own on `http://localhost:<port>`, which says what is about
 to happen in the board's words (the person by their roster name, the text as it will go) before you
 touch the passkey. Allow the board's pop-ups for it. One confirmed send lets that board page send
-without asking for 30 minutes; a reload or a restart of the board ends that. Trusting a key and
+without asking for 30 minutes; a reload or a restart of the board ends that.
+
+A send from your phone (the app, the board in the phone's browser, or your domain), sending an
+agent's draft there, or a shared thread's entry cannot open that window: it lives on `localhost`
+of the computer. With the switch on it waits on the computer instead (#377): the head's Team button
+counts it, the Team panel lists it at the top under **From your phone, waiting for your passkey**,
+and **Confirm…** opens the window. Each waits 2 minutes and is then not sent; the phone says it
+waits, not that it failed. The phone gets no 30 minutes of sending from it: each send waits for
+the computer. Trusting a key and
 widening agents ask every time. These passkeys are not the ones of your domain's sign-in (Remote
 access through your own domain): those are for the domain, these for `localhost`, and neither works
 for the other. A change of the board's port keeps them. While team is on, the board also holds its port on `[::1]`,
@@ -3843,6 +4518,39 @@ failed attempts.
 **One tunnel, one computer per domain.** The Android app stays on Tailscale ([Phones](#phones));
 the tunnel and the Tailscale listeners are independent, either on without the other.
 
+### Admin panels on a headless master (`remote.ownerAdmin`)
+
+By default, every remote listener refuses `localOnly` admin panels and routes (Remote access,
+Phones, Sleep and wake, Backup, Time settings, Calendar settings, Threads settings, Feature
+settings, Updates, Housekeeping, Team management, Devices). When the master runs headless on a
+server without a screen, you can opt in by setting `"remote": { "ownerAdmin": true }` in
+`config.json` (or running `board remote owner-admin on` on the server, or flipping it from an
+already authorised local or owner-admin session).
+
+- **Who gets admin access:** only the owner's own strong login:
+  - through the tunnel (`https://<domain>`): a live login created with a passkey or password + TOTP;
+  - through Tailscale (app or `tailscale serve`): a paired device belonging to the computer's own
+    Tailscale login that is **not** marked as a desk (`board remote desk <id>`).
+- **Who stays refused:** desks, `remote.allow` users, devices paired by anyone else, peers on the
+  tailnet, tagged Tailscale nodes (`tagged-*`), and unauthenticated callers. Actions that act on
+  the server's screen (`desktopOnly`: opening files, links, or focusing herdr) stay refused remotely.
+- **Step-up for credentials:** changing the login password, confirming a new TOTP secret, or
+  lifting a lockout over a remote listener requires a fresh current TOTP code (`totpCode` in the
+  body), as adding a passkey already does.
+- **Audit:** every mutating remote admin request unlocked by `remote.ownerAdmin` is appended to
+  the [edge log](#the-edge-log) (`kind: "admin"`, naming who, from where, method, path, short `op`,
+  status, and listener, without other body fields or secrets). Mutating requests fail closed (503)
+  and notify the owner if the audit store cannot be written.
+- **Risk:** `remote.ownerAdmin` lets an authorised remote session reconfigure remote access,
+  backup, wake, team trust, devices, and board settings without sitting at the server. Flipping
+  `remote.ownerAdmin` on immediately grants admin access to every already-paired non-desk device of
+  the owner's Tailscale login and every live strong tunnel session, so review and revoke old
+  pairings first. On Tailscale, an already-verified caller keeps its `whois` identity for up to
+  10 minutes (`WHOIS_GRACE_MS`) if `tailscaled` stops answering temporarily. Leave `ownerAdmin` off
+  on a desktop computer where you have a local screen, prefer passkeys over passwords, and revoke
+  lost devices or sessions right away (`board remote revoke <id>` or `POST /api/access`
+  `login-end`).
+
 ## The board on a server of your own
 
 herdr, Claude Code and the board on a Debian 12/13 or Ubuntu 22.04–26.04 server, so the agents go
@@ -3882,6 +4590,11 @@ keys are copied for it) and run `claude` once to sign in; `herdr` attaches to th
   carry the board's local key (`X-Board-Key`, from `~/.local/state/herdr/plugins/agent-board/local-key`,
   0600, made by the board), as the `board` command, wake's hooks and herdr's actions send it. The
   board's page is at your domain, through its login; on 127.0.0.1:12422 it answers 403.
+- **Settings through the domain.** Its login is the owner's own way in, so Settings there has
+  Secrets…, Backup…, Time tracking…, Sleep and wake…'s switches, Server… and the Team panel's
+  switches, as on a computer; Remote access… and MokuPilot… never (a server has no PC's tunnel or
+  call). The other admin panels stay refused there unless `remote.ownerAdmin` is on (above), which
+  opens them to a strong login as on a headless master.
 - **Again**: safe; it updates what is there and changes nothing that is already right. A new login
   link only comes while no login is set; after that, `board login reset` as `agent`.
 - **`board update [--ref <ref>]`** as `agent`: the ref the board came from (or another) fetched,
@@ -3937,6 +4650,18 @@ dictionary there plus its plural rule; a test checks that every dictionary has e
   reload themselves when a file in `web/` changes. A board that crashes starts again by itself
   (after 2 s, then 10 s, then 30 s; after five crashes in ten minutes it waits for the next code
   change), and `web.log` in the state folder keeps the error.
+- New commits of the plugin itself: **Settings → Updates…** (on the board on this computer only;
+  off until you turn it on) has the board take the new commits of the branch its git checkout is
+  on, every hour or once a day at a set time, and `board update` does it now. It only
+  fast-forwards: it never switches branches, merges or resets. Changed tracked files, a detached
+  HEAD, no upstream, a failed fetch or a branch with commits of its own are skipped, with the reason
+  in the panel and in `board doctor`, and tried again at the next check; so is a session that is
+  being started (again in 5 minutes). When `package.json` or `bun.lock` changed, `bun install`
+  runs before the merge, while the old code still runs; after it the board and wake restart as on
+  any code change, and the new board runs the install again when hooks, skills or launchers changed
+  (a dated copy of each `settings.json` first, in `self-update/settings` in the state folder). A
+  board that does not come back within 3 minutes is a red line in the panel and in `board doctor`.
+  A node follows its master's version instead. Each update is a line in `web.log`.
 
 Code: `src/server/`, `web/src/` (React; no build step: the server bundles `web/src/main.tsx` in
 memory with Bun; springs in `web/src/models/spring.ts`, the sheet's place in
@@ -3954,10 +4679,14 @@ Claude usage (`src/entrypoints/statusline.ts`, `src/adapters/claude-home.ts`): t
 to the board's own command when there is none (a status line someone else set stays). Claude runs it
 after every reply with the session's state; it keeps the account's 5h and 7d usage windows
 (`claude-limits-latest.json` in the state folder, the usagebar shape) and each session's context fill
-(`context/<session id>.json`), and prints a short line under the prompt: `ctx 34% · 5h 23% · 7d 41%`.
-The board shows the windows as a pill by the live dot (windows past their reset left out) and the
-context fill in the sheet; without the status line it falls back to the usagebar cache and to the
-tokens of the last request in the transcript.
+and effort level (`context/<session id>.json`), and prints a short line under the prompt:
+`ctx 34% · 5h 23% · 7d 41%`. The board shows the windows as a pill by the live dot (windows past
+their reset left out), and a Claude session's context fill and effort at the foot of its card
+(`85k / 200k (42%) · Effort high`) and in the sheet. The effort is the live one, a session-only
+`/effort` included (Claude Code runs the status line again for it); a model without effort, or a
+Claude Code that does not report it, shows none on the card. Without the status line the board
+falls back to the usagebar cache and to the tokens of the last request in the transcript, and the
+card shows no effort.
 
 Files (`src/adapters/files.ts`, `src/server/routes/fs.ts`, `web/src/components/files/`): `POST /api/fs/stat` (which of these paths exist),
 `POST /api/fs/preview`, `POST /api/fs/open` (`open` or `reveal`, through explorer.exe, `open`
@@ -3974,7 +4703,7 @@ worker fetches as a PDF needs it under `pdfjs/` (decoders, character maps, fonts
 `document-viewer.js` and `document-worker.js` (mammoth turns the .docx into HTML in the worker,
 DOMPurify keeps only its text, structure, web links and pictures as data: URLs in the page);
 `spreadsheet-viewer.js` and `spreadsheet-worker.js` (SheetJS reads the workbook in the worker,
-only the rows shown and one more, after the zip's own directory said how big it is unpacked; the
+only the rows shown and one more, from a zip the worker made of the parts as they really unpack; the
 page puts each cell in as text). Each worker runs under a policy of its own
 (`WORKER_POLICIES`): PDF.js's may also compile its decoders, the others only read from the
 board.
@@ -3989,7 +4718,11 @@ own `Origin` when the browser sends one, and fresh herdr data like every action 
 Renaming: `POST /api/session/<key>/rename` with `{ name, claude }`. Restarting:
 `POST /api/session/<key>/restart` (a schedule entry, see [Restart](#restart); `{ id, again }`).
 Archive: `POST /api/session/<key>/archive` (`{ held, dropped, closeAt }`), `GET /api/archive` (its
-records), `POST /api/archive` with `{ op: "archive" | "return" | "remove", keys }` (`{ done, failed }`);
+records; one with parked entries also has `parked`, each `{ id, text, due, cron?, kind?, idle? }`, `due` as
+Return would put it back, null when it runs no more), `POST /api/archive` with
+`{ op: "archive" | "return" | "remove", keys }` (`{ done, failed }`), `POST /api/archive/held` with
+`{ op: "drop" | "move", key, id, to? }` (an entry parked with session `key`: dropped, or moved to the
+session `to` on the board);
 the board payload has `archive: { log }`. Archiving and Return need fresh herdr data and the
 page's own `Origin`, as a launch does.
 
@@ -4041,6 +4774,10 @@ board cat <id> "<Title>"  a new client: adds the category to the config too
 board doing "<text>"      what it works on now
 board wait "<text>"       what it waits for outside the chat (card goes to "Waiting on others")
 board ask "<question>"    needs your answer: "Needs me" until you reply
+  --option "<label>" (2 to 4), --recommend <n>, --default-after <30m|2h>
+                          (decisions on) buttons for you, one marked, a default after a time;
+                          see Decisions
+board decisions [--done]  (decisions on) what waits on you across lanes, or the last answered
 board done ["<text>"]     finished: clears doing, wait and ask
 board favorite [off]      keep this session in sight: first in its column, whole, left out of
                           "Archive the sleeping ones" (off: back among the others)
@@ -4079,6 +4816,9 @@ board presence [here|away|call]
                           whether the user is at the computer, away or on a call (where news
                           goes: also Telegram while away); a state sets it; see Presence
 board away [on|off]       the same switch: away (on), back at the computer (off)
+board journal [--since <when> | --away] [--json]
+                          what changed on the board since you left (with "journal" in
+                          config.json); see Away journal
 board todo add [--mine] [--ref <r>] [--why "<w>"] "<text>" | done <key> [--why "<w>"] | list
                           tasks (with "todos": true): what you hand the user to do, or (--mine) a
                           promise of yours you defer, printed with its key; done closes your own,
@@ -4187,7 +4927,8 @@ web board off), `terminal` (false turns the web board's [terminal](#terminal) of
 (path for the app window), `foldWaiting` (how the web board folds a session asleep in
 "Waiting" down to its name, what it waits for and its time: `push`, the default, unfolds it on
 hover moving the cards below apart; `over` unfolds it over them; `off` keeps it whole; the gear's
-Settings set it too), `terminalTitle` (window title pattern to
+Settings set it too), `bgTaskStuckMin` (minutes before a running `agy` background task is flagged as
+possibly stuck, 30; `0`, `false` or a non-positive value turns the warning off), `terminalTitle` (window title pattern to
 raise, default `<COMPUTERNAME>:*`), `raiseTerminal`, `launch` (how new sessions start: `claude`,
 `command`, `agent`, `args`, `timeoutSec`, see [New sessions](#new-sessions)), `mokupilot` (calls
 with a fork of a session: `false` turns them off; `{ "dir": "<MokuPilot checkout>" }` runs its
@@ -4196,6 +4937,9 @@ and its first arguments, one per element, no shell, the board adding `call --cla
 --cwd <folder>`, or the whole line when it has `{session}` or `{cwd}` in it; `"mode"`:
 `"auto"`, `"local"` or `"link"`, where a call starts, set by Settings → MokuPilot…, the older
 `"link": true` read as `"link"`).
+
+MokuPilot node bridge (off by default; no UI toggle yet): set `node.pilotBridge: true` in the
+node's `config.json` and `nodes.devices.<id>.pilotBridge: true` (or `nodes.devices.local.pilotBridge: true`) on the master.
 
 `tunnel` (the board [through your own domain](#another-computer-or-a-tablet-through-your-own-domain);
 Settings → Remote access… and `board tunnel on|off` set it): `on` (false), `host` (the server),
@@ -4222,6 +4966,10 @@ while one does not check out.
 off; on unless it says so), `sources` (each `id`, `kind`, `label`, `color`, `lane`, `everyMin`,
 `remindMin` (its own minutes before, 0 or `false` for none); an `mcp` one's `url`, `preset`,
 `account`, `calendars`, `list`, `write`). No iCal address is ever in it.
+
+`autoUpdate` (the board's update of itself from git; Settings → Updates… sets it): `true` or
+`{ "every": "hour" | "day", "at": "HH:MM" }` (local time, 04:00 by default), `"on": false` to keep
+those while it is off.
 
 `backup` (the [backup](#backup) of the board's database; Settings → Backup… sets it): `folder` (a
 folder that syncs elsewhere), `server` (`{ "host", "port", "admin": { "user", "key" }, "set" }`:
@@ -4258,6 +5006,56 @@ read/merge/rename. Contention waits at most two seconds, then reports an error w
 the card. Locks are released on ordinary errors. A writer killed mid-write leaves its lock
 behind; a write holds it for milliseconds, so one older than 30 seconds is taken over by the
 next writer. A card write the board itself fails at is retried on its next refresh.
+
+## Moving the master
+
+When a board runs with `nodes` (a master) and has at least one connected node, you can move the
+master role to an online node while every session keeps running where it is, and the old master
+becomes a node of the new master (#697):
+
+```sh
+board master handover --to <device> --dry-run
+board master handover --to <device>
+```
+
+The same flow is available in Settings -> Devices -> "Move master role…".
+
+1. **Preflight checks (`--dry-run`)**: verifies the target device is an online node on the same
+   commit, does not already act as a master, has a working backup target that is not itself (or can
+   inherit the master's remote server backup target), has enough free disk space, and has a valid
+   reverse transport (NAT relay via `nodes.relay` when behind NAT, SSH via `--reverse-link ssh:user@host`,
+   or direct URL in local setups), and lists every category of state that will move. Dry run
+   changes nothing on either device.
+2. **Freeze and backup**: pauses new session launches, the scheduler, backups, the tunnel, and Team
+   on the old master, runs a backup to configured backup targets, and saves full pre-handover
+   backups on both devices.
+3. **Encrypted transfer and rekeying**: seals `board.db`, `thread-files/`, `journal.db`, `access*`
+   (passwords, passkeys, logins), `team*` keys and files, `calendar/secret/` and cache, `tunnel/`
+   config and key, `schedule/` and `owner-watch.json`, and `nodes/` records (including relay keys)
+   in `ABK1` (gzip + AES-256-GCM) and ships them over the existing node link. On the target,
+   session keys across `board.db`, `journal.db`, `schedule/`, and `owner-watch.json` are rekeyed
+   (`local <-> @<device>:`), `nodes` and `node` roles are flipped on both sides, and any third-party
+   nodes are re-paired with fresh tokens.
+4. **Verify and commit (or auto-rollback)**: starts the new master role and verifies that nodes are
+   linked, tunnel and Team connect (when enabled), and threads, time, access, and schedule are
+   readable before closing the old master's master role. If any check fails, both devices roll back
+   automatically from the pre-handover backups.
+
+To restore both devices back to their pre-handover roles and state later, run on the new master:
+
+```sh
+board master rollback --discard-since-commit
+```
+
+Post-commit rollback requires `--discard-since-commit` because anything written on the new master
+since the commit is replaced by the pre-handover backup. Existing backup history encrypted with
+the old master's backup key is unreadable under the new master's own backup key when the target
+already keeps a backup key of its own (keep the old backup passphrase if you may need to restore
+pre-handover snapshots).
+
+If the old master is unreachable or stopped, `board master rollback --local-only` (with
+`--discard-since-commit` after commit) restores only this machine from its local pre-handover
+backup. `board master status` shows the current handover state.
 
 ## Development
 

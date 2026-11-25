@@ -251,8 +251,8 @@ describe('the stylesheet', () => {
 
   test('the header keeps the window’s width; the board and its column heads keep clear of the panel', () => {
     // app.css narrows the whole page (.page) by the room, and the toolbar's row (.toolbar-fit) by a
-    // panel lying over the board: here neither.
-    expect(declarations(`${GATE} .page`)).toEqual({ 'margin-left': '0', 'margin-right': '0' })
+    // panel lying over the board: here neither; the page stays beside the navigation rail (rail.css).
+    expect(declarations(`${GATE} .page`)).toEqual({ 'margin-left': 'var(--rail-w, 0px)', 'margin-right': '0' })
     expect(declarations(`${GATE} .toolbar-fit`)).toEqual({ 'margin-left': '0', 'margin-right': '0' })
     for (const el of ['.board', '.columns-head']) {
       expect(declarations(`${GATE} ${el}`)['margin-left']).toBe('var(--beside-left)')

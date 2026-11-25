@@ -3,7 +3,7 @@
 // board's Enter once the paste is over (services/paste.ts); on a PC, and for files that are not
 // pictures, the calls are the ones they were.
 import { expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { serveBoard } from '../support/board-server.ts'
 import { startOwnServer } from '../support/own-server.ts'
@@ -47,6 +47,9 @@ async function message(box: Sandbox, url: string, headers: Record<string, string
   }
   const before = box.calls().length
   const uploads = join(box.env.LOCALAPPDATA as string, 'herdr', 'plugins', 'agent-board', 'uploads', '2026-10-31')
+  // the board takes only files in its uploads (#401): there, as the page's upload leaves them
+  mkdirSync(uploads, { recursive: true })
+  for (const f of files) writeFileSync(join(uploads, f), '')
   const res = await fetch(`${url}/api/session/a/message`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-board': '1', ...headers },

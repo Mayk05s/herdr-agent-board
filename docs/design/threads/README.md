@@ -143,7 +143,7 @@ watches (6.2).
 |---|---|---|
 | `id` | UUID v4 | On a shared thread, the id of the Team message that carries it. |
 | `thread` | thread id | |
-| `n` | integer | A counter per thread: one more than the highest this board has seen (4.3). |
+| `n` | integer | A counter per thread: one more than the highest this board has seen (4.3). On a shared thread a private entry takes the number of the entry it follows, so a number can name more than one entry there (#541). |
 | `at` | time | |
 | `author` | party | |
 | `type` | `note`, `ask`, `answer`, `system` | `ask` is a question for the owner. `answer` replies to one. `system` is written by the board: created, imported, shared. |
@@ -213,6 +213,113 @@ ok · atlas-13 · done · 1 file
 The report file is 2,000 tokens long. It went from the worker to the board. The master's context
 grew by the last line.
 
+### 3.8 Verified done (#492)
+
+A session that hands work out cannot trust "done" on the worker's word, and has no context of its own
+to doubt it (#308: a master accepted work that duplicated an open pull request). Behind
+`threads.verify`, a thread can ask for a fresh verifier before anyone hears it is done.
+
+**Data.** The head gains `verify` (column `threads.verify`, migration 9, JSON, left out of the head while NULL):
+`on`, `lane` (turned on by `verify.lanes`), `accept` (the acceptance lines), `run` (the verifier now
+running: its Claude session id, name, start and time limit), `fails` (in a row) and `last` (the last
+verdict). `Proposed` gains `verify: true`: a done held for verification, not a proposal to the owner.
+Every change is an entry, folded by `applyEntry`: `set.verify`, `set.accept`, `set.hold` (with a
+`done`: the service decided to hold it, the fold follows, so a board whose config changed later folds
+the same feed the same way), `set.verifier` (started, or null) and `set.verdict` (`pass`, `fail`,
+`unsure`, `timeout`, `error`, with the status it leads to). A restart of the board finds it all
+again: a held done with no verifier is started on the next tick; a verifier the thread names that never
+got a card (the board stopped between the entry and the launch) is started afresh after a three-minute
+grace; one that had a card and is gone from the board sends the thread to the owner.
+
+**Holding.** A session's done is held while `threads.verify` is set, the thread asks for it, is open
+and is not waiting on the owner (there the owner is the gate: the proposal of 3.5). The owner's done is
+never held, and the owner may confirm a held done or keep it open: it goes back to `doing`, its writer
+hears "atlas-13 kept open by the owner: your done is back with you" (level `answers`), and its
+verifier ends as after a verdict (its word no longer counts; archived once free). A second
+done while one is held is refused: the verifier checks the words it was given (`post --status doing`
+takes the first back). The gate is not lifted by the session it gates: `set --verify off` is refused
+for the assignee, for the session whose done is held and for any session but the one that made the
+thread, and on a thread its lane put verification on (also when it was asked for with `--verify`), for
+every session: there only the owner turns it off.
+
+**Starting.** The web board's scheduler runs a sweep each tick while `threads.verify` is set (the
+terminal board does not: with it alone a held done waits until the web board runs): a held
+done with no verifier gets one while fewer than `max` (2) run. The board mints a Claude session id,
+writes the `verifier` entry with it and the deadline, adds a schedule entry of kind `verify` under
+that id, then starts the session as a fork is started (`launches.start` with `sessionId`): the
+worker's folder, lane and workspace, the configured model, the brief as its first message. The folder
+is checked by the start itself, with its time limit, not in the tick. With `nodes` (#504) a verifier
+is never placed: it starts on this computer, under `sessionGiven`, never queued or sent to a node. A launcher
+that cannot start Claude under that id refuses before it opens anything. The verifier is always Claude
+Code: a Claude worker's verifier runs in the worker's profile (its card, or its archive record), a pi
+or Codex worker's in `verify.profile`, else the one profile the board shows; with several shown and
+no `verify.profile`, nothing starts and the thread goes to the owner (`error`) saying so. A start that is refused
+or a launch that fails later sends the thread to the owner (`error`). The board's own entries about a
+verifier carry its name and id as their author.
+
+**The brief** (core/work-verify.ts, at most 12,000 characters; the rule, the acceptance lines, the held done,
+the checklist (3,000 characters at most) and a finishing line with the verdict always fit, and the
+thread's oldest entries are what gives way, said in a line): who it is and the rule (it changes
+nothing: no edits, commits, pushes or thread posts; single test files, never a whole suite on a shared
+machine unless the checklist says so), the time limit, the three verdict commands, the acceptance
+lines, the held done's words with its files by path and links, then the thread as #488's case brief
+prints it (`caseBriefText`, 11.8) without its sessions (the verifier asks none of them anything),
+then the checklist. On a shared thread no peer's words go in, as the digest's `local` keeps them out
+of a session: the case brief quotes them, so the verifier's copy is built from a thread where a
+title, summary or waiting-on a peer gave (as the feed folds) is replaced by a pointer, and a peer's
+entry keeps its number, time and author but none of its text, fields, files or links. So does an
+owner's system entry that copies the peers' head (a share or a share again, which carries the title,
+summary and waiting-on the peers hold), and the first entry of a thread made from a Team topic
+(shared as it was made, with the topic's title). The checklist: `docs/agents/verify-checklist.md` (general: evidence the verifier looked at itself for each
+acceptance line, each claim checked against the thing it names, the whole task, nothing changed
+outside it, what could not be checked said plainly), or the file `verify.brief` names, per lane if an
+object (`docs/agents/verify-checklist-code.md` holds #308's list for code).
+
+**The verdict.** `board thread verdict <key> pass|fail|unsure [--file report.md] "<one line>"` is
+accepted only from the session the thread names in `verify.run`, as the command's own session
+(`CLAUDE_CODE_SESSION_ID` or its pane, never `--session`), and the pane herdr says it runs in must
+hold that session too, so a session id put in the environment of another pane does not pass. It fails
+closed: `HERDR_PANE_ID` unset, herdr not answering, no session in that pane or another one is a
+refusal that says why. Verification off, none running, or a command that does not claim the
+verifier's id is refused before herdr is asked. A node's `board thread`, forwarded to the master,
+carries no session of its own there: a verdict from a node is refused. No
+session but the verifier reads a running verifier's id from `board thread` (it is replaced in what
+the command prints); the owner's command and the page show it. This keeps a confused agent from closing
+its own work; it is no wall against a hostile process on the same computer, which can read the board's
+files. A pass needs its report and
+closes the thread done with the held done's words as its summary. A fail sends it back to `doing`; the
+second in a row goes to the owner. `unsure` goes to the owner and is no fail. Anything else the
+verifier writes is refused. The verdict moves the `verify` entry to now and into its archive phase.
+
+**The time limit and the archive** are that one schedule entry, which the scheduler hands to the
+verifier side before anything is typed: due while the thread still waits on that verifier (30 minutes
+by default), the thread goes to the owner (`timeout`); after the verdict the verifier is archived once
+it is free (tried each minute, half an hour at most; a verifier that never gets free stays on the
+board, it is not killed). Only a held done times out: a verifier started as the done went (confirmed,
+taken back) runs for nothing and is archived. The sweep puts back the entry of a running verifier whose
+entry went, and moves to now, into its archive phase, the entry of one whose thread no longer waits on
+it; an entry in that phase is left to its retries.
+
+**Who hears what.** A held done is no news (level `all`): a `status` watcher hears nothing until the
+verdict; its writer gets an `answers` watch. A fail is the writer's, as an answer is: "atlas-13
+verification failed: <line>. Reasons: board thread show atlas-13"; a `status` or `asks` watcher hears
+nothing of it, an `all` watcher `atlas-13 +1`. A pass is a status change: "atlas-13 done (verified):
+<summary>", said only when the entries heard hold that pass. A fail that reaches the owner, `unsure`, a
+timeout and an error are status changes to the owner, with what it waits on.
+
+**A shared thread.** The held done goes to the peers as a proposal to the owner does (its note, not its
+status or summary), so a teammate's board shows the thread still `doing`. The verifier's start, a
+fail, `unsure`, a timeout, an error, and entries that only set `verify` or add an acceptance line are
+private; a pass goes out as a plain `done` with the summary ("done: <summary>"), without the
+verifier's line or report: the entry main would have sent at once, later. A verdict as such does not
+cross the hub.
+
+**With the key absent** `board thread` is main's: its usage leaves out the verify lines, `--verify` and
+`--accept` are unknown flags and `verdict` an unknown command, refused as main refuses any, no done
+is held, the scheduler reads nothing for it, and every head, line and payload is what it was. A
+thread that asks for verification when the key is removed keeps a done held then: the owner confirms
+it on the panel.
+
 ## 4. Storage and sync
 
 ### 4.1 On this board
@@ -273,19 +380,45 @@ and has no order across senders. So each board that takes part holds its own cop
 thread, and the copies have to come out the same. Three rules do that:
 
 1. Entries are immutable and carry `n`, a counter per thread. A board writes its entry with one
-   more than the highest `n` it has seen on that thread (a Lamport counter).
+   more than the highest `n` it has seen on that thread (a Lamport counter). An entry that stays
+   on its board takes the `n` of the entry it follows instead, so the numbers the peers see have
+   no holes that rule 3 would read as missed entries: a private one (#541), and one the board
+   writes with nothing to send it, such as a shared parent's "all N sub-threads closed", which is
+   private for that reason (#548), or one written on a peer's thread whose sharing ended (#569). A re-import's change on a shared thread (13.1) is not one of
+   them: it goes out like any other entry (#557). An entry held for the owner takes its number when it is
+   written, before anyone knows whether it goes out: one the owner discards, or one the hub
+   refuses for good, leaves a hole the peers read as an entry missing, which it is.
 2. A head field takes the value from the entry that is last in the order `(n, at, author's peer
    id)`. Two boards that hold the same entries compute the same head, whatever order the entries
-   arrived in.
+   arrived in. `at` is the time the entry was written, on its board and on the peers alike: it
+   rides in `work.at` to a board whose caps say `work-at`, so an entry held for the owner and
+   sent later is not ordered by when it went out (#564). A board that gets no `work.at` (an older
+   sender, or one that does not send it to an older receiver) orders by the message's time, which
+   is when it was sent.
 3. Every shared entry also carries its sender's head as it was after the entry (key, title,
-   status, summary, `rev`). A board that sees a `rev` more than one ahead of its own knows it
-   missed entries: it adopts the newer head fields, and shows a line in the feed, "entries
-   missing here".
+   status, summary, `rev`; an entry sent late carries the head of now, below), folded without its sender's private entries (#549) and without those
+   that did not go out: held for the owner, discarded, refused (#556). A board that
+   sees a `rev` more than one ahead of its own knows it missed entries: it adopts the newer head
+   fields, and shows a line in the feed, "entries missing here". It adopts only the fields that
+   differ from its own, so a held entry the owner sends later, after a later entry went out, lands
+   on a peer that missed only its number as it does on its sender.
+
+   A peer that also missed an earlier entry setting the same fields took that earlier entry's
+   values in its adoption, and the held entry, folded before the adoption, would not change them
+   (#561). So an entry that goes out after a later one was sent (an agent's draft or the owner's
+   entry held for the passkey, sent by the owner) carries its sender's head as it is now: every
+   entry that went out, and this one, with `rev` the highest `n` among them. An agent's draft
+   takes that head when the owner sends it, not when it was held. A board that holds an adoption
+   numbered above the entry and no higher than that `rev` takes the fields that still differ, in a
+   second private entry, "#n arrived late". It is numbered with that `rev`, or with the board's
+   own highest `n` when the sender is ahead, and ordered after every entry of that number. A board
+   that took no head over that number adds nothing. An older board adopts only on a counter jump
+   and reads the larger `rev` as before.
 
 Rule 3 is what a late joiner and a board that was offline past the hub's 7 days rely on. They have
 the right head after the first message they receive and lack only the older feed. For the feed
 itself there is one more step, started by a person: "Send history" exports the thread's shared
-entries to a JSON file and sends it through the hub's end-to-end encrypted files (#371). The
+entries, those that went out or wait to (none held, discarded or refused, #556), to a JSON file and sends it through the hub's end-to-end encrypted files (#371). The
 receiving board imports them, marked "from ben's copy", since the hub cannot prove who wrote an
 entry that was relayed. There is no automatic backfill protocol in this design.
 
@@ -309,7 +442,8 @@ board thread show <key> [--last <n>] [--since <n>] [--full]
 board thread list [--mine | --lane <id> | --all] [--status <s>] [--done]
 board thread changes [--peek]
 board thread watch <key> | --lane <id> | --mine  [--what status|asks|all] [--idle] [--wake]
-board thread unwatch <key> | --lane <id> | --mine
+board thread watch --owner [--idle] [--wake]
+board thread unwatch <key> | --lane <id> | --mine | --owner
 board thread link <key> | --base
 board thread open <key>
 board thread share <key> <name|team|channel> [--history]
@@ -326,7 +460,8 @@ What each one does:
 - `ask` writes an `ask` entry, sets the thread to `owner` with the question as `waitingOn`, and
   sets the session's `card.ask` so the card moves to "needs the user" exactly as `board ask` does.
 - `show` prints the head and the last 5 entries, each cut to 300 characters, 1,500 characters in
-  all. `--since <n>` prints only entries after `n`. `--full` prints everything and is meant for a
+  all. `--since <n>` prints only entries after `n` (on a shared thread also a private entry with
+  that number, which may have come after it). `--full` prints everything and is meant for a
   fork or a subagent. A file is shown as its name, size and path, never its content.
 - `list` prints one line per open thread: key, status, assignee, title, summary. 20 lines at
   most, then "and 14 more (--all)". `--mine` is the threads the session created, is assigned or
@@ -626,7 +761,9 @@ because this view is painted in MokuPilot's window and not on the board's page.
 When the board answers and threads are on, the first segment reads "Threads" and shows the
 threads view; otherwise MokuPilot shows its own board as today. MokuPilot finds the board through
 the `board` command it already locates for call reports (`call_report.find_board()`):
-`board thread link --base --json` prints the board's address and whether threads are on.
+`board thread link --base --json` prints the board's address and whether threads are on, and
+`day_watches: true` on a board that carries a day's watches to its next conversation (#461). The
+key describes the `board` command's build, so a board pulled but not yet restarted already says it.
 
 ### 9.2 The list
 
@@ -770,7 +907,9 @@ whose title is the thread's title. Sharing with the team or a channel starts a t
 
 - The hub forwards body fields it does not know, as signed, so the hub needs no change and no new
   message kind. Boards reject unknown body fields, so `work` goes only to peers that advertise a
-  new capability, `work`, in their `hello`.
+  new capability, `work`, in their `hello`. A board also rejects a `work` with a key it does not
+  know, so the entry's own time, `work.at` (4.3, #564), goes only to peers that advertise
+  `work-at` as well; the others get the same `work` without it.
 - A peer without the capability gets the same message without the field. A message must have
   text, so an entry that only changes fields is sent with a line the board writes, `done: 217 rows
   mapped, 3 flagged in the report`, and `work.auto` tells a board that understands the field not to show
@@ -792,7 +931,25 @@ has any thread view of its own.
 - At the moment of sharing the peers get the head. The entries written before stay local unless
   the owner ticks "with history", which sends them as a file (4.3). This is the safe default: a
   feed that was private when written does not become shared by one click.
-- After that, entries go out as they are written, except `private` ones.
+- After that, entries go out as they are written, except `private` ones. What a private entry
+  sets stays home too: the head an entry carries (rule 3) is the one the peers fold, without this
+  board's private entries, so a private summary or status never rides out with the next shared
+  entry (#549).
+- A thread that was unshared can be shared again, with the same peers or others. A peer that held
+  the earlier sharing takes the new share as the start of a new sharing of the copy it has: the
+  scope the share comes with (a pair, the team, a channel) replaces the ended one, the share's
+  fields set its head, and the entries written while the thread was not shared stay on the
+  sharer's board, as the ones before a first share do, with no "entries missing" line for them.
+  What the peer wrote on its copy while the sharing was over stays on the peer's board the same
+  way: such an entry is private and takes the number of the entry it follows (rule 1), so it
+  never outranks the share or what the sharer writes after it. A share from the sharer renews the
+  scope also when the peer never got the unshare (one that could not go out before the share
+  did), whatever the new scope is. Only the board that shared the thread shares it again; a share
+  from anyone else on a copy it holds is dropped (#569). A board that keeps shared threads but
+  predates this says `work` without `work-reshare` and would drop such a share, so the sharer
+  refuses to share again with a peer of that kind who held the thread in the sharing before, and
+  names them (after a team sharing, every member on the roster now counts as one who held it); a
+  board without `work` reads the share as a topic's line, as before.
 
 ### 11.3 What holds an agent's entry back
 
@@ -811,7 +968,8 @@ change to make, and it is the owner's to decide (16).
 ### 11.4 What a board does with a peer's entry
 
 - It accepts `work` only on a thread it knows as shared with that peer, from a member of the
-  thread's scope. Anything else is dropped as a bad frame, like any unknown field today.
+  thread's scope. Anything else is dropped as a bad frame, like any unknown field today. The one
+  exception is a share from the board that shared the thread: it renews the scope (11.2, #569).
 - It validates every field against the limits of 3.2 and 3.3 and stores the entry with the peer
   as its author.
 - A peer may write entries and change the status and the summary. A peer may not assign one of
@@ -868,7 +1026,15 @@ agreed to this design.
   waits as `held` for the owner's Send on the page, since any program can run the command as the
   owner; an agent's entry is checked by `agentPost` with its `work` fields (summary, what it waits
   on, title) as well as its text. Sharing writes one system entry that carries the head; its text
-  for a board without `work` is `shared as a thread: atlas-13 · doing: <summary>`. "Send history"
+  for a board without `work` is `shared as a thread: atlas-13 · doing: <summary>`. The head it
+  carries is the one the peers would fold: without this board's private entries and those that did
+  not go out, also from an earlier sharing when a thread is shared again (#563). A share the board
+  refuses (a mirrored thread, among others) leaves the thread's scope as it was (#562). The entry
+  sets those fields on the sharer's own copy too, so a field a private or unsent entry set there
+  (a private wait on the owner among them) gives way to the peers' value at the share, as it would
+  to any later entry that sets it. A share again with a peer that held the earlier sharing renews
+  the scope on the peer's copy (#569, 11.2); the caps say `work-reshare` for it, and the Team
+  roster shows it as `reshare`. "Send history"
   (`thread-history`) sends the shared entries as a JSON file through the end-to-end encrypted files;
   the receiving board reads it in once the file is there, each entry it lacks marked as a copy, never
   one the file says it wrote itself. Unsharing sends `stopped sharing` and keeps the feed.
@@ -892,6 +1058,60 @@ agreed to this design.
   router's notice for the topic is not sent as well. A message held because its sender's key
   changed is not taken into the thread.
 - `board mcp` is a stdio MCP server with the two tools of 5.4.
+
+### 11.8 Case files (#488)
+
+Built as phase 1 of #488, behind `"threads": { "cases": true }`; absent, everything above is as it was.
+
+A case is a thread with an outside reference or a state. It answers a different cost from the one
+this design started with: a long piece of work (a ticket, a migration) keeps its state in whichever
+session touched it last, so sessions are kept asleep for weeks as memory and a short check rereads a
+whole conversation on a cold cache. With a case the state is in the thread, and a fresh session
+starts from it.
+
+- **Data.** Two nullable columns in `threads` (migration 7): `ref` as given, and `state` as JSON
+  `{text, at, by}`. An entry's `set` carries `ref` (null clears) and `state`; `applyEntry` folds them,
+  and earlier states stay in the feed. A head has `ref` and `state` only once they are set, so a
+  board without cases gives the heads it always gave.
+- **Sessions are not stored.** `caseSessions` (`core/work-cases.ts`) reads them from the feed: the
+  creator, every session author, every session an entry assigned, the assignee. Whether each is up,
+  asleep, archived or gone is read when shown, from the board's items and the archive.
+- **References** match case-folded, trailing slashes aside, and a link matches the id its path ends
+  in. A second open thread with the same reference is named in the write's line
+  (`[same ref: atlas-12 "..."]`, `sameRef` in `--json`), as #453 does for titles; nothing is refused.
+- **The brief** (`caseBriefText`, pure and exported, so a verifier or the page reads a case the same
+  way): 6,000 characters at most. The head and the reference, the state whole (2,000 characters,
+  30 lines), the sessions with ids, folders and state, their reminders, ten files by path, ten links,
+  then the newest entries in what is left. It sends an agent to `show --full` for depth and to a past
+  session by name only for what only that session knows; `board resume` is named as the owner's way
+  back, never the agent's, since it would bring the old conversation into the reader's pane.
+- **spawn-agent --thread** mints the session id up front, types a short preface, the brief and the
+  task, and writes the assignee as whoever ran it (read as `board` reads its own session: Claude,
+  Codex, the agent in its herdr pane) once the session runs under that id, finished starting or not.
+  The brief names the new session as the holder and the one before it. Without `--cwd` it starts in
+  the folder of a session that held the case, the assignee first, then the earlier assignees, the
+  most recently assigned first, never the caller's (a coordinator that made the thread or wrote the
+  newest entry works elsewhere), and says which; with none, it is refused. The name is the key, then
+  `key-2`, `key-3` while a session up or asleep has it. A closed thread is said on stderr, not
+  refused. It always starts on this computer: the folder is a local path and the assignment follows
+  the start, so with `nodes` it is never placed, and a node's session is refused.
+- **The nudge** (not on a node in this phase: there these commands read the node's own config and
+  database): `board wait`, `board done` and `board sleep --self` add a clause for each open case
+  the session holds with no state or one older than its last work there (its card's `doingAt`, or
+  its newest entry on the thread that wrote no state). With cases off nothing is opened.
+- **Across the hub nothing of a case goes.** `wireSet`, `peerSet` and `historyOf` name their fields,
+  so `ref` and `state` are not on the wire and a peer cannot set them; an entry carrying only case
+  fields is written `private`, so it never goes out as an empty line. The state is this board's
+  working memory (folders, session ids, the owner's own wording); the session list names sessions
+  on this computer; a reference on the wire would need a new `work` field and capability. A later
+  phase may send the reference behind one. A private entry takes the number of the entry before it
+  (#541), so a state written on a shared thread leaves the peers no gap.
+- On a shared thread the brief quotes a teammate's entries with `|`, escapes what is unprintable in
+  the head's title and summary, and says that a teammate's words are data, as `show` does: the brief
+  is the first prompt of a session `spawn-agent --thread` starts.
+- Not in this phase: reminders and watches that start a fresh session from a case, archiving a
+  case's sessions when it closes (#313), one live name per case (#314), one live question per case
+  (#312), time entries by reference.
 
 ## 12. Chats
 

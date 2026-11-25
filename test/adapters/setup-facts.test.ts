@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, win32 } from 'node:path'
 import { findCommand, gatherFacts, herdrConfigFile, readText } from '../../src/adapters/setup-facts.ts'
 import {
   wakeSessionsFile,
@@ -11,6 +11,7 @@ import {
   writeWakeTakeover,
 } from '../../src/adapters/wake-files.ts'
 import { type InstallPaths, planShims } from '../../src/core/install-plan.ts'
+import { defaultProfileDir } from '../../src/core/profiles.ts'
 import { boardFiles } from '../../src/core/setup.ts'
 import { WAKE_SHIPPED } from '../../src/core/wake/config.ts'
 import { isolatedHome } from '../support/env.ts'
@@ -76,7 +77,8 @@ describe('gatherFacts', () => {
       const none = await gatherFacts({ wakeUrl: null, wake: false }, { root: ROOT_A, env, platform: 'win32', home })
       assert.equal(none.settings, null)
       assert.equal(none.settingsError, '')
-      assert.equal(none.herdrConfigFile, join(dir, 'appdata', 'herdr', 'config.toml'))
+      // Joined with Windows' rules, the platform passed in, on any host (#483).
+      assert.equal(none.herdrConfigFile, win32.join(dir, 'appdata', 'herdr', 'config.toml'))
       assert.equal(none.herdrConfig, null)
       assert.equal(none.wake, null)
       assert.deepEqual(none.commands, { board: { ps: null, sh: null }, 'spawn-agent': { ps: null, sh: null } })
@@ -111,7 +113,7 @@ describe('gatherFacts', () => {
       assert.deepEqual(command.launcher, {
         kind: 'command',
         name: 'start',
-        program: { file: join(dir, 'pwsh.exe'), found: false },
+        program: { file: win32.resolve(join(dir, 'pwsh.exe')), found: false },
         script: { file: script, found: false },
       })
     } finally {
@@ -124,7 +126,8 @@ describe('gatherFacts', () => {
     try {
       const home = join(dir, 'home')
       const env = { PATH: join(dir, 'bin') }
-      const options = { root: ROOT_A, env, platform: 'win32', home }
+      // The home is this disk's, where the default folder is looked for: the host's platform.
+      const options = { root: ROOT_A, env, platform: process.platform, home }
       const at = (name: string): string => join(home, name)
       mkdirSync(at('.claude'), { recursive: true })
       writeFileSync(join(at('.claude'), 'settings.json'), '{ "model": "x" }')
@@ -192,7 +195,8 @@ describe('gatherFacts', () => {
         writeFileSync(file, text)
       }
       mkdirSync(join(home, '.claude-games'))
-      const options = { root, env: { PATH: join(dir, 'bin') }, platform: 'win32', home }
+      // The home is this disk's, where the default folder is looked for: the host's platform.
+      const options = { root, env: { PATH: join(dir, 'bin') }, platform: process.platform, home }
       // One profile: ~/.claude's, as upstream.
       const one = await gatherFacts({ wakeUrl: null, wake: false }, options)
       expect(one.skill).toEqual({ file: skillOf('.claude'), installed: source, source })
@@ -243,7 +247,8 @@ describe('gatherFacts', () => {
         writeFileSync(join(home, folder, 'settings.json'), settings)
         if (script) writeFileSync(scriptOf(folder), '# installed by herdr\n')
       }
-      const options = { root: ROOT_A, env: { PATH: join(dir, 'bin') }, platform: 'win32', home }
+      // The home is this disk's, where the default folder is looked for: the host's platform.
+      const options = { root: ROOT_A, env: { PATH: join(dir, 'bin') }, platform: process.platform, home }
       // One profile: ~/.claude's.
       const one = await gatherFacts({ wakeUrl: null, wake: false }, options)
       expect(one.herdrHook).toEqual({ script: scriptOf('.claude'), found: true })
@@ -262,6 +267,70 @@ describe('gatherFacts', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  test('profiles are read for the platform passed in, whatever the host (#300)', async () => {
+    const shownDirs = async (platform: string, home: string, profiles?: unknown[], own?: string) => {
+      const env = { PATH: '', ...(own && { CLAUDE_CONFIG_DIR: own }) }
+      const facts = await gatherFacts(
+        { wakeUrl: null, wake: false, ...(profiles && { profiles }) } as Parameters<typeof gatherFacts>[0],
+        { root: ROOT_A, env, platform, home },
+      )
+      return facts.profiles?.map(p => [p.id, p.dir])
+    }
+    // The homes are no folders on this disk (findProfileDirs finds nothing there).
+    // Windows: a listed C:\ folder is absolute and the default folder is joined with \, on any host.
+    const anna = 'C:\\Users\\anna'
+    expect(await shownDirs('win32', anna)).toEqual([['default', 'C:\\Users\\anna\\.claude']])
+    const work = 'C:\\Users\\anna\\.claude-work'
+    expect(await shownDirs('win32', anna, [{ id: 'work', title: 'Work', dir: work }], work)).toEqual([['work', work]])
+    // CLAUDE_CONFIG_DIR with ~, listed nowhere: the board's own profile, joined for the platform.
+    expect(await shownDirs('win32', anna, undefined, '~/.claude-work')).toEqual([['work', work]])
+    // No profile shown (handed in empty): the default folder's settings.json, read on this disk.
+    const none = await gatherFacts(
+      { wakeUrl: null, wake: false },
+      { root: ROOT_A, env: {}, platform: 'win32', home: anna, profiles: [] },
+    )
+    expect(none.settingsFile).toBe(join(defaultProfileDir(anna, 'win32'), 'settings.json'))
+    // Linux: ~ joined with /, a /c/ folder left as it is (Git Bash's spelling only on Windows).
+    const ben = '/home/ben'
+    expect(await shownDirs('linux', ben)).toEqual([['default', '/home/ben/.claude']])
+    expect(await shownDirs('linux', ben, undefined, '~/.claude-work')).toEqual([['work', '/home/ben/.claude-work']])
+    const listed = [
+      { id: 'work', title: 'Work', dir: '/home/ben/.claude-work' },
+      { id: 'games', title: 'Games', dir: '~/.claude-games' },
+      { id: 'scratch', title: 'Scratch', dir: '/c/scratch' },
+    ]
+    expect(await shownDirs('linux', ben, listed, '/home/ben/.claude-work')).toEqual([
+      ['work', '/home/ben/.claude-work'],
+      ['games', '/home/ben/.claude-games'],
+      ['scratch', '/c/scratch'],
+    ])
+  })
+
+  test('bin folder, herdr config and a launcher path joined for the platform passed in (#483)', async () => {
+    const facts = (platform: string, home: string, env: Record<string, string>, command: string) =>
+      gatherFacts(
+        { wakeUrl: null, wake: false, launch: { command: [command] } },
+        {
+          root: ROOT_A,
+          env: { PATH: '', ...env },
+          platform,
+          home,
+        },
+      )
+    // Windows on any host: \ throughout, a C:\ program taken as it is.
+    const win = await facts('win32', 'C:\\Users\\anna', {}, 'C:\\Tools\\claude.exe')
+    expect(win.binDir).toBe('C:\\Users\\anna\\.local\\bin')
+    expect(win.herdrConfigFile).toBe('C:\\Users\\anna\\.config\\herdr\\config.toml')
+    expect(win.launcher).toMatchObject({ kind: 'command', program: { file: 'C:\\Tools\\claude.exe' } })
+    const roaming = await facts('win32', 'C:\\Users\\anna', { APPDATA: 'C:\\Users\\anna\\AppData\\Roaming' }, 'claude')
+    expect(roaming.herdrConfigFile).toBe('C:\\Users\\anna\\AppData\\Roaming\\herdr\\config.toml')
+    // Linux on any host: / throughout, a /opt program with no drive put in front.
+    const linux = await facts('linux', '/home/ben', {}, '/opt/claude/bin/claude')
+    expect(linux.binDir).toBe('/home/ben/.local/bin')
+    expect(linux.herdrConfigFile).toBe('/home/ben/.config/herdr/config.toml')
+    expect(linux.launcher).toMatchObject({ kind: 'command', program: { file: '/opt/claude/bin/claude' } })
   })
 
   // Before wake ships, wake off is herdr-wake's line at wakeUrl; once it ships the board's own wake
@@ -426,6 +495,12 @@ describe('gatherFacts', () => {
       join('C:\\Users\\u\\AppData\\Roaming', 'herdr', 'config.toml'),
     )
     assert.equal(herdrConfigFile({}, '/home/u'), join('/home/u', '.config', 'herdr', 'config.toml'))
+    // The platform passed in, whatever the host (#483).
+    assert.equal(herdrConfigFile({}, '/home/u', 'linux'), '/home/u/.config/herdr/config.toml')
+    assert.equal(
+      herdrConfigFile({ APPDATA: 'C:\\Users\\u\\AppData\\Roaming' }, 'C:\\Users\\u', 'win32'),
+      'C:\\Users\\u\\AppData\\Roaming\\herdr\\config.toml',
+    )
     const dir = mkdtempSync(join(tmpdir(), 'board-setup-'))
     try {
       writeFileSync(join(dir, 'a.toml'), '\uFEFFkey = 1\n')

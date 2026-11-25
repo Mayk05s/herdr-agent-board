@@ -10,6 +10,12 @@
 // modules are named work-thread: "thread" already means a session's conversation and a Team
 // thread in the code.
 
+import { switched, switchedOff, withField } from './feature-switch.ts'
+import { readModel } from './launch/model.ts'
+import { DEVICE_ID, LOCAL } from './node-key.ts'
+import { MAX_TEXT } from './schedule-rules.ts'
+import type { CaseSessionView } from './work-cases.ts'
+
 export const THREAD_STATUSES = ['next', 'doing', 'waiting', 'owner', 'done', 'dropped'] as const
 export type ThreadStatus = (typeof THREAD_STATUSES)[number]
 export const isThreadStatus = (v: unknown): v is ThreadStatus => THREAD_STATUSES.includes(v as ThreadStatus)
@@ -37,6 +43,27 @@ export interface EntrySet {
   assignee?: Party | null
   parent?: string | null
   lane?: string
+  /** Case files (#488, core/work-cases.ts): the case's outside reference (null: cleared), and where it stands. */
+  ref?: string | null
+  state?: string
+  /** Verification on or off (#492); `verifyLane`: turned on by `verify.lanes`. */
+  verify?: boolean
+  verifyLane?: true
+  /** One acceptance line added. */
+  accept?: string
+  /** With `status: 'done'`: the done is held for a verifier (the service decides, the fold follows). */
+  hold?: true
+  /** The verifier the board started, or null: none runs any more. */
+  verifier?: VerifyRun | null
+  /** A verification ended, with the status it leads to in `status`. */
+  verdict?: Verdict
+}
+
+/** Where a case stands (#488): the text of the newest state entry, when and by whom it was written. */
+export interface CaseState {
+  text: string
+  at: number
+  by: Party
 }
 
 export interface ThreadLink {
@@ -122,14 +149,56 @@ export const sharedOf = (h: Pick<ThreadHead, 'scope'>): SharedScope | null =>
 /** The thread's sharing, also when it ended: where its last entries still go. */
 export const sharingOf = (h: Pick<ThreadHead, 'scope'>): SharedScope | null =>
   typeof h.scope === 'object' && h.scope.kind !== 'local' ? h.scope : null
+/**
+ * Whether an entry comes after a reader's `#since` (`show --since`). On a thread that is or was
+ * shared, a private entry of this board takes the number of the entry it follows (#541), so one
+ * with that very number may have come after what the reader saw: it is shown rather than missed.
+ */
+export const afterN = (e: Pick<ThreadEntry, 'n' | 'private' | 'author'>, since: number, shared: boolean): boolean =>
+  e.n > since || (shared && e.n === since && e.private === true && e.author.kind !== 'peer')
 export const requestOf = (h: Pick<ThreadHead, 'scope'>): ShareRequest | null =>
   typeof h.scope === 'object' && h.scope.kind === 'local' ? h.scope.request : null
 
-/** A proposed close: an agent said done on a thread that waits on the owner (3.5). */
+/**
+ * A proposed close: an agent said done on a thread that waits on the owner (3.5), or (`verify`) on
+ * a thread that asks for verification, where a verifier checks it first (#492).
+ */
 export interface Proposed {
   by: Party
   at: number
   why: string
+  verify?: true
+}
+
+/** A verifier the board started for a held done (#492): its Claude session id, its name, when, and its time limit. */
+export interface VerifyRun {
+  key: string
+  name: string
+  at: number
+  until: number
+}
+
+/**
+ * How a verification ended (#492): `pass` (done), `fail` (back to the worker; the second in a row
+ * goes to the owner), `unsure` (the verifier could not check something: the owner), `timeout` (no
+ * verdict in time) and `error` (no verifier could be started): the owner.
+ */
+export const VERDICTS = ['pass', 'fail', 'unsure', 'timeout', 'error'] as const
+export type Verdict = (typeof VERDICTS)[number]
+export const isVerdict = (v: unknown): v is Verdict => VERDICTS.includes(v as Verdict)
+
+/**
+ * A thread's verification (#492), folded from its entries: whether it asks for it (`lane`: turned
+ * on by `verify.lanes` when it was made, which only the owner turns off), its acceptance lines, the
+ * verifier running now, the fails in a row, and how the last one ended.
+ */
+export interface VerifyHead {
+  on: boolean
+  lane?: true
+  accept: string[]
+  run: VerifyRun | null
+  fails: number
+  last: Verdict | null
 }
 
 /** A thread's head: what applying every entry's `set` in order gives, kept in its row. */
@@ -152,6 +221,11 @@ export interface ThreadHead {
   /** The highest entry counter applied. */
   rev: number
   origin?: unknown
+  /** Case files (#488): present only once set, so a board without them gives the heads it always gave. */
+  ref?: string
+  state?: CaseState
+  /** Verification (#492): absent on a thread that never had it, so such a head is as it always was. */
+  verify?: VerifyHead
 }
 
 /** What a watch hears of: answers only (the assignee's own watch), status changes and answers, questions too, every entry. */
@@ -190,14 +264,128 @@ export interface ThreadsConfig {
   gapSec: number
   /** Threads may be shared over the hub (phase 4); false keeps them local. */
   share: boolean
+  /** Case files (#488, `"cases": true`): a reference, a state and the sessions of a thread; absent: off. */
+  cases?: true
+  /** Verified done (#492): null while `threads.verify` is absent. */
+  verify?: VerifyConfig | null
+}
+
+/**
+ * `threads.verify` (#492): the verifier's model (null: the profile's default), the lanes whose new
+ * threads ask for verification, the checklist file (one, or per lane with `*` for the rest), the
+ * Claude profile a verifier of a pi or Codex worker runs in, the time limit, and how many run at once.
+ */
+export interface VerifyConfig {
+  model: string | null
+  lanes: string[]
+  brief: string | Record<string, string> | null
+  profile: string | Record<string, string> | null
+  limitMin: number
+  max: number
+}
+
+export const VERIFY_LIMIT_MIN = 30
+export const VERIFY_LIMIT_MIN_MAX = 24 * 60
+export const VERIFY_MAX = 2
+export const VERIFY_MAX_LIMIT = 10
+export const VERIFY_CODE_CHECKLIST = 'docs/agents/verify-checklist-code.md'
+
+export interface VerifySettingsData {
+  model: string | null
+  lanes: string[]
+  brief: string | Record<string, string> | null
+  profile: string | Record<string, string> | null
+  limitMin: number | null
+  max: number | null
+}
+
+export interface VerifySettingsPatch {
+  model?: string | null
+  lanes?: string[] | null
+  brief?: string | Record<string, string | null> | null
+  profile?: string | Record<string, string | null> | null
+  limitMin?: number | null
+  max?: number | null
+}
+
+export interface VerifySettingsView {
+  threadsOn: boolean
+  verify: {
+    on: boolean
+    settings: VerifySettingsData
+    defaults: { limitMin: number; max: number }
+  }
+}
+
+/**
+ * `threads.verify`: `true` or an object is on, with its settings; absent, `"on": false` (Settings
+ * turned it off and kept its settings, #596) or anything else is off.
+ */
+export function verifyConfig(raw: unknown): VerifyConfig | null {
+  if (raw === true) raw = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || switchedOff(raw)) return null
+  const r = raw as Record<string, unknown>
+  const text = (v: unknown, max: number): string | null =>
+    typeof v === 'string' && v.trim() && v.trim().length <= max ? v.trim() : null
+  const lanes = Array.isArray(r.lanes)
+    ? [...new Set(r.lanes.map(l => String(l ?? '').toLowerCase()).filter(l => LANE.test(l)))]
+    : []
+  let brief: VerifyConfig['brief'] = text(r.brief, 1000)
+  if (!brief && typeof r.brief === 'object' && r.brief !== null && !Array.isArray(r.brief)) {
+    const per = Object.entries(r.brief as Record<string, unknown>).flatMap(([lane, path]) => {
+      const p = text(path, 1000)
+      const l = lane.toLowerCase()
+      return p && (l === '*' || LANE.test(l)) ? [[l, p] as const] : []
+    })
+    if (per.length) brief = Object.fromEntries(per)
+  }
+  let profile: VerifyConfig['profile'] = text(r.profile, 100)
+  if (!profile && typeof r.profile === 'object' && r.profile !== null && !Array.isArray(r.profile)) {
+    const per = Object.entries(r.profile as Record<string, unknown>).flatMap(([device, id]) => {
+      const p = text(id, 100)
+      const d = device.trim().toLowerCase()
+      return p && (d === LOCAL || DEVICE_ID.test(d)) ? [[d, p] as const] : []
+    })
+    if (per.length) profile = Object.fromEntries(per)
+  }
+  const limit = Number(r.limitMin)
+  const max = Number(r.max)
+  return {
+    model: text(r.model, 200),
+    lanes,
+    brief,
+    profile,
+    limitMin: Number.isFinite(limit) && limit >= 1 ? Math.min(Math.round(limit), 24 * 60) : VERIFY_LIMIT_MIN,
+    max: Number.isFinite(max) && max >= 1 ? Math.min(Math.floor(max), 10) : VERIFY_MAX,
+  }
+}
+
+/** The checklist file for a lane: its own, else `*`, else the one file; null for the default. */
+export function briefFor(c: Pick<VerifyConfig, 'brief'>, lane: string): string | null {
+  if (!c.brief) return null
+  if (typeof c.brief === 'string') return c.brief
+  return c.brief[lane] ?? c.brief['*'] ?? null
+}
+
+/**
+ * The Claude profile for a verifier of a non-Claude worker (#675): a string is the master's own,
+ * an object names each device (`local` or its id).
+ */
+export function profileFor(c: Pick<VerifyConfig, 'profile'>, device: string | null = null): string | null {
+  if (!c.profile) return null
+  if (typeof c.profile === 'string') return !device || device === LOCAL ? c.profile : null
+  return c.profile[!device || device === LOCAL ? LOCAL : device] ?? null
 }
 
 export const GAP_SEC = 60
 
-/** config.json's `threads`: `true` is everything on; an object is on, with its settings; absent or anything else is off. */
+/**
+ * config.json's `threads`: `true` is everything on; an object is on, with its settings; absent,
+ * `"on": false` (Settings turned them off and kept the settings, #596) or anything else is off.
+ */
 export function threadsConfig(raw: unknown): ThreadsConfig | null {
   if (raw === true) return { agents: true, gapSec: GAP_SEC, share: true }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || switchedOff(raw)) return null
   const r = raw as Record<string, unknown>
   const events = typeof r.events === 'object' && r.events !== null ? (r.events as Record<string, unknown>) : {}
   const gap = Number(events.gapSec)
@@ -205,6 +393,8 @@ export function threadsConfig(raw: unknown): ThreadsConfig | null {
     agents: r.agents !== false,
     gapSec: Number.isFinite(gap) && gap >= 0 ? Math.min(gap, 3600) : GAP_SEC,
     share: r.share !== false,
+    ...(r.cases === true && { cases: true as const }),
+    ...('verify' in r && { verify: verifyConfig(r.verify) }),
   }
 }
 
@@ -217,23 +407,222 @@ export const threadModeOf = (c: Pick<ThreadsConfig, 'agents'> | null): ThreadMod
 
 /**
  * config.json's `threads` once Settings has set `mode` and, when given, `share` (#410); undefined:
- * the key goes. Off takes the key out, as Tasks' Off does. On keeps the section's other fields
- * (`events`, ...): `agents` and `share` are written only where they are not the default, and a
- * section left with nothing else in it is `true`. `share` alone changes threads that are on;
- * off, it leaves the value as it was.
+ * the key goes. Off keeps a section with fields of its own (`agents`, `share`, `cases`, `verify`,
+ * `events`, ...) under `"on": false` (#596, #597) and takes `true` out. On brings that section back
+ * (`share: false` stays unless `share` is given): `agents` and `share` are written only where they
+ * are not the default, and a section left with nothing else in it is `true`. `share` alone changes
+ * threads that are on; off, it leaves the value as it was.
  */
 export function threadsSetting(raw: unknown, change: { mode?: ThreadMode; share?: boolean }): unknown {
   const now = threadsConfig(raw)
   const mode = change.mode ?? threadModeOf(now)
-  if (mode === 'none') return change.mode === undefined ? raw : undefined
-  const section: Record<string, unknown> =
-    now && typeof raw === 'object' && raw !== null ? { ...(raw as Record<string, unknown>) } : {}
+  if (mode === 'none') return change.mode === undefined ? raw : switched(raw, false)
+  const { on: _off, ...section }: Record<string, unknown> =
+    typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
   if (mode === 'mine') section.agents = false
   else delete section.agents
-  const share = change.share ?? now?.share ?? true
+  const share = change.share ?? section.share !== false
   if (share) delete section.share
   else section.share = false
   return Object.keys(section).length ? section : true
+}
+
+/** A `threads` section that keeps verified done's settings while it is off (`"on": false` on it or on threads, #596). */
+export function verifyKeptOff(raw: unknown): boolean {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !('verify' in raw)) return false
+  return switchedOff(raw) || switchedOff((raw as Record<string, unknown>).verify)
+}
+
+/**
+ * config.json's `threads` (on: `true` or an object) once Settings has turned case files or verified
+ * done on or off (#596): `cases` is `true` or absent; `verify` off keeps its settings (`model`,
+ * `lanes`, `brief`, ...) under `"on": false` so that on brings them back, on with none set is
+ * `true` (the defaults). The section's other fields stay; one left with nothing in it is `true`.
+ */
+export function threadsParts(raw: unknown, change: { cases?: boolean; verify?: boolean }): unknown {
+  let next = raw
+  if (change.cases !== undefined) next = withField(next, 'cases', change.cases ? true : undefined)
+  if (change.verify !== undefined) {
+    const section = typeof next === 'object' && next !== null ? (next as Record<string, unknown>) : {}
+    next = withField(next, 'verify', switched(section.verify, change.verify))
+  }
+  return next
+}
+
+const isPlainObj = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+const VERIFY_PATCH_KEYS = ['model', 'profile', 'lanes', 'brief', 'limitMin', 'max'] as const
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: reject control characters in config strings
+const CTRL_CHARS = /[\x00-\x1f\x7f]/
+
+/**
+ * Read `threads.verify` as Settings shows it: `on` plus the explicit values configured in
+ * config.json (null/empty when using defaults so hand-written vs unset stays distinct).
+ */
+export function verifySettingsOf(rawVerify: unknown): { on: boolean; settings: VerifySettingsData } {
+  const on = rawVerify === true || (isPlainObj(rawVerify) && !switchedOff(rawVerify))
+  if (!isPlainObj(rawVerify)) {
+    return {
+      on,
+      settings: { model: null, lanes: [], brief: null, profile: null, limitMin: null, max: null },
+    }
+  }
+  const { on: _off, ...rest } = rawVerify
+  const parsed = verifyConfig(rest)
+  const limit = Number(rest.limitMin)
+  const max = Number(rest.max)
+  return {
+    on,
+    settings: {
+      model: parsed?.model ?? null,
+      lanes: parsed?.lanes ?? [],
+      brief: parsed?.brief ?? null,
+      profile: parsed?.profile ?? null,
+      limitMin:
+        'limitMin' in rest && Number.isFinite(limit) && limit >= 1
+          ? Math.min(Math.round(limit), VERIFY_LIMIT_MIN_MAX)
+          : null,
+      max: 'max' in rest && Number.isFinite(max) && max >= 1 ? Math.min(Math.floor(max), VERIFY_MAX_LIMIT) : null,
+    },
+  }
+}
+
+export type VerifyPatchField = 'setting' | 'model' | 'profile' | 'lanes' | 'brief' | 'limitMin' | 'max'
+
+function cleanMap(
+  raw: Record<string, unknown>,
+  validKey: (k: string) => boolean,
+  maxLen: number,
+): Record<string, string> | null | false {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    const key = k.trim().toLowerCase()
+    if (!validKey(key)) return false
+    if (v === null) continue
+    if (typeof v !== 'string') return false
+    const trimmed = v.trim()
+    if (!trimmed) continue
+    if (trimmed.length > maxLen || CTRL_CHARS.test(trimmed)) return false
+    out[key] = trimmed
+  }
+  return Object.keys(out).length ? out : null
+}
+
+/** Validate and normalize a partial `verifySettings` patch from `POST /api/threads-settings`. */
+export function parseVerifyPatch(
+  raw: unknown,
+): { ok: true; patch: VerifySettingsPatch } | { ok: false; field: VerifyPatchField } {
+  if (!isPlainObj(raw)) return { ok: false, field: 'setting' }
+  const keys = Object.keys(raw)
+  if (!keys.length || keys.some(k => !VERIFY_PATCH_KEYS.includes(k as (typeof VERIFY_PATCH_KEYS)[number])))
+    return { ok: false, field: 'setting' }
+  const patch: VerifySettingsPatch = {}
+  let touched = false
+
+  if (raw.model !== undefined) {
+    touched = true
+    if (raw.model === null) patch.model = null
+    else {
+      const r = readModel(raw.model)
+      if (!r.ok) return { ok: false, field: 'model' }
+      patch.model = r.model
+    }
+  }
+
+  if (raw.profile !== undefined) {
+    touched = true
+    if (raw.profile === null) patch.profile = null
+    else if (typeof raw.profile === 'string') {
+      const trimmed = raw.profile.trim()
+      if (!trimmed) patch.profile = null
+      else if (trimmed.length > 100 || CTRL_CHARS.test(trimmed)) return { ok: false, field: 'profile' }
+      else patch.profile = trimmed
+    } else if (isPlainObj(raw.profile)) {
+      const mapped = cleanMap(raw.profile, k => k === LOCAL || DEVICE_ID.test(k), 100)
+      if (mapped === false) return { ok: false, field: 'profile' }
+      patch.profile = mapped
+    } else return { ok: false, field: 'profile' }
+  }
+
+  if (raw.lanes !== undefined) {
+    touched = true
+    if (raw.lanes === null) patch.lanes = null
+    else if (Array.isArray(raw.lanes)) {
+      const out: string[] = []
+      const seen = new Set<string>()
+      for (const item of raw.lanes) {
+        if (typeof item !== 'string') return { ok: false, field: 'lanes' }
+        const lane = item.trim().toLowerCase()
+        if (!LANE.test(lane)) return { ok: false, field: 'lanes' }
+        if (!seen.has(lane)) {
+          seen.add(lane)
+          out.push(lane)
+        }
+      }
+      patch.lanes = out.length ? out : null
+    } else return { ok: false, field: 'lanes' }
+  }
+
+  if (raw.brief !== undefined) {
+    touched = true
+    if (raw.brief === null) patch.brief = null
+    else if (typeof raw.brief === 'string') {
+      const trimmed = raw.brief.trim()
+      if (!trimmed) patch.brief = null
+      else if (trimmed.length > 1000 || CTRL_CHARS.test(trimmed)) return { ok: false, field: 'brief' }
+      else patch.brief = trimmed
+    } else if (isPlainObj(raw.brief)) {
+      const mapped = cleanMap(raw.brief, k => k === '*' || LANE.test(k), 1000)
+      if (mapped === false) return { ok: false, field: 'brief' }
+      patch.brief = mapped
+    } else return { ok: false, field: 'brief' }
+  }
+
+  if (raw.limitMin !== undefined) {
+    touched = true
+    if (raw.limitMin === null) patch.limitMin = null
+    else if (
+      typeof raw.limitMin === 'number' &&
+      Number.isInteger(raw.limitMin) &&
+      raw.limitMin >= 1 &&
+      raw.limitMin <= VERIFY_LIMIT_MIN_MAX
+    )
+      patch.limitMin = raw.limitMin
+    else return { ok: false, field: 'limitMin' }
+  }
+
+  if (raw.max !== undefined) {
+    touched = true
+    if (raw.max === null) patch.max = null
+    else if (typeof raw.max === 'number' && Number.isInteger(raw.max) && raw.max >= 1 && raw.max <= VERIFY_MAX_LIMIT)
+      patch.max = raw.max
+    else return { ok: false, field: 'max' }
+  }
+
+  return touched ? { ok: true, patch } : { ok: false, field: 'setting' }
+}
+
+/**
+ * Apply a `VerifySettingsPatch` (and optional on/off toggle) to `threads`, preserving unknown keys
+ * in both `threads` and `threads.verify` as well as `#597` off-keeps-values behaviour.
+ */
+export function applyVerifyPatch(rawThreads: unknown, patch: VerifySettingsPatch, toggle?: boolean): unknown {
+  const section = isPlainObj(rawThreads) ? rawThreads : {}
+  const rawVerify = section.verify
+  const wasOn = rawVerify === true || (isPlainObj(rawVerify) && !switchedOff(rawVerify))
+  const nextOn = toggle !== undefined ? toggle : wasOn
+  const { on: _was, ...own }: Record<string, unknown> = isPlainObj(rawVerify) ? { ...rawVerify } : {}
+  for (const key of VERIFY_PATCH_KEYS) {
+    const val = patch[key]
+    if (val === undefined) continue
+    if (val === null || (key === 'lanes' && Array.isArray(val) && val.length === 0)) delete own[key]
+    else own[key] = val
+  }
+  const hasFields = Object.keys(own).length > 0
+  const nextVerify = nextOn ? (hasFields ? own : true) : hasFields ? { ...own, on: false } : undefined
+  return withField(rawThreads, 'verify', nextVerify)
 }
 
 // ------------------------------------------------------------------ limits
@@ -258,6 +647,9 @@ export const EVENT_MAX = 400
 export const EVENT_SPELLED = 3
 /** The brief's block. */
 export const BRIEF_MAX = 600
+/** Acceptance lines (#492): this many on a thread, each one line of this many characters. */
+export const ACCEPT_MAX = 10
+export const ACCEPT_LINE_MAX = 200
 
 // The text goes into a terminal: no control characters (an escape could drive the pane).
 // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it removes
@@ -299,7 +691,7 @@ export const keyOf = (lane: string, n: number): string => `${lane}-${n}`
  */
 export const THREAD_KEY = /^[a-z0-9_-]{1,64}-\d{1,9}(@[a-z0-9_-]{1,40})?$/
 /** The first characters of an id, as Team's refs are: 8 hex. */
-export const ID_REF = /^[0-9a-f]{8}$/
+export const ID_REF = /^[0-9a-f]{8}(-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$/
 /** The number a key ends in. */
 export const keyNumber = (key: string): number => {
   const k = key.replace(/@.*$/, '')
@@ -343,9 +735,11 @@ export function isParty(v: unknown): v is Party {
 export function applyEntry(head: ThreadHead, entry: ThreadEntry): ThreadHead {
   const s = entry.set ?? {}
   const next: ThreadHead = { ...head, updatedAt: Math.max(head.updatedAt, entry.at), rev: Math.max(head.rev, entry.n) }
+  // A done held for a verifier (#492): the entry says so (the service decided it), the fold follows.
+  const holds = s.status === 'done' && s.hold === true
   // A session of this board proposes; the owner closes; a peer's entry (#394) is what its board
   // already decided, sent without the status when it only proposed (work-share.ts wireSet).
-  const proposes = s.status === 'done' && head.status === 'owner' && entry.author.kind === 'session'
+  const proposes = holds || (s.status === 'done' && head.status === 'owner' && entry.author.kind === 'session')
   if (s.title !== undefined) next.title = s.title
   if (s.summary !== undefined && !proposes) next.summary = s.summary
   if (s.lane !== undefined) next.lane = s.lane
@@ -353,7 +747,12 @@ export function applyEntry(head: ThreadHead, entry: ThreadEntry): ThreadHead {
   if (s.parent !== undefined) next.parent = s.parent
   if (s.status !== undefined) {
     if (proposes) {
-      next.proposed = { by: entry.author, at: entry.at, why: s.summary ?? oneLine(entry.text, SUMMARY_MAX) }
+      next.proposed = {
+        by: entry.author,
+        at: entry.at,
+        why: s.summary ?? oneLine(entry.text, SUMMARY_MAX),
+        ...(holds && { verify: true as const }),
+      }
     } else {
       next.status = s.status
       next.proposed = null
@@ -363,9 +762,46 @@ export function applyEntry(head: ThreadHead, entry: ThreadEntry): ThreadHead {
     }
   }
   if (s.waitingOn !== undefined && (next.status === 'waiting' || next.status === 'owner')) next.waitingOn = s.waitingOn
+  // Case files (#488): the reference as given (null clears it), the state with its time and author.
+  if (s.ref !== undefined) {
+    if (s.ref) next.ref = s.ref
+    else delete next.ref
+  }
+  if (s.state !== undefined) next.state = { text: s.state, at: entry.at, by: entry.author }
+  const verify = foldVerify(head, next, s)
+  if (verify) next.verify = verify
   return next
 }
 
+/**
+ * The verification after an entry (#492), or undefined for a thread that never had one: on or off,
+ * an acceptance line, a verifier started, a verdict (the run ends; a fail that leaves the thread
+ * with its worker counts, anything that reaches the owner or passes starts the count again). A held
+ * done that went without a verdict (the owner confirmed it or kept it open, the worker went on)
+ * ends the run too: its verifier's word no longer counts.
+ */
+function foldVerify(head: ThreadHead, next: ThreadHead, s: EntrySet): VerifyHead | undefined {
+  const touched =
+    s.verify !== undefined || s.accept !== undefined || s.verifier !== undefined || s.verdict !== undefined
+  if (!head.verify && !touched) return undefined
+  const v: VerifyHead = head.verify
+    ? { ...head.verify, accept: [...head.verify.accept] }
+    : { on: false, accept: [], run: null, fails: 0, last: null }
+  if (s.verify !== undefined) {
+    v.on = s.verify
+    if (!s.verify) delete v.lane
+    else if (s.verifyLane) v.lane = true
+  }
+  if (s.accept !== undefined && s.accept && v.accept.length < ACCEPT_MAX) v.accept.push(s.accept)
+  // A verifier counts only for a done that is held: one started as the done went (confirmed, taken back) runs for nothing.
+  if (s.verifier !== undefined) v.run = s.verifier && next.proposed?.verify ? s.verifier : null
+  if (s.verdict !== undefined) {
+    v.run = null
+    v.last = s.verdict
+    v.fails = s.verdict === 'fail' && next.status !== 'owner' ? v.fails + 1 : 0
+  } else if (head.proposed?.verify && !next.proposed?.verify && s.verifier === undefined) v.run = null
+  return v
+}
 /** What a parent's system entry says when its last open sub-thread closed. */
 export const closedText = (n: number): string => (n === 1 ? 'its sub-thread closed' : `all ${n} sub-threads closed`)
 
@@ -389,7 +825,9 @@ const STATUS_WORD: Record<ThreadStatus, string> = {
 
 /** One line per thread, as `list` prints it: key, status, assignee, title, summary. */
 export function listLine(h: ThreadHead): string {
-  const status = h.proposed ? `${h.status}, proposed done` : h.status
+  const status = h.proposed
+    ? `${h.status}, ${h.proposed.verify ? 'done proposed (verifying)' : 'proposed done'}`
+    : h.status
   return [h.key, status, h.assignee && partyName(h.assignee), h.title, h.waitingOn || h.summary]
     .filter(Boolean)
     .join(' · ')
@@ -397,9 +835,10 @@ export function listLine(h: ThreadHead): string {
 
 /** What a write prints: `ok · atlas-13 · done · 1 file`. */
 export function writeLine(h: ThreadHead, extra: string[] = []): string {
-  return ['ok', h.key, h.status, ...(h.proposed ? ['proposed done, the owner confirms'] : []), ...extra]
-    .filter(Boolean)
-    .join(' · ')
+  const proposed = h.proposed
+    ? [h.proposed.verify ? 'done held: a verifier checks it' : 'proposed done, the owner confirms']
+    : []
+  return ['ok', h.key, h.status, ...proposed, ...extra].filter(Boolean).join(' · ')
 }
 
 const two = (n: number): string => String(n).padStart(2, '0')
@@ -426,11 +865,11 @@ export const PEER_NOTE = "shared: a teammate's entries (name@board) are quoted w
 /** Controls, line separators and bidi controls, as core/team.ts counts them unprintable (the page imports this file: no node: here). */
 const UNPRINTABLE = /[\p{Cc}\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu
 /** `s` for a terminal: what is not printable written as \u{hex}. */
-const printable = (s: string): string =>
+export const printable = (s: string): string =>
   s.replace(UNPRINTABLE, c => (c === '\n' ? c : `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`))
 
 /** A teammate's words as `show` prints them (#394): quoted, nothing in them able to move the cursor or reorder the text. */
-const quotedPeer = (text: string): string => `| ${printable(text).replace(/\n/g, '\n| ')}`
+export const quotedPeer = (text: string): string => `| ${printable(text).replace(/\n/g, '\n| ')}`
 
 /** An entry in words: its author, what it set, its text, files and links. `keyOfId` names a parent. */
 export function entryWords(
@@ -444,7 +883,12 @@ export function entryWords(
   const parts: string[] = []
   if (e.type === 'system' && e.closed) parts.push(closedText(e.closed))
   else if (e.type === 'system' && s.title !== undefined && e.n === 1) parts.push(`created: ${s.status ?? 'next'}`)
+  else if (s.verdict) parts.push(`verdict ${s.verdict}${s.status ? ` → ${s.status}` : ''}`)
+  else if (s.status && s.hold) parts.push(`→ ${s.status} (held for verification)`)
   else if (s.status) parts.push(`→ ${s.status}`)
+  if (s.verify !== undefined) parts.push(`verify ${s.verify ? 'on' : 'off'}`)
+  if (s.accept) parts.push(`accept: ${s.accept}`)
+  if (s.verifier) parts.push(`starting verifier ${s.verifier.name}`)
   const peer = e.author.kind === 'peer'
   const said = (t: string): string => (peer ? quotedPeer(t) : t)
   if (e.type === 'ask') parts.push(`asks the owner: ${said(e.text)}`)
@@ -455,6 +899,8 @@ export function entryWords(
   if (s.assignee !== undefined) parts.push(s.assignee ? `to ${partyName(s.assignee)}` : 'no assignee')
   if (s.parent !== undefined) parts.push(s.parent ? `in ${keyOfId(s.parent)}` : 'no parent')
   if (s.lane !== undefined && !(e.type === 'system' && e.n === 1)) parts.push(`lane ${s.lane}`)
+  if (s.ref !== undefined) parts.push(s.ref ? `ref ${s.ref}` : 'no ref')
+  if (s.state !== undefined) parts.push(`state: ${s.state}`)
   // A system entry's own words (an imported item's whole text, #393); a closed parent's are said above.
   if (e.text && e.type !== 'ask' && e.type !== 'answer' && !(e.type === 'system' && e.closed)) parts.push(said(e.text))
   for (const f of e.files ?? []) parts.push(`file ${f.name} (${sizeText(f.size)}) ${fileAt(f)}`)
@@ -484,6 +930,37 @@ export interface ShowOptions {
   full?: boolean
   /** The thread is shared (#394): a line says a peer's entries are quoted data. */
   shared?: boolean
+  /** Case files (#488, core/work-cases.ts caseHeadLines): the reference, the state and the sessions, after the head. */
+  caseLines?: readonly string[]
+  /** Held dones waiting for a verifier ahead of this one, and the verifiers running (#492). */
+  verifiers?: number
+}
+
+/** What the head says of a held done (#492): who, why, and whether its verifier runs or waits. */
+function heldWords(h: ThreadHead, o: Pick<ShowOptions, 'now' | 'verifiers'>): string {
+  const p = h.proposed
+  if (!p) return ''
+  const run = h.verify?.run
+  const state = run
+    ? `verification running (${run.name} until ${whenText(run.until, o.now)})`
+    : `waiting for a verifier${o.verifiers ? ` (${o.verifiers} running)` : ''}`
+  return `done proposed by ${partyName(p.by)}, ${state}: ${p.why}`
+}
+
+/** The head's lines of verification (#492): on or off and the acceptance lines; none for a thread that never had it. */
+export function verifyLines(h: ThreadHead): string[] {
+  const v = h.verify
+  if (!v || (!v.on && !v.accept.length && !v.last)) return []
+  const n = v.accept.length
+  const head = [
+    `verify ${v.on ? 'on' : 'off'}`,
+    n && `${n} acceptance ${n === 1 ? 'line' : 'lines'}`,
+    v.last && `last verdict ${v.last}`,
+    v.fails && `${v.fails} failed in a row`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return [head, ...v.accept.map(a => `accept: ${a}`)]
 }
 
 /**
@@ -498,13 +975,16 @@ export function showText(h: ThreadHead, entries: readonly ThreadEntry[], o: Show
       `lane ${h.lane}`,
       o.parentKey && `in ${o.parentKey}`,
       o.children && o.children.all > 0 && `${o.children.done} of ${o.children.all} sub-threads done`,
-      h.proposed && `proposed done by ${partyName(h.proposed.by)}: ${h.proposed.why}`,
+      h.proposed &&
+        (h.proposed.verify ? heldWords(h, o) : `proposed done by ${partyName(h.proposed.by)}: ${h.proposed.why}`),
       `by ${partyName(h.createdBy)} ${whenText(h.createdAt, o.now)}`,
       o.link,
     ]
       .filter(Boolean)
       .join(' · '),
+    ...verifyLines(h),
     ...(o.shared ? [PEER_NOTE] : []),
+    ...(o.caseLines ?? []),
   ]
   const words = { ...(o.keyOfId && { keyOfId: o.keyOfId }), ...(o.fileAt && { fileAt: o.fileAt }) }
   const lines = entries.map(e => `#${e.n} ${whenText(e.at, o.now)} ${entryWords(e, words)}`)
@@ -539,6 +1019,14 @@ export interface DigestItem {
   entries: number
   /** Everything in it was written on this board: its words may be typed in. */
   local: boolean
+  /** A verification failed and the worker hears it (#492): the verifier's line. */
+  failed?: string
+  /** A verifier passed it among the entries heard (#492): its done is a verified one. */
+  verified?: boolean
+  /** The owner kept the held done of the session that hears it open (#492): it is back with it. */
+  kept?: boolean
+  /** An owner post on the thread (#693): the owner's note, shown when no status summary says it. */
+  ownerNote?: string
 }
 
 function clause(d: DigestItem, detailMax: number): { text: string; detail: string } {
@@ -546,28 +1034,40 @@ function clause(d: DigestItem, detailMax: number): { text: string; detail: strin
   const detail = (s: string): string => (d.local && s ? clip(s, Math.max(8, detailMax)) : '')
   if (d.status) {
     if (h.proposed && h.status === 'owner') return { text: `${h.key} proposed done`, detail: detail(h.proposed.why) }
+    if (h.status === 'done' && d.verified) return { text: `${h.key} done (verified)`, detail: detail(h.summary) }
     if (d.closed && h.status !== 'done' && h.status !== 'dropped')
       return { text: `${h.key}: ${closedText(d.closed)}`, detail: '' }
     const word = STATUS_WORD[h.status]
-    const said = h.status === 'waiting' || h.status === 'owner' ? h.waitingOn : h.summary
+    const said = d.ownerNote || (h.status === 'waiting' || h.status === 'owner' ? h.waitingOn : h.summary) || ''
     return { text: `${h.key} ${word}`, detail: detail(said) }
   }
+  if (d.failed !== undefined)
+    return { text: `${h.key} verification failed`, detail: detail(`${d.failed}. Reasons: board thread show ${h.key}`) }
+  if (d.kept) return { text: `${h.key} kept open by the owner: your done is back with you`, detail: '' }
   if (d.ask !== undefined) return { text: `${h.key} asks the owner`, detail: detail(d.ask) }
+  if (d.ownerNote !== undefined) return { text: `${h.key} (owner)`, detail: detail(d.ownerNote) }
   return { text: `${h.key} +${d.entries}`, detail: '' }
 }
 
 /**
  * The event's line (6.5): at most EVENT_SPELLED threads spelled out (status changes first, in the
- * order they came), then "and N more", then where to read more; EVENT_MAX characters at most, the
- * details cut evenly to fit. A peer's words never go in: only a local entry's summary does.
+ * order they came), then "and N more", then where to read more; EVENT_MAX characters at most (or
+ * MAX_TEXT when an owner post note is included, #693), the details cut evenly to fit. A peer's
+ * words never go in: only a local entry's summary or owner post does.
  */
 export function digestLine(items: readonly DigestItem[]): string {
-  const ordered = [...items.filter(d => d.status), ...items.filter(d => !d.status && d.ask !== undefined)].concat(
-    items.filter(d => !d.status && d.ask === undefined),
+  const told = (d: DigestItem): boolean =>
+    d.ask !== undefined || d.failed !== undefined || !!d.kept || d.ownerNote !== undefined
+  const ordered = [...items.filter(d => d.status), ...items.filter(d => !d.status && told(d))].concat(
+    items.filter(d => !d.status && !told(d)),
   )
   const shown = ordered.slice(0, EVENT_SPELLED)
   const more = ordered.length - shown.length
   const tail = `${more > 0 ? ` · and ${more} more` : ''}. More: board thread changes`
+  const hasOwnerNote = items.some(d => d.ownerNote !== undefined)
+  const lineMax = hasOwnerNote ? MAX_TEXT : EVENT_MAX
+  const startDetail = hasOwnerNote ? MAX_TEXT : SUMMARY_MAX
+  const step = hasOwnerNote ? 64 : 4
   const build = (max: number): string =>
     shown
       .map(d => {
@@ -575,9 +1075,9 @@ export function digestLine(items: readonly DigestItem[]): string {
         return c.detail ? `${c.text}: ${c.detail}` : c.text
       })
       .join(' · ') + tail
-  let line = build(SUMMARY_MAX)
-  for (let max = SUMMARY_MAX; line.length > EVENT_MAX && max > 8; max -= 4) line = build(max)
-  return clip(line, EVENT_MAX)
+  let line = build(startDetail)
+  for (let max = startDetail; line.length > lineMax && max > 8; max -= step) line = build(max)
+  return clip(line, lineMax)
 }
 
 /** The tag a thread event is typed with, from the scheduler's `from`: `[board reminder from threads]`. */
@@ -609,6 +1109,8 @@ export interface ThreadView {
   earlier: number
   /** The open question for the owner, by entry id. */
   ask: string | null
+  /** Case files (#488), only while they are on: the sessions of the thread and where they are now. */
+  case?: { sessions: CaseSessionView[] }
 }
 
 /** The page's own word for a thread in a text: a known key, as a link (8). */
@@ -616,10 +1118,15 @@ export const KEY_IN_TEXT = /(?<![\w/#.-])([a-z0-9_]+(?:-[a-z0-9_]+)*-\d{1,9})(?!
 
 // ------------------------------------------------------------------ the brief
 
+/** Case files (#488): one line after the block, inside BRIEF_MAX with it; the rest is in the skill. */
+export const CASES_BRIEF =
+  '  A case you hold: post --state "<where it stands, what next>" before you stop; board thread brief <key> reads one.'
+
 /** The brief's block while threads are on and agents take part (5.2): at most BRIEF_MAX characters. */
-export function threadsBrief(): string {
+export function threadsBrief(cfg?: Pick<ThreadsConfig, 'cases'> | null): string {
   return [
     '- board thread: work handed to you as a thread (a key like atlas-12) is reported in that thread, not in a message to whoever handed it out; they hear one line.',
     '  board thread post <key> [--status doing|waiting|done] [--summary "<one line>"] [--file <report>] ["<note>"]: progress and results, a long report as --file. board thread ask <key> "<question>": it needs the owner. board thread --help for the rest; the agent-board-threads skill for handing work out by thread.',
+    ...(cfg?.cases ? [CASES_BRIEF] : []),
   ].join('\n')
 }

@@ -5,7 +5,7 @@
 // owner's (Claude Code 2.1.308), moved to the test's time.
 import { expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { isSessionDetail, type SessionDetail } from '../../web/src/api/client.ts'
 import { serveBoard } from '../support/board-server.ts'
 import { type Sandbox, sandbox, until } from '../support/sandbox.ts'
@@ -80,6 +80,11 @@ async function detail(url: string): Promise<SessionDetail> {
 }
 
 async function post(url: string, files: string[]): Promise<unknown> {
+  // the board takes only files in its uploads (#401): there, as the page's upload leaves them
+  for (const file of files) {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, '')
+  }
   const res = await fetch(`${url}/api/session/s1/message`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-board': '1' },

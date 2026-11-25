@@ -14,9 +14,12 @@ import { FileChips } from './components/files/FileChip.tsx'
 import { QuickLook } from './components/files/QuickLook.tsx'
 import { ForkPop } from './components/fork/ForkPop.tsx'
 import { HelpersWindow } from './components/helpers/HelpersWindow.tsx'
+import { AwayStrip } from './components/journal/AwayStrip.tsx'
 import { closeLimits, LimitsPop } from './components/LimitsPop.tsx'
 import { LaunchDialog } from './components/launch/LaunchDialog.tsx'
 import { ContextMenu } from './components/menu/ContextMenu.tsx'
+import { NavRail, RAIL_STORAGE_KEY, type RailPlace } from './components/NavRail.tsx'
+import type { PanelBack } from './components/panel/Panel.tsx'
 import { usePhonesPanel } from './components/phones/PhonesPanel.tsx'
 import { SheetQuestion } from './components/questions/SheetQuestion.tsx'
 import { RenameField } from './components/RenameField.tsx'
@@ -31,11 +34,13 @@ import { Terminal } from './components/terminal/Terminal.tsx'
 import { useArchive } from './hooks/useArchive.ts'
 import { useBoardKeys } from './hooks/useBoardKeys.ts'
 import { useContextMenus } from './hooks/useContextMenus.ts'
+import { useDecisions } from './hooks/useDecisions.ts'
 import { useDialogHistory } from './hooks/useDialogHistory.ts'
 import { useFileChips } from './hooks/useFileChips.ts'
 import { useFileLinks } from './hooks/useFileLinks.ts'
 import { useFork } from './hooks/useFork.ts'
 import { useHelpers } from './hooks/useHelpers.ts'
+import { useJournal } from './hooks/useJournal.ts'
 import { useLaunch } from './hooks/useLaunch.ts'
 import { laneContext, useNewSession } from './hooks/useNewSession.ts'
 import { useNextAttention } from './hooks/useNextAttention.ts'
@@ -56,17 +61,65 @@ import { useThreadLinks } from './hooks/useThreadLinks.ts'
 import { linkThreadsSheet, useThreadsContext } from './hooks/useThreads.tsx'
 import { useTodos } from './hooks/useTodos.ts'
 import { useToolbarMenu } from './hooks/useToolbarMore.ts'
+import { useT } from './i18n/I18nProvider.tsx'
+import { linkDecisionsSheet } from './models/decisions.ts'
 import { pageLayers } from './models/lifecycle.ts'
-import { keptAuth, remotePage } from './models/remote-page.ts'
+import { adminHere, keptAuth, remotePage } from './models/remote-page.ts'
 import { offersServer } from './models/server-state.ts'
-import { offersBackup, offersSecrets, offersTimeSettings } from './models/settings-menu.ts'
-import { offersTeam } from './models/team.ts'
+import {
+  offersAccess,
+  offersBackup,
+  offersSecrets,
+  offersTimeSettings,
+  offersWakeSettings,
+} from './models/settings-menu.ts'
+import { offersTeam, teamBadge } from './models/team.ts'
+import { proposedCount } from './models/todos.ts'
+import { scheduleBadge } from './models/toolbar.ts'
+import { isWakeView, noteShown } from './models/wake.ts'
 import { useBoardContext } from './state/BoardProvider.tsx'
+import { storage } from './state/storage.ts'
+
+type SettingsChild =
+  | 'profiles'
+  | 'wake'
+  | 'phones'
+  | 'mokupilot'
+  | 'access'
+  | 'secrets'
+  | 'backup'
+  | 'updates'
+  | 'housekeeping'
+  | 'timeSettings'
+  | 'calendarSettings'
+  | 'localPaths'
+  | 'team'
+  | 'devices'
+  | 'server'
 
 export function App() {
+  const t = useT()
   const limitsAnchor = useRef<HTMLButtonElement>(null)
-  const { ui, dispatch, data, calOpen, teamOpen } = useBoardContext()
+  const { ui, dispatch, data, calOpen, teamOpen, now } = useBoardContext()
   const panels = usePanelLayout()
+  // Collapsible left rail (#651): persisted expanded/collapsed on desktop, drawer state on phone.
+  const [railExpanded, setRailExpanded] = useState(() => storage.get(RAIL_STORAGE_KEY, '') === '1')
+  const toggleRailExpanded = () => {
+    setRailExpanded(was => {
+      const next = !was
+      storage.set(RAIL_STORAGE_KEY, next ? '1' : '0')
+      return next
+    })
+  }
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  // Structured Settings panel (#651) and inner Settings navigation (#679).
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsChild, setSettingsChildState] = useState<SettingsChild | null>(null)
+  const settingsChildRef = useRef<SettingsChild | null>(null)
+  const setSettingsChild = (next: SettingsChild | null) => {
+    settingsChildRef.current = next
+    setSettingsChildState(next)
+  }
   // The categories and schedule panels, each opened at a lane or a session when asked.
   const [categories, setCategories] = useState(false)
   const [lane, setLane] = useState<{ id: string } | null>(null)
@@ -118,6 +171,20 @@ export function App() {
     setBackup(true)
     setBackupMounted(true)
   }
+  // Settings → Updates… (#617), on the local board only: mounted at its first opening, as Backup.
+  const [updates, setUpdates] = useState(false)
+  const [updatesMounted, setUpdatesMounted] = useState(false)
+  const openUpdates = () => {
+    setUpdates(true)
+    setUpdatesMounted(true)
+  }
+  // Settings → Housekeeping… (#652), on the local board only: mounted at its first opening.
+  const [housekeeping, setHousekeeping] = useState(false)
+  const [housekeepingMounted, setHousekeepingMounted] = useState(false)
+  const openHousekeeping = () => {
+    setHousekeeping(true)
+    setHousekeepingMounted(true)
+  }
   // Settings → Time tracking… (#237), where Backup… is: mounted at its first opening, as Backup.
   const [timeSettings, setTimeSettings] = useState(false)
   const [timeSettingsMounted, setTimeSettingsMounted] = useState(false)
@@ -148,12 +215,26 @@ export function App() {
   // Time (#233), while the board has it on: its panel, out of the toolbar's button or a lane's day total.
   const [timeOpen, setTimeOpen] = useState(false)
   const [timeClient, setTimeClient] = useState<string | null>(null)
+  // Token spend (#636): mounted at its first opening, so setups that never open it pay zero cost.
+  const [spendOpen, setSpendOpen] = useState(false)
+  const [spendMounted, setSpendMounted] = useState(false)
+  const toggleSpend = () => {
+    setSpendMounted(true)
+    setSpendOpen(was => !was)
+  }
   // Settings → Team… (#231), local page with the payload's teamRev: mounted at its first opening.
   const [team, setTeam] = useState(false)
   const [teamMounted, setTeamMounted] = useState(false)
   const openTeam = () => {
     setTeam(true)
     setTeamMounted(true)
+  }
+  // Settings → Devices… (#510), the local page (Add a server alone without `nodes`, #509): mounted at its first opening.
+  const [devices, setDevices] = useState(false)
+  const [devicesMounted, setDevicesMounted] = useState(false)
+  const openDevices = () => {
+    setDevices(true)
+    setDevicesMounted(true)
   }
   // A team notification's click (#355): the panel opens on that thread.
   const [teamFocus, setTeamFocus] = useState<string | null>(null)
@@ -173,6 +254,13 @@ export function App() {
   useEffect(() => {
     if (threadsOn) linkThreadsSheet()
   }, [threadsOn])
+  // Decisions (#487), while the payload carries them: the panel out of the toolbar's pill, and their sheet.
+  const [decisionsOpen, setDecisionsOpen] = useState(false)
+  const decisionsOn = !!data?.decisions
+  const decisions = useDecisions()
+  useEffect(() => {
+    if (decisionsOn) linkDecisionsSheet()
+  }, [decisionsOn])
   // Settings → Paths on this computer…, on the board seen from another device only: mounted at its
   // first opening, as Remote access.
   const [localPaths, setLocalPaths] = useState(false)
@@ -204,6 +292,8 @@ export function App() {
   })
   const newSession = useNewSession(launch.open)
   const openNextAttention = useNextAttention()
+  // The away journal's strip (#489), while the payload has `journal`.
+  const journal = useJournal()
   // Paths in the chat become chips; a chip, the sheet's Changes and History open the quick look.
   const chips = useFileChips()
   const quickLook = useQuickLook(chips.upgrade)
@@ -247,6 +337,9 @@ export function App() {
     openLocalPaths,
     openCalendarSettings,
     openTeam,
+    openDevices,
+    openUpdates,
+    openHousekeeping,
     openServer,
   )
   // Tasks' 📌 menu under an agent's message, and the panel's buttons.
@@ -257,6 +350,65 @@ export function App() {
   const more = useToolbarMenu(menus.menu)
   const terminalKeys = useTerminalKeys(menus)
   useOmarchyTheme(data?.omarchy)
+  const closeSettingsChild = (child: SettingsChild) => {
+    switch (child) {
+      case 'profiles':
+        return setProfiles(false)
+      case 'wake':
+        return setWake(false)
+      case 'phones':
+        return setPhones(false)
+      case 'mokupilot':
+        return setMokupilot(false)
+      case 'access':
+        return setAccess(false)
+      case 'secrets':
+        return setSecrets(false)
+      case 'backup':
+        return setBackup(false)
+      case 'updates':
+        return setUpdates(false)
+      case 'housekeeping':
+        return setHousekeeping(false)
+      case 'timeSettings':
+        return setTimeSettings(false)
+      case 'calendarSettings':
+        return setCalendarSettings(false)
+      case 'localPaths':
+        return setLocalPaths(false)
+      case 'team':
+        return setTeam(false)
+      case 'devices':
+        return setDevices(false)
+      case 'server':
+        return setServer(false)
+    }
+  }
+  const openFromSettings = (child: SettingsChild, open: () => void) => {
+    setSettingsChild(child)
+    open()
+  }
+  const closeChild = (child: SettingsChild, close: () => void) => {
+    if (settingsChildRef.current === child) setSettingsChild(null)
+    close()
+  }
+  const backToSettings = (): boolean => {
+    const child = settingsChildRef.current
+    if (!child) return false
+    setSettingsChild(null)
+    closeSettingsChild(child)
+    setSettingsOpen(true)
+    return true
+  }
+  const settingsBack = (child: SettingsChild): PanelBack | undefined =>
+    settingsChild === child
+      ? { label: t('set.title'), ariaLabel: t('set.back'), onBack: () => void backToSettings() }
+      : undefined
+  const toggleSettings = () => {
+    if (settingsChildRef.current) backToSettings()
+    else setSettingsOpen(was => !was)
+  }
+
   useBoardKeys({
     openNextAttention,
     newSession,
@@ -264,16 +416,20 @@ export function App() {
     layerOpen: () => menus.menu.isOpen() || launch.isOpen() || terminal.isOpen() || helpers.isOpen() || fork.isOpen(),
     quickLookOpen: quickLook.isOpen,
     panelOpen: () => !!panels.place.openPanel(),
-    closePanel: panels.closeOpen,
+    closePanel: () => {
+      if (!backToSettings()) panels.closeOpen()
+    },
     rename: rename.start,
     sessionPanelOpen: () => !!panels.place.openPanel(),
     pickOption: questions.pickOption,
     openTerminal: terminal.openTerminal,
     archive,
+    openSettings: toggleSettings,
     terminal: terminalKeys,
   })
   // Layers above the board, topmost first (models/lifecycle.ts PAGE_LAYERS): Back on a phone
-  // closes them one at a time (the quick look and the helpers window a step at a time).
+  // closes them one at a time (the quick look and the helpers window a step at a time), and on
+  // any viewport steps back from an inner Settings page to the Settings list (#679).
   useDialogHistory(
     pageLayers({
       menu: { open: menus.open, close: () => menus.menu.close() },
@@ -283,8 +439,14 @@ export function App() {
       helpers: { open: helpers.open, close: helpers.back },
       limits: { open: ui.limitsOpen, close: () => closeLimits(dispatch, limitsAnchor, true) },
       setup: { open: setup.open, close: () => setup.close(true) },
-      panels: { open: panels.open, close: panels.closeOpen },
+      panels: {
+        open: panels.open,
+        close: () => {
+          if (!backToSettings()) panels.closeOpen()
+        },
+      },
     }),
+    { always: settingsChild !== null, isAlways: () => settingsChildRef.current !== null },
   )
   // A card kept in sight while the board makes room for a panel stays below the toolbar.
   useEffect(() => {
@@ -298,8 +460,72 @@ export function App() {
     const heads = () => document.getElementById('columns-head')?.offsetHeight ?? 0
     return panels.place.underHeader(toolbar, () => toolbar.offsetHeight - heads())
   }, [panels.place])
+
+  // Wake's alert where its switches are: this computer's page, owner-admin (#694), the board's own server.
+  const wakeDown = offersWakeSettings(!adminHere(), data) && isWakeView(data?.wake) && noteShown(data.wake, now)
+  const systemAlert = setup.shown || !!data?.backup?.problem || wakeDown
+  const sched = scheduleBadge(data?.schedules ?? [], now)
+  const railAlert =
+    systemAlert ||
+    sched.due ||
+    (data?.decisions ? data.decisions.items.length + data.decisions.defaulted.length > 0 : false) ||
+    (data?.threads ? data.threads.needsOwner > 0 : false) ||
+    (offersTeam(data) ? teamBadge(data).count > 0 : false) ||
+    (data?.todos ? proposedCount(data.items) > 0 : false) ||
+    (data?.calendar ? data.calendar.failing > 0 : false)
+
+  const activePlace: RailPlace =
+    settingsOpen || settingsChild !== null
+      ? 'settings'
+      : decisionsOpen
+        ? 'decisions'
+        : threads?.shown
+          ? 'threads'
+          : team
+            ? 'team'
+            : todosOpen
+              ? 'todos'
+              : calendarOpen
+                ? 'calendar'
+                : schedule
+                  ? 'schedule'
+                  : timeOpen
+                    ? 'time'
+                    : spendOpen
+                      ? 'spend'
+                      : categories
+                        ? 'categories'
+                        : archive.panel.open
+                          ? 'archive'
+                          : 'board'
+
   return (
     <>
+      <NavRail
+        expanded={railExpanded}
+        onToggleExpand={toggleRailExpanded}
+        drawerOpen={drawerOpen}
+        onCloseDrawer={() => setDrawerOpen(false)}
+        activePlace={activePlace}
+        onBoard={() => panels.closeOpen()}
+        {...(decisionsOn && { onDecisions: () => setDecisionsOpen(was => !was) })}
+        {...(threads && { onThreads: () => threads.setShown(!threads.shown) })}
+        {...(offersTeam(data) && { onTeam: () => (team ? setTeam(false) : openTeam()) })}
+        {...(data?.todos && { onTodos: () => setTodosOpen(was => !was) })}
+        {...(data?.calendar && { onCalendar: () => setCalendarOpen(was => !was) })}
+        onSchedule={() => (schedule ? setSchedule(false) : openSchedule())}
+        {...(data?.time && {
+          onTime: () => {
+            setTimeClient(null)
+            setTimeOpen(was => !was)
+          },
+        })}
+        onSpend={toggleSpend}
+        onCategories={() => (categories ? setCategories(false) : openCategories())}
+        onArchive={archive.togglePanel}
+        onSettings={toggleSettings}
+        systemAlert={systemAlert}
+      />
       <div className="page">
         <Toolbar
           limitsAnchor={limitsAnchor}
@@ -313,8 +539,9 @@ export function App() {
           picks={picks}
           more={more}
           onTodos={() => setTodosOpen(!todosOpen)}
-          onBackup={offersBackup(remotePage(), data) ? openBackup : undefined}
           {...(threads && { onThreads: () => threads.setShown(!threads.shown) })}
+          {...(decisionsOn && { onDecisions: () => setDecisionsOpen(!decisionsOpen) })}
+          onBackup={offersBackup(!adminHere(), data) ? openBackup : undefined}
           onTime={() => {
             setTimeClient(null)
             setTimeOpen(!timeOpen)
@@ -322,7 +549,13 @@ export function App() {
           onCalendar={() => setCalendarOpen(!calendarOpen)}
           {...(offersTeam(data) && { onTeam: () => (team ? setTeam(false) : openTeam()) })}
           {...(serverOn && { onServer: () => (server ? setServer(false) : openServer()) })}
+          {...(journal.button && {
+            journal: { label: journal.button, open: !!journal.shown, onToggle: journal.toggle },
+          })}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          railAlert={railAlert}
         />
+        <AwayStrip journal={journal} />
         <Board
           onNewSession={newSession}
           onLaneHead={openCategories}
@@ -339,22 +572,88 @@ export function App() {
       <SidePanels
         categories={{ open: categories, focus: lane, onClose: () => setCategories(false), onOpen: openCategories }}
         schedule={{ open: schedule, focus: session, onClose: () => setSchedule(false), schedule: reminders }}
-        profiles={{ open: profiles, onClose: () => setProfiles(false) }}
-        wake={{ open: wake, onClose: () => setWake(false) }}
-        phones={{ open: phones, onClose: () => setPhones(false) }}
-        {...(mokupilotMounted ? { mokupilot: { open: mokupilot, onClose: () => setMokupilot(false) } } : {})}
-        {...(accessMounted && !remotePage() ? { access: { open: access, onClose: () => setAccess(false) } } : {})}
+        profiles={{
+          open: profiles,
+          onClose: () => closeChild('profiles', () => setProfiles(false)),
+          back: settingsBack('profiles'),
+        }}
+        wake={{ open: wake, onClose: () => closeChild('wake', () => setWake(false)), back: settingsBack('wake') }}
+        phones={{
+          open: phones,
+          onClose: () => closeChild('phones', () => setPhones(false)),
+          back: settingsBack('phones'),
+        }}
+        {...(mokupilotMounted
+          ? {
+              mokupilot: {
+                open: mokupilot,
+                onClose: () => closeChild('mokupilot', () => setMokupilot(false)),
+                back: settingsBack('mokupilot'),
+              },
+            }
+          : {})}
+        {...(accessMounted && offersAccess(!adminHere(), data)
+          ? {
+              access: {
+                open: access,
+                onClose: () => closeChild('access', () => setAccess(false)),
+                back: settingsBack('access'),
+              },
+            }
+          : {})}
         {...(secretsMounted && offersSecrets(remotePage(), data)
-          ? { secrets: { open: secrets, onClose: () => setSecrets(false) } }
+          ? {
+              secrets: {
+                open: secrets,
+                onClose: () => closeChild('secrets', () => setSecrets(false)),
+                back: settingsBack('secrets'),
+              },
+            }
           : {})}
-        {...(backupMounted && offersBackup(remotePage(), data)
-          ? { backup: { open: backup, onClose: () => setBackup(false) } }
+        {...(backupMounted && offersBackup(!adminHere(), data)
+          ? {
+              backup: {
+                open: backup,
+                onClose: () => closeChild('backup', () => setBackup(false)),
+                back: settingsBack('backup'),
+              },
+            }
           : {})}
-        {...(timeSettingsMounted && offersTimeSettings(remotePage(), data)
-          ? { timeSettings: { open: timeSettings, onClose: () => setTimeSettings(false) } }
+        {...(updatesMounted && adminHere()
+          ? {
+              updates: {
+                open: updates,
+                onClose: () => closeChild('updates', () => setUpdates(false)),
+                back: settingsBack('updates'),
+              },
+            }
           : {})}
-        {...(calendarSettingsMounted && !remotePage()
-          ? { calendarSettings: { open: calendarSettings, onClose: () => setCalendarSettings(false) } }
+        {...(housekeepingMounted && adminHere()
+          ? {
+              housekeeping: {
+                open: housekeeping,
+                onClose: () => closeChild('housekeeping', () => setHousekeeping(false)),
+                back: settingsBack('housekeeping'),
+              },
+            }
+          : {})}
+        {...(timeSettingsMounted && offersTimeSettings(!adminHere(), data)
+          ? {
+              timeSettings: {
+                open: timeSettings,
+                onClose: () => closeChild('timeSettings', () => setTimeSettings(false)),
+                back: settingsBack('timeSettings'),
+              },
+            }
+          : {})}
+        {...(calendarSettingsMounted && adminHere()
+          ? {
+              calendarSettings: {
+                open: calendarSettings,
+                onClose: () => closeChild('calendarSettings', () => setCalendarSettings(false)),
+                back: settingsBack('calendarSettings'),
+              },
+            }
           : {})}
         calendar={{
           open: calendarOpen,
@@ -364,28 +663,74 @@ export function App() {
             setCalendarOpen(false)
             setCalendarFocus(null)
           },
-          onSettings: remotePage() ? undefined : openCalendarSettings,
+          onSettings: adminHere() ? openCalendarSettings : undefined,
         }}
         {...(localPathsMounted && remotePage()
-          ? { localPaths: { open: localPaths, onClose: () => setLocalPaths(false) } }
+          ? {
+              localPaths: {
+                open: localPaths,
+                onClose: () => closeChild('localPaths', () => setLocalPaths(false)),
+                back: settingsBack('localPaths'),
+              },
+            }
+          : {})}
+        {...(devicesMounted && adminHere()
+          ? {
+              devices: {
+                open: devices,
+                onClose: () => closeChild('devices', () => setDevices(false)),
+                back: settingsBack('devices'),
+              },
+            }
           : {})}
         {...(teamMounted && offersTeam(data)
           ? {
               team: {
                 open: team,
-                onClose: () => setTeam(false),
+                onClose: () => closeChild('team', () => setTeam(false)),
+                back: settingsBack('team'),
                 focus: teamFocus,
                 onFocused: () => setTeamFocus(null),
               },
             }
           : {})}
-        {...(serverMounted && serverOn ? { server: { open: server, onClose: () => setServer(false) } } : {})}
+        {...(serverMounted && serverOn
+          ? {
+              server: {
+                open: server,
+                onClose: () => closeChild('server', () => setServer(false)),
+                back: settingsBack('server'),
+              },
+            }
+          : {})}
         archive={archive}
         todos={{ open: todosOpen, onClose: () => setTodosOpen(false), todos }}
+        decisions={{ open: decisionsOpen, onClose: () => setDecisionsOpen(false), decisions }}
         {...(threads && {
           threads: { open: threads.shown, onClose: () => threads.setShown(false), menu: menus.menu },
         })}
         time={{ open: timeOpen, onClose: () => setTimeOpen(false), client: timeClient, onClient: setTimeClient }}
+        {...(spendMounted ? { spend: { open: spendOpen, onClose: () => setSpendOpen(false) } } : {})}
+        settings={{
+          open: settingsOpen,
+          onClose: () => setSettingsOpen(false),
+          setup,
+          onOpenProfiles: () => openFromSettings('profiles', () => setProfiles(true)),
+          onOpenWake: () => openFromSettings('wake', () => setWake(true)),
+          onOpenPhones: () => openFromSettings('phones', () => setPhones(true)),
+          onOpenMokupilot: () => openFromSettings('mokupilot', openMokupilot),
+          onOpenAccess: () => openFromSettings('access', openAccess),
+          onOpenSecrets: () => openFromSettings('secrets', openSecrets),
+          onOpenBackup: () => openFromSettings('backup', openBackup),
+          onOpenUpdates: () => openFromSettings('updates', openUpdates),
+          onOpenHousekeeping: () => openFromSettings('housekeeping', openHousekeeping),
+          onOpenTimeSettings: () => openFromSettings('timeSettings', openTimeSettings),
+          onOpenCalendarSettings: () => openFromSettings('calendarSettings', openCalendarSettings),
+          onOpenLocalPaths: () => openFromSettings('localPaths', openLocalPaths),
+          onOpenTeam: () => openFromSettings('team', openTeam),
+          onOpenDevices: () => openFromSettings('devices', openDevices),
+          onOpenServer: () => openFromSettings('server', openServer),
+        }}
         sheet={{
           onNewSession: newSession,
           schedule: {
@@ -426,7 +771,13 @@ export function App() {
           onPin: todos.pin,
         }}
       />
-      <LimitsPop anchor={limitsAnchor} />
+      <LimitsPop
+        anchor={limitsAnchor}
+        unified
+        setup={setup}
+        onBackup={offersBackup(!adminHere(), data) ? openBackup : undefined}
+        onWake={() => setWake(true)}
+      />
       <SetupPop setup={setup} />
       <FileChips chips={chips} />
       <QuickLook engine={quickLook.engine} />

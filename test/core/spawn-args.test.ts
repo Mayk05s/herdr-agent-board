@@ -140,8 +140,10 @@ describe('spawn-agent options', () => {
       cwd: 'x',
       timeoutSec: 120,
     })
-    expect(() => parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'codex'])).toThrow(
-      '--agent must be claude or pi, not "codex"',
+    // Codex is one since stage B (spawn-agent-codex.test.ts); any other name is refused.
+    expect(parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'codex'])).toMatchObject({ agent: 'codex' })
+    expect(() => parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'gemini'])).toThrow(
+      '--agent must be claude, pi, agy or codex, not "gemini"',
     )
     const id = '0f9c3b8e-1d2a-4c5b-9e8f-7a6b5c4d3e2f'
     for (const picks of [
@@ -151,8 +153,21 @@ describe('spawn-agent options', () => {
       expect(() => parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'pi', ...picks])).toThrow(
         '--agent pi starts a new session: give it no --resume or --fork',
       )
+    expect(parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'agy'])).toEqual({
+      name: 'A',
+      cwd: 'x',
+      timeoutSec: 120,
+      agent: 'agy',
+    })
+    expect(parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'agy', '--resume', id])).toMatchObject({
+      agent: 'agy',
+      resume: id,
+    })
+    expect(() => parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'agy', '--fork', id])).toThrow(
+      '--agent agy does not support --fork',
+    )
     expect(parseArgs(['--name', 'A', '--cwd', 'x', '--agent', 'claude', '--resume', id])).toMatchObject({ resume: id })
-    expect(USAGE).toContain('[--agent claude|pi]')
+    expect(USAGE).toContain('[--agent claude|pi|agy|codex]')
   })
 
   test('the model (#380): --model, -Model or --model=, with a new session, a resume, a fork or pi; blank is none', () => {

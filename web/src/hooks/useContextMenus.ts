@@ -30,6 +30,7 @@ import {
   typingIn,
 } from '../models/board-menus.ts'
 import { catOf, colOf } from '../models/board-view.ts'
+import { moveCardToDevice } from '../models/device-move.ts'
 import { categoryChoices, type MenuCategory, type Point, statusChoices } from '../models/menu-model.ts'
 import { type MoveDeps, moveCard, moveLane } from '../models/profile-move.ts'
 import { REVEAL_SETTLE_MS, revealSheetDetails } from '../models/sheet-reveal.ts'
@@ -266,6 +267,10 @@ export function boardActions(deps: ActionDeps): BoardMenuActions {
     move: (key, to) => actions().moveCard(key, { cat: to.cat ?? null, column: columnOf(to.column) }),
     dismiss: key => actions().dismissAsk(key),
     favorite: key => actions().setFavorite(key, !deps.item(key)?.favorite),
+    modelOk: async key => {
+      const r = await actions().act(key, 'card', { modelOk: true })
+      if (!r.ok) toast(r.error, true)
+    },
     clear: async key => {
       const r = await actions().act(key, 'card', { clear: true })
       toast(r.ok ? deps.t()('tui.cleared', { name: deps.item(key)?.name ?? '' }) : r.error, !r.ok)
@@ -279,6 +284,10 @@ export function boardActions(deps: ActionDeps): BoardMenuActions {
     profile: (key, id) => {
       const m = moves()
       return m && moveCard(m, key, id)
+    },
+    device: (key, id, title) => {
+      const m = moves()
+      return m && moveCardToDevice(m, key, id, title)
     },
     laneProfile: (lane, id, keys, usual) => {
       const m = moves()
@@ -490,8 +499,11 @@ export function useContextMenus(options: ContextMenusOptions): ContextMenus {
             terminal: data?.terminal,
             mokupilot: data?.mokupilot,
             fork: data?.fork,
+            codexFork: data?.codexFork,
             schedules: data?.schedules,
             profiles: data?.profiles,
+            // A master's devices (#502): absent on every other board.
+            ...(data?.devices && { devices: data.devices }),
           },
         }
       },
