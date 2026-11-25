@@ -394,6 +394,41 @@ test('the same id posted twice to a node’s door is one session there', async (
   assert.equal(anon.status, 401)
 }, 60_000)
 
+/** The bodies of the starts a node's door was sent, in order. */
+const launchBodies = (node: Pair['nodes'][0]): Record<string, unknown>[] =>
+  node.proxy.received.filter(r => r.request === 'POST /api/node/launch').map(r => JSON.parse(r.body))
+
+test('a start with trust is sent to the node’s door with trust: true; one without it sends no trust key (#798)', async () => {
+  const pair = await placing({ count: 1, nodes: { order: ['server-1', 'local'] } })
+  const node = pair.nodes[0] as Pair['nodes'][0]
+  await startAt(pair.master.url, pair.checkout, 'atlas plain')
+  await until(() => launchBodies(node).length === 1, 20_000)
+  await startAt(pair.master.url, pair.checkout, 'atlas trusted', { trust: true })
+  await until(() => launchBodies(node).length === 2, 20_000)
+  await startAt(pair.master.url, pair.checkout, 'atlas not trusted', { trust: false })
+  await until(() => launchBodies(node).length === 3, 20_000)
+  const [plain, trusted, off] = launchBodies(node) as [
+    Record<string, unknown>,
+    Record<string, unknown>,
+    Record<string, unknown>,
+  ]
+  assert.equal(trusted.name, 'atlas trusted')
+  assert.equal(trusted.trust, true)
+  // What a start without --trust sends is what it sent before: the same fields, none of them trust.
+  for (const body of [plain, off]) {
+    assert.equal('trust' in body, false, JSON.stringify(body))
+    assert.deepEqual(
+      Object.keys(body).sort(),
+      Object.keys(trusted)
+        .filter(k => k !== 'trust')
+        .sort(),
+    )
+  }
+  assert.deepEqual({ ...trusted, id: '', name: '', trust: undefined }, { ...plain, id: '', name: '', trust: undefined })
+  assert.equal(plain.name, 'atlas plain')
+  await settled(pair.master.url)
+}, 60_000)
+
 test('a node that answers full sends the start to the next device; its card says who turned it away', async () => {
   const pair = await placing({ nodes: { order: ['server-1', 'server-2', 'local'], whenFull: 'wait' } })
   const [one, two] = pair.nodes as [Pair['nodes'][0], Pair['nodes'][0]]
@@ -995,6 +1030,51 @@ test('a start held on its way to a node retries there on master restart and star
   assert.deepEqual(started(one.box), [saved?.session ?? ''])
   assert.deepEqual(started(two.box), [])
   assert.deepEqual(started(pair.master.box), [])
+  again.proc.kill()
+  await again.proc.exited
+}, 90_000)
+
+test('a --trust start held on its way to a node keeps trust across a master restart (#798)', async () => {
+  const pair = await placing({ count: 1, nodes: { order: ['server-1', 'local'], whenFull: 'local' } })
+  const node = pair.nodes[0] as Pair['nodes'][0]
+  let release = (): void => {}
+  const held = new Promise<void>(resolve => {
+    release = resolve
+  })
+  let sawPost = false
+  // The first POST never reaches the node: the master that sent it is gone before any answer.
+  node.proxy.intercept = async (method, path) => {
+    if (method !== 'POST' || path !== '/api/node/launch') return null
+    node.proxy.intercept = null
+    sawPost = true
+    await held
+    return new Response(JSON.stringify({ error: 'node' }), {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  const id = await startAt(pair.master.url, pair.checkout, 'atlas trusted', { trust: true })
+  await until(() => sawPost, 20_000)
+  const file = join(stateFolder(pair.master.box), 'nodes', 'queue.json')
+  const entries = () =>
+    (JSON.parse(readFileSync(file, 'utf8')) as { entries: { id: string; session: string; trust?: true }[] }).entries
+  const saved = entries()[0]
+  assert.equal(saved?.id, id)
+  assert.equal(saved?.trust, true)
+
+  pair.master.proc.kill()
+  await pair.master.proc.exited
+  release()
+  const again = await serveBoard(pair.master.box, pair.masterConfig, pair.env)
+  again.proc.send('refresh')
+  await fresh(again.url)
+  await until(() => started(node.box).length === 1 && entries().length === 0, 20_000)
+  await settled(again.url)
+  assert.deepEqual(started(node.box), [saved?.session ?? ''])
+  // What the new master sent the node still says trust.
+  const sent = launchBodies(node).at(-1)
+  assert.equal(sent?.name, 'atlas trusted')
+  assert.equal(sent?.trust, true)
   again.proc.kill()
   await again.proc.exited
 }, 90_000)
