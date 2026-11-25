@@ -152,6 +152,7 @@ import { createCheckouts } from '../services/node/checkout.ts'
 import { createNodeGit } from '../services/node/git-access.ts'
 import { createLocalRelayOps, createNodeHandover } from '../services/node/handover.ts'
 import { createNodeLaunch } from '../services/node/launch.ts'
+import { createNodeMasterFlags, type NodeMasterFlags } from '../services/node/master-flags.ts'
 import { createMasterRelay, type MasterRelay } from '../services/node/master-relay.ts'
 import { createNodePilotBridge, type NodePilotBridge } from '../services/node/pilot-bridge.ts'
 import { createNodePilotCall, type NodePilotCall } from '../services/node/pilot-call.ts'
@@ -173,6 +174,7 @@ import {
 } from '../services/nodes/computer-setup-io.ts'
 import { createMasterHandover, type MasterHandover } from '../services/nodes/handover.ts'
 import { createNodeLinks, linkTimes, type NodeLinks } from '../services/nodes/links.ts'
+import { masterFlagsFor } from '../services/nodes/master-flags.ts'
 import { createMasterRelayRunner, type MasterRelayRunner } from '../services/nodes/master-relay.ts'
 import { moveToDevice } from '../services/nodes/move-device.ts'
 import { createPilotBridgeRunner, type PilotBridgeRunner } from '../services/nodes/pilot-bridge.ts'
@@ -713,13 +715,19 @@ export async function startServer({
     onChange: accessChanged,
     server: serverSetup,
   })
+  // A master's nodes hear of a change of the user's presence (#775); set once the relay runner is made.
+  let presenceToNodes = (): void => {}
   // The user's presence (#172): nothing is read, asked or shown while config.json has no `presence`.
   const presence = createPresence({
     cfg,
     log,
     ...(presenceObserve && { observe: presenceObserve }),
     ...(presenceIntervalMs && { intervalMs: presenceIntervalMs }),
-    onChange: () => board.publish(),
+    onChange: () => {
+      board.publish()
+      // A master tells its nodes (#775): their sessions hear the user's presence from it.
+      presenceToNodes()
+    },
     sessions: () => board.items().map(i => i.key),
   })
   // The away journal (#489): nothing is opened, read or shown while config.json has no `journal`.
@@ -998,6 +1006,8 @@ export async function startServer({
   // Declared before createBoardState so board.publish() never hits TDZ before doorFollows() runs.
   let door: NodeListener | null = null
   let doorStore: NodeStore | null = null
+  // A node's copy of its master's feature flags (#775, services/node/master-flags.ts); null without `node`.
+  let nodeFlags: NodeMasterFlags | null = null
   const board = createBoardState({
     deps,
     launches,
@@ -1033,6 +1043,26 @@ export async function startServer({
         return pickNodeMaster(n.id, doorStore.list(), door.connectedMasters())
       } catch {
         return null
+      }
+    },
+    // A node's master-owned features (#775): only once its master sent them; Settings shows them as the master's.
+    masterFlags: () => {
+      const f = nodeConfig(cfg.node) ? nodeFlags?.current() : null
+      if (!f) return null
+      let name = f.master
+      try {
+        const n = nodeConfig(cfg.node)
+        const m = n && door && doorStore ? pickNodeMaster(n.id, doorStore.list(), door.connectedMasters()) : null
+        if (m?.name) name = m.name
+      } catch {}
+      return {
+        master: name,
+        at: f.at,
+        on: [...f.on],
+        ...(f.threads && { threads: f.threads }),
+        ...(f.todos && { todos: f.todos }),
+        ...(f.decisions && { decisions: f.decisions }),
+        ...(f.presence && { presenceMode: f.presence.mode }),
       }
     },
     // Threads (#379): while config.json turns them on, the revision and the count that waits on
@@ -1584,6 +1614,9 @@ export async function startServer({
       log,
     })
     const upRelay = createMasterRelay({ cfg, items: board.items, log })
+    const upFlags = createNodeMasterFlags({ cfg, log, changed: () => void runRefresh() })
+    nodeFlags = upFlags
+    upFlags.apply()
     masterRelay = upRelay
     masterRelayFirst = masterRelayRoute(upRelay)
     routes.unshift(masterRelayFirst)
@@ -1678,6 +1711,7 @@ export async function startServer({
         pilotCall,
         pilotBridge: nodePilotBridge,
         masterRelay: upRelay,
+        masterFlags: upFlags,
         telegram: nodeTelegram,
         relayKey: async publicKey => {
           const r = activateNodeRelayKey(publicKey, nodeDir())
@@ -1998,7 +2032,10 @@ export async function startServer({
         }
       },
       replay: req => replayRelayed(req),
+      // The master-owned features for the nodes (#775).
+      flags: () => masterFlagsFor(cfg, nodesConfig(cfg.nodes, hostname())?.id ?? '', presence.view()),
     })
+    presenceToNodes = () => masterRelayRunner?.flagsChanged()
     nodeProxy = createNodeProxy({
       cfg,
       links: nodeLinks,
@@ -2344,6 +2381,8 @@ export async function startServer({
   }
 
   async function runRefresh(): Promise<void> {
+    // A node's master-owned card features (#775) back in the live config after a reload of config.json.
+    nodeFlags?.apply()
     listener.configChanged()
     tunnel.configChanged()
     const view = viewConfig()
