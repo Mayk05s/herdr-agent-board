@@ -854,3 +854,147 @@ describe('the Windows update files', () => {
     expect(aliveAt(file)).toBeNull()
   })
 })
+
+describe('the installer, once for each commit the board starts on (#797)', () => {
+  const stampFile = (): string => join(dir, 'state', 'node', 'update', 'installed.json')
+  const ok = { ok: true, detail: '' }
+
+  /** The two steps, recorded in the order they run. */
+  function steps() {
+    const calls: string[] = []
+    const deps: Partial<NodeUpdateDeps> = {
+      ...stub,
+      backupSettings: () => {
+        calls.push('backup')
+        return ['/profiles/default.json']
+      },
+      installer: async () => {
+        calls.push('installer')
+        return ok
+      },
+    }
+    return { calls, deps }
+  }
+
+  async function updateTo(update: ReturnType<typeof make>['update'], commit = repo.b) {
+    const archive = repo.archive(commit)
+    await update.blob(stream(archive), archive.length)
+    return update.update({ commit, sha256: sha(archive) })
+  }
+
+  test('the first board on an update by an older board (which wrote nothing) runs it once, and says so in installed.json', async () => {
+    const { calls, deps } = steps()
+    // The update itself, as the old code does it: no installer wired, no file.
+    expect((await updateTo(make({ ...stub }).update)).status).toBe(200)
+    expect(existsSync(stampFile())).toBe(false)
+    const back = make({ ...deps, commit: async () => repo.b })
+    await back.update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+    expect(JSON.parse(text(stampFile()))).toMatchObject({ commit: repo.b })
+    expect(back.logs.join('\n')).toContain(`the installer ran for ${repo.b.slice(0, 12)}`)
+    // Again on the same commit (a restart): nothing.
+    await make({ ...deps, commit: async () => repo.b }).update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+    // A later commit: once more.
+    await make({ ...deps, commit: async () => repo.a }).update.started()
+    expect(calls).toEqual(['backup', 'installer', 'backup', 'installer'])
+    expect(JSON.parse(text(stampFile()))).toMatchObject({ commit: repo.a })
+  })
+
+  test('the board that hands an update over runs nothing before its restart; the one that comes back does', async () => {
+    const { calls, deps } = steps()
+    const first = make(deps)
+    expect((await updateTo(first.update)).status).toBe(200)
+    await first.update.started()
+    expect(calls).toEqual([])
+    await make({ ...deps, commit: async () => repo.b }).update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+  })
+
+  test('no installer wired: nothing read or written; no commit to name: nothing runs', async () => {
+    const { update, logs } = make({ ...stub, commit: async () => repo.b })
+    await update.started()
+    expect(logs).toEqual([])
+    expect(existsSync(stampFile())).toBe(false)
+    const { calls, deps } = steps()
+    await make({ ...deps, commit: async () => '' }).update.started()
+    expect(calls).toEqual([])
+    expect(existsSync(stampFile())).toBe(false)
+  })
+
+  test('an installer that fails or throws, a settings.json that cannot be copied: said, never thrown, tried again at the next start', async () => {
+    const cases: [Partial<NodeUpdateDeps>, string, string[]][] = [
+      [{ installer: async () => ({ ok: false, detail: 'boom\nmore' }) }, 'failed: boom', ['backup']],
+      [
+        {
+          installer: async () => {
+            throw new Error('spawn failed')
+          },
+        },
+        'did not run: spawn failed',
+        ['backup'],
+      ],
+      [
+        {
+          backupSettings: () => {
+            throw new Error('EACCES')
+          },
+        },
+        'settings.json not copied: EACCES',
+        [],
+      ],
+    ]
+    for (const [over, said, ran] of cases) {
+      const { calls, deps } = steps()
+      const back = make({ ...deps, ...over, commit: async () => repo.b })
+      await back.update.started()
+      expect(calls).toEqual(ran)
+      expect(back.logs.join('\n')).toContain(said)
+      expect(existsSync(stampFile())).toBe(false)
+    }
+    // A file that does not parse names no commit: the installer runs.
+    const { calls, deps } = steps()
+    mkdirSync(join(dir, 'state', 'node', 'update'), { recursive: true })
+    writeFileSync(stampFile(), '{ not json')
+    await make({ ...deps, commit: async () => repo.b }).update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+  })
+
+  test('on Windows the installer runs only once the record is settled: claimed as applied, or gone', async () => {
+    const { calls, deps } = steps()
+    const guard = (file: string): void => writeAlive(file)
+    expect((await updateTo(make({ ...deps, platform: 'win32', guard, go: () => {} }).update)).status).toBe(200)
+    const { fresh, old } = besidePlugin(root)
+    const record = { commit: repo.b, from: repo.a, root, old, fresh, at: 1 }
+    const back = (over: Partial<NodeUpdateDeps> = {}, commit = repo.b) =>
+      make({ ...deps, platform: 'win32', guard, commit: async () => commit, ...over })
+    for (const phase of ['ready', 'go', 'restoring'] as const) {
+      writePending(pendingFile(), { ...record, phase })
+      await back().update.started()
+      expect(calls).toEqual([])
+      expect(readPending(pendingFile())?.phase).toBe(phase)
+    }
+    writePending(pendingFile(), { ...record, phase: 'applied' })
+    await back({}, repo.a).update.started()
+    expect(calls).toEqual([])
+    writeFileSync(pendingFile(), 'not json')
+    await back().update.started()
+    expect(calls).toEqual([])
+    writePending(pendingFile(), { ...record, phase: 'applied' })
+    const seen: boolean[] = []
+    const settled = back({
+      installer: async () => {
+        seen.push(existsSync(pendingFile()))
+        calls.push('installer')
+        return ok
+      },
+    })
+    await settled.update.started()
+    expect(seen).toEqual([false])
+    expect(calls).toEqual(['backup', 'installer'])
+    expect(settled.logs.join('\n')).toContain(`back on ${repo.b.slice(0, 12)}`)
+    // No record at all: the stamp alone decides.
+    await back().update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+  })
+})

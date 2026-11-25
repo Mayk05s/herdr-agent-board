@@ -9,12 +9,25 @@ export interface MasterOwnedNow {
   todos: TodoMode
   threads: ThreadMode
   threadsCases: boolean
+  /** Verified done (#797); absent while threads are off there or the master does not say. */
+  threadsVerify?: boolean
+  /** Sharing in Team (#797); absent unless threads and Team are both on there and the master says. */
+  threadsShare?: boolean
   watches: boolean
   decisions: boolean
   decisionsDefaults: boolean
   journal: boolean
   presence: PresenceMode | 'none'
 }
+
+/** Whether the page is a node's own (#797): its master sent flags, or it has a paired master. */
+export const onNodePage = (data: { masterFlags?: unknown; nodeMaster?: unknown } | null | undefined): boolean =>
+  !!data?.masterFlags || !!data?.nodeMaster
+
+/** Whether the board's backup has a problem to flag here: on a node the master backs up (#777), so never. */
+export const backupAlert = (
+  data: { masterFlags?: unknown; nodeMaster?: unknown; backup?: { problem?: unknown } } | null | undefined,
+): boolean => !onNodePage(data) && !!data?.backup?.problem
 
 export function masterOwnedNow(f: MasterFlagsPayload): MasterOwnedNow {
   const on = (key: string): boolean => f.on.includes(key)
@@ -29,6 +42,8 @@ export function masterOwnedNow(f: MasterFlagsPayload): MasterOwnedNow {
     todos,
     threads: !on('threads') ? 'none' : f.threads?.agents === false ? 'mine' : 'agents',
     threadsCases: on('threads') && f.threads?.cases === true,
+    ...(on('threads') && typeof f.threads?.verify === 'boolean' && { threadsVerify: f.threads.verify }),
+    ...(on('threads') && on('team') && typeof f.threads?.share === 'boolean' && { threadsShare: f.threads.share }),
     watches: on('watches'),
     decisions: on('decisions'),
     decisionsDefaults: on('decisions') && f.decisions?.defaults !== false,

@@ -458,3 +458,49 @@ describe('the update files never remove or move a .git', () => {
     expect(text(at, '.git', 'HEAD')).toBe('ref')
   })
 })
+
+describe('the installer after a checkout was updated by git (#797)', () => {
+  const stampFile = (): string => join(dir, 'state', 'node', 'update', 'installed.json')
+  const steps = () => {
+    const calls: string[] = []
+    return {
+      calls,
+      deps: {
+        backupSettings: () => {
+          calls.push('backup')
+          return []
+        },
+        installer: async () => {
+          calls.push('installer')
+          return { ok: true, detail: '' }
+        },
+      } satisfies Partial<NodeUpdateDeps>,
+    }
+  }
+
+  test('the board on the moved checkout runs the installer once, by the commit git says it runs', async () => {
+    const { calls, deps } = steps()
+    cloneAtA()
+    const { update, restarts } = make({})
+    expect((await send(update, repo.b)).status).toBe(200)
+    expect(restarts).toEqual([root])
+    const back = make(deps)
+    await back.update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+    expect(JSON.parse(text(stampFile()))).toMatchObject({ commit: repo.b })
+    await make(deps).update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+  })
+
+  test('on Windows, with no record and no guard, the stamp alone lets the installer run', async () => {
+    const { calls, deps } = steps()
+    cloneAtA()
+    const win = { platform: 'win32', guard: never('guard'), go: never('go'), ...deps }
+    expect(
+      (await send(make({ platform: 'win32', guard: never('guard'), go: never('go') }).update, repo.b)).status,
+    ).toBe(200)
+    expect(existsSync(join(dir, 'state', 'node', 'update', 'pending.json'))).toBe(false)
+    await make(win).update.started()
+    expect(calls).toEqual(['backup', 'installer'])
+  })
+})

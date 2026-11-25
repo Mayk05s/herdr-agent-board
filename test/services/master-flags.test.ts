@@ -38,7 +38,8 @@ describe("the master's flags", () => {
     expect(f).toEqual({
       master: 'laptop',
       on: ['threads', 'calendar', 'decisions', 'presence', 'team', 'watches', 'todos', 'tunnel'],
-      threads: { agents: false, cases: true },
+      // verify and share always said (#797): a node tells "off" from a master that does not say.
+      threads: { agents: false, cases: true, verify: false, share: true },
       todos: { agents: true, autoClose: true },
       decisions: { defaults: false },
     })
@@ -260,7 +261,7 @@ describe('Settings on a node: set on the master', () => {
     writeFileSync(masterFlagsFile(), JSON.stringify({ master: 'laptop', on: ['watches'], at: 1 }))
     const before = readFileSync(configFile(), 'utf8')
     for (const r of [editFeatures({ watches: true }), editTodos({ mode: 'agents' }), editThreads({ mode: 'agents' })])
-      expect(r).toMatchObject({ ok: false, error: 'Настраивается на мастере laptop' })
+      expect(r).toMatchObject({ ok: false, error: 'Настраивается на голове laptop' })
     expect(readFileSync(configFile(), 'utf8')).toBe(before)
   })
 

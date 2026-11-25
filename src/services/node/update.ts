@@ -36,6 +36,16 @@
 // archive and to an update, so a second update never removes `.old` or `.new` from under a guard;
 // a record that is never settled is left for a person. A node whose board has no guard to give (an
 // older one) answers `platform`.
+//
+// The installer (entrypoints/install.ts) copies the board's skills into the Claude profiles and
+// registers its hooks, so code that came without it leaves those as the old board had them. The
+// board that starts (`started`, once it stayed up a while) runs the installer once for each commit
+// it runs: `<dir>/installed.json` (`{ commit, at }`) names the last commit it went through for, and
+// a board on any other commit (an update by any path, the old board's included, which wrote
+// nothing, or a pull by hand) runs it, with a dated copy of each settings.json before it, and
+// writes the file. On Windows that board waits for the guard's record to be settled first (taken as
+// applied, or gone). A failing installer is logged, never thrown, and tried again at the next
+// start. A board that wires no installer reads and writes no such file.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pause } from '../../adapters/pacing.ts'
@@ -115,6 +125,10 @@ export interface NodeUpdateDeps {
   git?: (args: string[], timeoutMs?: number) => Promise<GitResult>
   /** A checkout's `bun install` with its lockfile as it is (adapters/self-update.ts bunInstall). */
   installCheckout?: () => Promise<StepResult>
+  /** The installer of the code now in the plugin's folder (adapters/self-update.ts runInstaller), run once for each commit the board starts on; without it nothing of it is read or written. */
+  installer?: () => Promise<StepResult>
+  /** A dated copy of each settings.json, before the installer writes them (adapters/self-update.ts backupSettings); the files copied. */
+  backupSettings?: () => string[]
   log(text: string): void
 }
 
@@ -125,7 +139,10 @@ export interface NodeUpdate {
   update(body: unknown): Promise<Answer>
   /** An update is under way, or done and the board about to restart. */
   busy(): boolean
-  /** The board has started: on Windows, one that came back on the commit an update put in place says so (the guard stands down). */
+  /**
+   * The board has started: on Windows, one that came back on the commit an update put in place says
+   * so (the guard stands down). Then, on every platform, the installer once for the running commit.
+   */
   started(): Promise<void>
 }
 
@@ -162,6 +179,8 @@ export function createNodeUpdate(d: NodeUpdateDeps): NodeUpdate {
   const pendingFile = join(d.dir, 'pending.json')
   /** A checkout's lock files taken from the commit while bun install runs: `{ from, to, files }`, put back by the next update when the board died in between. */
   const locksFile = join(d.dir, 'git-locks.json')
+  /** The commit the installer last went through for (`{ commit, at }`): a board on another one runs it once. */
+  const installedFile = join(d.dir, 'installed.json')
   let busy = false
   /** An archive is coming in: an update, or a second archive, waits for it. */
   let uploading = false
@@ -174,6 +193,73 @@ export function createNodeUpdate(d: NodeUpdateDeps): NodeUpdate {
     if (platform === 'win32' && !d.guard) return refuse(409, 'platform')
     if (!d.canRestart) return refuse(409, 'restart')
     return null
+  }
+
+  /** Windows: whether the guard's record is settled, so the installer may go: none at all, or one taken here as applied on the running commit. */
+  async function settled(): Promise<boolean> {
+    const p = readPending(pendingFile)
+    // a record that does not parse is still a record
+    if (!p) return !existsSync(pendingFile)
+    // Only a copy the guard put in place, and only the commit it was given.
+    if (p.phase !== 'applied') return false
+    if (p.commit !== (await d.commit())) return false
+    // The guard may roll back at this very moment: the record goes to one of the two.
+    const mine = claimPending(pendingFile)
+    if (!mine) return false
+    if (mine.phase !== 'applied' || mine.commit !== p.commit) {
+      writePending(pendingFile, mine)
+      return false
+    }
+    d.log(
+      `node: back on ${short(mine.commit)} after the update; the copy before stays in ${mine.old} until the next update`,
+    )
+    return true
+  }
+
+  /** The commit installed.json names, or '' (none, or a file that does not parse). */
+  function installedCommit(): string {
+    try {
+      const j: unknown = JSON.parse(readFileSync(installedFile, 'utf8'))
+      const c = j && typeof j === 'object' ? (j as Record<string, unknown>).commit : undefined
+      return typeof c === 'string' ? c : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * The installer once for the commit this board runs, when installed.json names another one (or
+   * none): the first board on an update's code runs it, whichever board did the update.
+   */
+  async function installOnce(installer: () => Promise<StepResult>): Promise<void> {
+    // The board that handed an update over is about to restart: the next one runs it.
+    if (busy) return
+    try {
+      const now = await d.commit()
+      // No commit to name (a board restarted half way): nothing to compare with.
+      if (!COMMIT.test(now) || installedCommit() === now) return
+      let copies: string[] = []
+      try {
+        copies = d.backupSettings?.() ?? []
+      } catch (err) {
+        d.log(
+          `node: the installer for ${short(now)} did not run: settings.json not copied: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return
+      }
+      const r = await installer()
+      if (!r.ok) {
+        d.log(`node: the installer for ${short(now)} failed: ${firstLines(r.detail, 2) || 'no output'}`)
+        return
+      }
+      mkdirSync(d.dir, { recursive: true })
+      writeFileSync(installedFile, `${JSON.stringify({ commit: now, at: Date.now() })}\n`)
+      d.log(
+        `node: the installer ran for ${short(now)}; settings.json copied to ${copies.join(', ') || 'nothing (none there)'}`,
+      )
+    } catch (err) {
+      d.log(`node: the installer did not run: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   /** The new copy beside the plugin dropped; a folder that cannot be removed is said, not thrown. */
@@ -344,22 +430,9 @@ export function createNodeUpdate(d: NodeUpdateDeps): NodeUpdate {
   return {
     busy: () => busy || recorded(),
     async started() {
-      // Nothing is read on a platform that has no such record.
-      if (platform !== 'win32') return
-      // Only a copy the guard put in place, and only the commit it was given.
-      const p = readPending(pendingFile)
-      if (p?.phase !== 'applied') return
-      if (p.commit !== (await d.commit())) return
-      // The guard may roll back at this very moment: the record goes to one of the two.
-      const mine = claimPending(pendingFile)
-      if (!mine) return
-      if (mine.phase !== 'applied' || mine.commit !== p.commit) {
-        writePending(pendingFile, mine)
-        return
-      }
-      d.log(
-        `node: back on ${short(mine.commit)} after the update; the copy before stays in ${mine.old} until the next update`,
-      )
+      // Only Windows has such a record; nothing of it is read elsewhere.
+      if (platform === 'win32' && !(await settled())) return
+      if (d.installer) await installOnce(d.installer)
     },
     async blob(body, told) {
       const no = cannot()
