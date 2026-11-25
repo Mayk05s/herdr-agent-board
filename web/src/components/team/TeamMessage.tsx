@@ -13,12 +13,17 @@ import {
   useRef,
   useState,
 } from 'react'
+import { QUICK_REACTIONS } from '../../../../src/core/team-reactions.ts'
 import { useT } from '../../i18n/I18nProvider.tsx'
 import { delivery, type ThreadLine } from '../../models/team.ts'
 import { agentMark, bubbleTime, deliveryOf, fullWhen, type Quote, senderName, toneOf } from '../../models/team-chat.ts'
 import { classNames } from '../class-names.ts'
 import { MessageText } from '../sheet/MessageText.tsx'
 import { TeamFile } from './TeamFile.tsx'
+import { EmojiPicker, QuickReactions, ReactionChips } from './TeamReactions.tsx'
+
+/** Quick reactions in the Slack-style floating hover bar (#687). */
+const BAR_REACTIONS = QUICK_REACTIONS.slice(0, 4)
 
 /** How long a touch holds before it counts as a long press (ms), and how far it may wander (px). */
 const LONG_PRESS_MS = 450
@@ -37,6 +42,8 @@ export interface TeamMessageProps {
   flash?: boolean
   /** Reply to it; absent: no Reply (held, or nothing may be sent). */
   onReply?: ((id: string) => void) | undefined
+  /** Toggle a reaction on it (#687); absent: read-only chips only (or none). */
+  onReact?: ((id: string, emoji: string, remove: boolean) => void) | undefined
   onQuote(id: string): void
   /** A thread's entry (#392): its author's mark in place of the agent's, and its files under the text. */
   mark?: ReactNode
@@ -51,15 +58,30 @@ export function TeamMessage({
   quote,
   flash,
   onReply,
+  onReact,
   onQuote,
   mark,
   extra,
 }: TeamMessageProps) {
   const t = useT()
   const [open, setOpen] = useState(false)
+  const [picker, setPicker] = useState<'bar' | 'chips' | null>(null)
+  const [longPicker, setLongPicker] = useState(false)
+  const reactBtnRef = useRef<HTMLButtonElement>(null)
+  const addChipRef = useRef<HTMLButtonElement>(null)
+  const moreBtnRef = useRef<HTMLButtonElement>(null)
   const press = useLongPress(() => setOpen(true))
   const agent = mark === undefined ? agentMark(line, t) : null
   const when = fullWhen(line.ts, t)
+  const reactions = line.reactions ?? []
+  const active = new Set(reactions.filter(r => r.me).map(r => r.emoji))
+  const toggleReaction = (emoji: string) => onReact?.(line.id, emoji, active.has(emoji))
+  const isPickerTrigger = (target: Node) =>
+    Boolean(reactBtnRef.current?.contains(target) || addChipRef.current?.contains(target))
+  const closeLong = () => {
+    setOpen(false)
+    setLongPicker(false)
+  }
   return (
     <div
       className={classNames(
@@ -71,6 +93,7 @@ export function TeamMessage({
         line.held && 'held',
         flash && 'flash',
         open && 'open',
+        picker && 'picker-open',
       )}
       data-line={line.id}
     >
@@ -103,34 +126,135 @@ export function TeamMessage({
             <Delivery line={line} />
           </span>
         </div>
-        {onReply && (
-          <button
-            type="button"
-            className="team-icon-button team-msg-reply"
-            aria-label={t('team.reply')}
-            title={t('team.reply')}
-            onClick={() => onReply(line.id)}
-          >
-            <ReplyGlyph />
-          </button>
+        {onReact ? (
+          <div className={classNames('team-msg-bar', picker === 'bar' && 'open')}>
+            {BAR_REACTIONS.map(emoji => (
+              <button
+                key={emoji}
+                type="button"
+                className={classNames('team-bar-emoji', active.has(emoji) && 'me')}
+                aria-pressed={active.has(emoji)}
+                aria-label={emoji}
+                title={emoji}
+                onClick={() => toggleReaction(emoji)}
+              >
+                {emoji}
+              </button>
+            ))}
+            <button
+              ref={reactBtnRef}
+              type="button"
+              className="team-bar-btn team-msg-react"
+              aria-label={t('team.react')}
+              title={t('team.react')}
+              aria-expanded={picker === 'bar'}
+              onClick={() => setPicker(p => (p === 'bar' ? null : 'bar'))}
+            >
+              <ReactGlyph />
+            </button>
+            {onReply && (
+              <>
+                <span className="team-bar-sep" aria-hidden="true" />
+                <button
+                  type="button"
+                  className="team-bar-btn team-msg-reply"
+                  aria-label={t('team.reply')}
+                  title={t('team.reply')}
+                  onClick={() => onReply(line.id)}
+                >
+                  <ReplyGlyph />
+                </button>
+              </>
+            )}
+          </div>
+        ) : (
+          onReply && (
+            <button
+              type="button"
+              className="team-icon-button team-msg-reply"
+              aria-label={t('team.reply')}
+              title={t('team.reply')}
+              onClick={() => onReply(line.id)}
+            >
+              <ReplyGlyph />
+            </button>
+          )
+        )}
+        {picker === 'bar' && onReact && (
+          <EmojiPicker
+            active={active}
+            anchorRef={reactBtnRef}
+            ignore={isPickerTrigger}
+            onPick={emoji => {
+              setPicker(null)
+              toggleReaction(emoji)
+            }}
+            onClose={() => setPicker(null)}
+          />
         )}
       </div>
+      {reactions.length > 0 && (
+        <ReactionChips
+          reactions={reactions}
+          disabled={!onReact}
+          addRef={addChipRef}
+          addOpen={picker === 'chips'}
+          onToggle={(emoji, remove) => onReact?.(line.id, emoji, remove)}
+          {...(onReact && { onAdd: () => setPicker(p => (p === 'chips' ? null : 'chips')) })}
+        />
+      )}
+      {picker === 'chips' && onReact && (
+        <EmojiPicker
+          active={active}
+          anchorRef={addChipRef}
+          ignore={isPickerTrigger}
+          onPick={emoji => {
+            setPicker(null)
+            toggleReaction(emoji)
+          }}
+          onClose={() => setPicker(null)}
+        />
+      )}
       {open && (
         <div className="team-msg-when">
+          {onReact && (
+            <QuickReactions
+              active={active}
+              moreRef={moreBtnRef}
+              moreOpen={longPicker}
+              onPick={emoji => {
+                closeLong()
+                toggleReaction(emoji)
+              }}
+              onMore={() => setLongPicker(p => !p)}
+            />
+          )}
+          {longPicker && onReact && (
+            <EmojiPicker
+              active={active}
+              anchorRef={moreBtnRef}
+              ignore={target => Boolean(moreBtnRef.current?.contains(target))}
+              onPick={emoji => {
+                closeLong()
+                toggleReaction(emoji)
+              }}
+              onClose={() => setLongPicker(false)}
+            />
+          )}
           <span>{when}</span>
           {onReply && (
             <button
               type="button"
               className="mini"
               onClick={() => {
-                setOpen(false)
+                closeLong()
                 onReply(line.id)
               }}
             >
               {t('team.reply')}
             </button>
           )}
-          <button type="button" className="mini" onClick={() => setOpen(false)}>
+          <button type="button" className="mini" onClick={closeLong}>
             {t('team.cancel')}
           </button>
         </div>
@@ -254,6 +378,17 @@ function ReplyGlyph() {
   return (
     <svg viewBox="0 0 16 16" aria-hidden="true">
       <path d="M6.5 4L2.5 8l4 4M3 8h6.5a4 4 0 014 4v.5" />
+    </svg>
+  )
+}
+
+function ReactGlyph() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="6" />
+      <circle cx="6" cy="6.8" r="0.6" fill="currentColor" stroke="none" />
+      <circle cx="10" cy="6.8" r="0.6" fill="currentColor" stroke="none" />
+      <path d="M5.6 9.6a2.8 2.8 0 004.8 0" />
     </svg>
   )
 }
