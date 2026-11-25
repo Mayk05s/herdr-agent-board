@@ -3,6 +3,7 @@
 // of a start placed on a device (8.3), and the words of a node-offline answer. A board without
 // `nodes` sends no `devices` and no item with a `device`: nothing here draws, the switch is not
 // there, and every filter passes what it passed before.
+import { DEVICE_COLORS, deviceColorFallback, resolveDeviceColors } from '../../../src/core/device-color.ts'
 import { type GitLack, gitLacks } from '../../../src/core/git-access.ts'
 import { parseNodeKey } from '../../../src/core/node-key.ts'
 import type { NodesPanelSettings } from '../../../src/core/nodes.ts'
@@ -13,10 +14,14 @@ import { ago } from './card.ts'
 import { loggedOut, loginCommand } from './node-setup.ts'
 import type { ProfileOption } from './profiles.ts'
 
+export { DEVICE_COLORS }
+
 type Devices = readonly BoardDevice[] | undefined
 
 /** Whether the board has at least one remote device configured alongside the master. */
 export const hasNodes = (devices: Devices): boolean => !!devices && devices.some(d => d.id !== 'local')
+
+const isLocalTitle = (title: string | undefined): boolean => !!title && title.trim().toLowerCase() === 'local'
 
 const defaultDeviceTitle = (d: Pick<BoardDevice, 'id' | 'selfId' | 'status'>, t: Translator): string =>
   d.id === 'local' ? d.selfId || d.status?.id || t('node.dev.master') : d.id
@@ -24,13 +29,15 @@ const defaultDeviceTitle = (d: Pick<BoardDevice, 'id' | 'selfId' | 'status'>, t:
 /**
  * What the owner reads for a device: the master's own row (`local`) shows its custom title, else its
  * configured device id (`selfId` / `status.id`), else "master"; any other device its title or id.
+ * A stored placeholder title "local" (any case) is normalised to the device id.
  */
 export function deviceTitle(
   d: Pick<BoardDevice, 'id' | 'title' | 'kind'> & Partial<Pick<BoardDevice, 'selfId' | 'status'>>,
   t: Translator,
 ): string {
-  if (d.id !== 'local') return d.title || d.id
-  if (d.title && d.title !== 'local') return d.title
+  const title = d.title?.trim() ?? ''
+  if (title && !isLocalTitle(title)) return title
+  if (d.id !== 'local') return d.id
   return d.selfId || d.status?.id || t('node.dev.master')
 }
 
@@ -45,6 +52,8 @@ export interface NodeLook {
   id: string
   /** Its title from `devices`; its id while the payload does not list it. */
   title: string
+  /** Resolved #rrggbb colour for the card corner and Settings, Devices legend (#758). */
+  color: string
   /** The master does not hear it: its cards are its last ones, greyed. */
   offline: boolean
   /** While offline, how old those cards are ("as of 8 min ago"); '' while it is heard. */
@@ -71,12 +80,16 @@ export function nodeLook(item: Pick<Item, 'device'>, devices: Devices, now: numb
     if (!hasNodes(devices)) return null
     const master = deviceOf(devices, 'local')
     if (!master) return null
-    return { id: 'local', title: deviceTitle(master, t), offline: false, asOf: '', why: '' }
+    const colors = resolveDeviceColors(devices ?? [])
+    const color = colors.get('local')?.hex ?? deviceColorFallback('local').hex
+    return { id: 'local', title: deviceTitle(master, t), color, offline: false, asOf: '', why: '' }
   }
   const d = deviceOf(devices, id)
   const title = d ? deviceTitle(d, t) : id
-  if (d && reachable(d)) return { id, title, offline: false, asOf: '', why: '' }
-  return { id, title, offline: true, asOf: asOf(d, now, t), why: t('node.offline', { name: title }) }
+  const colors = resolveDeviceColors(devices ?? [])
+  const color = colors.get(id)?.hex ?? deviceColorFallback(id).hex
+  if (d && reachable(d)) return { id, title, color, offline: false, asOf: '', why: '' }
+  return { id, title, color, offline: true, asOf: asOf(d, now, t), why: t('node.offline', { name: title }) }
 }
 
 /**
@@ -165,7 +178,11 @@ const titles = new Map<string, string>()
 
 /** Keeps the devices' titles of a master's payload (BoardProvider, only for a payload that has `devices`). */
 export function knowDevices(devices: readonly BoardDevice[]): void {
-  for (const d of devices) titles.set(d.id, d.title)
+  for (const d of devices) {
+    const raw = d.title?.trim() ?? ''
+    const title = raw && !isLocalTitle(raw) ? raw : d.id === 'local' ? d.selfId || d.status?.id || '' : d.id
+    titles.set(d.id, title)
+  }
 }
 
 /**
@@ -203,6 +220,7 @@ export function isPanelReply(v: unknown): v is { settings?: PanelSettings } {
 export function refusedText(status: number, error: unknown, t: Translator): string | null {
   if (status !== 400 || typeof error !== 'string') return null
   if (error === 'title') return t('node.dev.refused', { field: t('node.dev.name') })
+  if (error === 'color') return t('node.dev.refused', { field: t('node.dev.color') })
   if (['maxSessions', 'minFreeMemMb', 'maxLoad'].includes(error))
     return t('node.dev.refused', { field: t(`node.dev.${error}`) })
   // The list the panel showed is not the board's any more (a device added or left out meanwhile).
@@ -221,6 +239,10 @@ export interface DeviceRow {
   rawTitle: string
   /** The default name shown when no custom title is set ("This computer" for local, else the id). */
   defaultTitle: string
+  /** Resolved #rrggbb colour for the legend swatch and card corner (#758). */
+  color: string
+  /** Palette swatch id or #rrggbb hex currently resolved for this device (#758). */
+  colorId: string
   /** This computer: no link line, no Pause. */
   here: boolean
   /** The link in words; null for this computer. */
@@ -379,6 +401,7 @@ export function deviceRows(
   schedules?: readonly ScheduleEntry[],
   items?: readonly Pick<Item, 'key' | 'name'>[],
 ): DeviceRow[] {
+  const colors = resolveDeviceColors(devices)
   return devices.map(d => {
     const s = d.status
     const here = d.kind === null
@@ -406,12 +429,19 @@ export function deviceRows(
         : null
     const title = deviceTitle(d, t)
     const defaultTitle = defaultDeviceTitle(d, t)
-    const rawTitle = d.title && d.title !== d.id && d.title !== defaultTitle ? d.title : ''
+    const trimmedTitle = d.title?.trim() ?? ''
+    const rawTitle =
+      trimmedTitle && !isLocalTitle(trimmedTitle) && trimmedTitle !== d.id && trimmedTitle !== defaultTitle
+        ? trimmedTitle
+        : ''
+    const resolvedColor = colors.get(d.id) ?? deviceColorFallback(d.id)
     return {
       id: d.id,
       title,
       rawTitle,
       defaultTitle,
+      color: resolvedColor.hex,
+      colorId: resolvedColor.id,
       here,
       link: here ? null : linkWords(d, now, t, settings?.noToken?.includes(d.id) ?? false),
       linkState: d.link?.state ?? null,
@@ -527,6 +557,6 @@ export function thresholdTyped(
  */
 export function deviceTitleEdited(id: string, rawTitle: string, value: string, defaultTitle = id): string | null {
   const trimmed = value.trim()
-  const next = trimmed === id || trimmed === defaultTitle ? '' : trimmed
+  const next = trimmed === id || trimmed === defaultTitle || isLocalTitle(trimmed) ? '' : trimmed
   return next === rawTitle ? null : next
 }

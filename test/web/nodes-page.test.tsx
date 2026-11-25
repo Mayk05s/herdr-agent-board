@@ -98,47 +98,92 @@ const ctxless = ({ device: _, ...rest }: Item): Item => rest
 
 const ids = (entries: MenuEntry[]) => entries.flatMap(e => ('id' in e && e.id ? [e.id] : []))
 
-describe('the device chip (#502)', () => {
-  test('a card of another device carries the chip with the device’s title in its identity row, under the name row', () => {
+describe('the device corner (#502, #758)', () => {
+  const rowClasses = (nodes: Node[]) => {
+    const [article] = findAll(nodes, el => el.tag === 'article')
+    return (article?.children ?? []).flatMap(n => (n.kind === 'element' ? [n.attrs.get('class') ?? ''] : []))
+  }
+
+  test('a card of another device shows only a subtle coloured corner with zero text on the card and no extra row', () => {
     const data = payload({
       items: [local, remote],
-      devices: [device('local', 'laptop'), device('server-1', 'Hetzner box')],
+      devices: [device('local', 'laptop'), device('server-1', 'Hetzner box', { color: 'rose' })],
     })
     const card = drawCard(remote, data)
-    const [row] = byClassAll(card, 'card-ident')
-    expect(row).toBeDefined()
-    expect(html(row ? [row] : [])).toContain('>Hetzner box<')
-    // Not in the name row: the name keeps its room.
+    expect(byClassAll(card, 'card-ident')).toEqual([])
+    expect(byClassAll(card, 'card-device')).toEqual([])
+    const [corner] = byClassAll(card, 'card-device-corner')
+    expect(corner).toBeDefined()
+    expect(corner?.attrs.get('role')).toBe('img')
+    expect(corner?.attrs.get('tabindex')).toBe('0')
+    expect(corner?.attrs.get('title')).toBe('Agent on Hetzner box')
+    expect(corner?.attrs.get('aria-label')).toBe('Agent on Hetzner box')
+    expect(corner?.attrs.get('data-tip')).toBe('Agent on Hetzner box')
+    expect(corner?.attrs.get('style')).toBe('--device:#D64F86')
+    // No machine text badge anywhere in card-top or card body.
     const [top] = byClassAll(card, 'card-top')
-    expect(html(top ? [top] : [])).not.toContain('device-chip')
-    // Heard: no greying, no age, its tooltip names where it runs.
+    expect(top).toBeDefined()
+    expect(html(top ? [top] : [])).not.toContain('Hetzner box')
+    // Top-level layout flow inside <article> matches standalone (card-device-corner is position: absolute).
+    expect(rowClasses(card).filter(c => !c.includes('card-device-corner'))).toEqual(
+      rowClasses(drawCard(ctxless(remote), payload({ items: [ctxless(remote)] }))),
+    )
+    // Heard: no greying, no age, tooltip says which machine.
     expect(html(card)).not.toContain('node-offline')
     expect(html(card)).not.toContain('device-as-of')
-    expect(html(card)).toContain('title="Runs on Hetzner box"')
   })
 
-  test('a card of the master carries the master’s machine chip when the board has nodes, and keeps focus (#752)', () => {
+  test('a card of the master carries its coloured corner when the board has nodes, and keeps focus (#752, #758)', () => {
     const data = payload({ items: [local, remote], devices: DEVICES })
     const card = drawCard(local, data)
     const out = html(card)
-    const [row] = byClassAll(card, 'card-ident')
-    expect(row).toBeDefined()
-    expect(html(row ? [row] : [])).toContain('>laptop<')
-    expect(out).toContain('title="Runs on laptop"')
+    expect(byClassAll(card, 'card-ident')).toEqual([])
+    expect(byClassAll(card, 'card-device')).toEqual([])
+    const [corner] = byClassAll(card, 'card-device-corner')
+    expect(corner).toBeDefined()
+    expect(corner?.attrs.get('title')).toBe('Agent on laptop')
+    expect(corner?.attrs.get('aria-label')).toBe('Agent on laptop')
+    expect(out).not.toContain('>laptop<')
     expect(out).not.toContain('node-offline')
     expect(out).toContain('data-act="focus"')
-    // Even if devices.local has no custom title and selfId is set, never shows "local" or "This computer".
-    const unnamed = drawCard(
-      local,
-      payload({
-        items: [local, remote],
-        devices: [device('local', 'local', { selfId: 'server-2' }), device('server-1', 'server-1')],
-      }),
+    expect(rowClasses(card).filter(c => !c.includes('card-device-corner'))).toEqual(
+      rowClasses(drawCard(local, payload({ items: [local] }))),
     )
-    expect(html(unnamed)).toContain('>server-2<')
-    expect(html(unnamed)).not.toContain('>local<')
-    expect(html(unnamed)).not.toContain('This computer')
-    // Non-ASCII and % in master title render intact.
+
+    // "local" (any case) normalises to selfId for master and to device id for remote devices, everywhere (#758).
+    const remoteLaptop = item({ key: '@laptop:c', name: 'Gamma', column: 'work', device: 'laptop' })
+    const localTitledDevices = [device('local', 'Local', { selfId: 'server-2' }), device('laptop', 'LOCAL')]
+    const unnamedMaster = drawCard(local, payload({ items: [local, remoteLaptop], devices: localTitledDevices }))
+    const [masterCorner] = byClassAll(unnamedMaster, 'card-device-corner')
+    expect(masterCorner?.attrs.get('title')).toBe('Agent on server-2')
+    expect(masterCorner?.attrs.get('aria-label')).toBe('Agent on server-2')
+    expect(html(unnamedMaster)).not.toContain('local')
+    expect(html(unnamedMaster)).not.toContain('This computer')
+
+    const unnamedRemote = drawCard(remoteLaptop, payload({ items: [local, remoteLaptop], devices: localTitledDevices }))
+    const [remoteCorner] = byClassAll(unnamedRemote, 'card-device-corner')
+    expect(remoteCorner?.attrs.get('title')).toBe('Agent on laptop')
+    expect(remoteCorner?.attrs.get('aria-label')).toBe('Agent on laptop')
+    expect(html(unnamedRemote)).not.toContain('LOCAL')
+
+    const head = html(
+      renderInBoard(
+        <SheetHead item={remoteLaptop} missing={false} />,
+        board({ data: payload({ items: [remoteLaptop], devices: localTitledDevices }) }),
+      ),
+    )
+    expect(head).toContain('>laptop<')
+    expect(head).not.toContain('>LOCAL<')
+
+    const picker = html(drawToolbar(payload({ items: [local, remoteLaptop], devices: localTitledDevices })))
+    expect(picker).toMatch(/data-id="local"[^>]*>server-2<span class="n">1</)
+    expect(picker).toMatch(/data-id="laptop"[^>]*>laptop<span class="n">1</)
+    expect(picker).not.toContain('>LOCAL<')
+
+    knowDevices([device('laptop', 'Local')])
+    expect(errorText(new ApiError(503, { error: 'node-offline', device: 'laptop' }), t)).toBe('laptop is not reachable')
+
+    // Non-ASCII and % in master title render intact in corner tooltip and aria-label.
     const special = drawCard(
       local,
       payload({
@@ -148,36 +193,44 @@ describe('the device chip (#502)', () => {
       }),
       'ru',
     )
-    expect(html(special)).toContain('>Сервер 50%<')
-    expect(html(special)).toContain('title="Работает на Сервер 50%"')
+    const [ruCorner] = byClassAll(special, 'card-device-corner')
+    expect(ruCorner?.attrs.get('title')).toBe('Агент на Сервер 50%')
+    expect(ruCorner?.attrs.get('aria-label')).toBe('Агент на Сервер 50%')
   })
 
-  test('without remote nodes (standalone or single-device nodes), a card draws no device badge (#502, #752)', () => {
+  test('without remote nodes (standalone or single-device nodes), a card draws no device corner or badge (#502, #752, #758)', () => {
+    const baseline = html(drawCard(local, payload({ items: [local] })))
     for (const data of [
       payload({ items: [local] }),
       payload({ items: [local], devices: [device('local', 'laptop')] }),
     ]) {
       const card = html(drawCard(local, data))
       expect(card).not.toContain('card-ident')
+      expect(card).not.toContain('card-device')
       expect(card).not.toContain('device-chip')
       expect(card).toContain('data-act="focus"')
+      expect(card).toBe(baseline)
     }
   })
 
-  test('a compact card (asleep in Idle) keeps its one name row and gets the chip in a row of its own', () => {
+  test('a compact card (asleep in Idle) keeps its single row with the coloured corner and zero text (#758)', () => {
     const asleep = item({ ...remote, sleeping: true, status: 'sleeping' })
     const card = drawCard(asleep, payload({ items: [asleep], devices: DEVICES }))
     const [article] = findAll(card, el => el.tag === 'article')
     expect(article && hasClass(article, 'compact')).toBe(true)
-    const rows = (article?.children ?? []).flatMap(n => (n.kind === 'element' ? [n.attrs.get('class') ?? ''] : []))
-    expect(rows.slice(0, 2)).toEqual(['card-top', 'card-ident'])
+    expect(rowClasses(card)).toEqual(['card-device-corner', 'card-top', 'card-actions'])
+    expect(html(card)).not.toContain('>server-1<')
   })
 
-  test('in Russian: the chip’s tooltip and the age in Russian', () => {
+  test('in Russian: the corner tooltip says "Агент на ..." and the offline age is in Russian', () => {
     const data = payload({ lang: 'ru', items: [remote], devices: [device('local', 'ноутбук'), offline()] })
     const card = html(drawCard(remote, data, 'ru'))
     expect(card).toContain('данные 8 мин назад')
     expect(card).toContain('server-1 не на связи')
+    const onlineRu = html(
+      drawCard(local, payload({ lang: 'ru', items: [local], devices: [device('local', 'ноутбук'), offline()] }), 'ru'),
+    )
+    expect(onlineRu).toContain('title="Агент на ноутбук"')
   })
 })
 
@@ -188,7 +241,11 @@ describe('an offline device (#502)', () => {
     const out = html(card)
     const [article] = findAll(card, el => el.tag === 'article')
     expect(article && hasClass(article, 'node-offline')).toBe(true)
+    expect(byClassAll(card, 'card-ident')).toEqual([])
+    const [top] = byClassAll(card, 'card-top')
+    expect(html(top ? [top] : [])).toContain('class="device-as-of"')
     expect(out).toContain('>as of 8 min ago<')
+    expect(out).not.toContain('class="age"')
     // Sleep and "no reply needed" answer that the device is not reachable, gray.
     const sleep = findAll(card, el => el.attrs.get('data-act') === 'sleep')[0]
     expect(sleep?.attrs.get('title')).toBe('server-1 is not reachable')
@@ -202,7 +259,7 @@ describe('an offline device (#502)', () => {
     expect(nodeLook(remote, [offline()], NOW, t)?.asOf).toBe('as of 8 min ago')
     expect(nodeLook(remote, [offline({ payloadAt: null })], NOW, t)?.asOf).toBe('as of 8 min ago')
     const never = offline({ payloadAt: null, link: { state: 'connecting', since: NOW, heardAt: null } })
-    expect(nodeLook(remote, [never], NOW, t)).toEqual({
+    expect(nodeLook(remote, [never], NOW, t)).toMatchObject({
       id: 'server-1',
       title: 'server-1',
       offline: true,
@@ -211,14 +268,15 @@ describe('an offline device (#502)', () => {
     })
     // A device the payload does not list is not heard either, named by its id.
     expect(nodeLook(remote, [], NOW, t)?.why).toBe('server-1 is not reachable')
-    // Master's card: its machine name when the board has nodes; null on standalone or single-device boards.
-    expect(nodeLook(local, DEVICES, NOW, t)).toEqual({
+    // Master's card: its machine name and colour when the board has nodes; null on standalone or single-device boards.
+    expect(nodeLook(local, DEVICES, NOW, t)).toMatchObject({
       id: 'local',
       title: 'laptop',
       offline: false,
       asOf: '',
       why: '',
     })
+    expect(nodeLook(local, DEVICES, NOW, t)?.color).toMatch(/^#[0-9a-f]{6}$/i)
     expect(nodeLook(local, [device('local', 'laptop')], NOW, t)).toBeNull()
     expect(nodeLook(local, undefined, NOW, t)).toBeNull()
   })
@@ -360,37 +418,49 @@ describe('a start placed on a device (#502, design 8.3)', () => {
     ...(devices && { devices, now: NOW }),
   })
 
-  test('its launch card shows the machine chip when placed (master too when nodes exist); none without nodes or while choosing', () => {
+  test('its launch card shows the coloured corner when placed (master too when nodes exist); none without nodes or while choosing', () => {
     const on = html(renderInBoard(<LaunchCard launch={launch({ device: 'server-1' })} look={look(DEVICES)} />, board()))
-    expect(on).toContain('class="card-ident"')
-    expect(on).toContain('>server-1<')
+    expect(on).not.toContain('card-ident')
+    expect(on).toContain('class="card-device-corner"')
+    expect(on).toContain('title="Agent on server-1"')
+    expect(on).not.toContain('>server-1<')
     const cloningRemote = html(
       renderInBoard(
         <LaunchCard launch={launch({ step: 'cloning', place: { device: 'server-1' } })} look={look(DEVICES)} />,
         board(),
       ),
     )
-    expect(cloningRemote).toContain('class="card-ident"')
-    expect(cloningRemote).toContain('>server-1<')
-    expect(cloningRemote).not.toContain('>laptop<')
+    expect(cloningRemote).toContain('class="card-device-corner"')
+    expect(cloningRemote).toContain('title="Agent on server-1"')
     const here = html(renderInBoard(<LaunchCard launch={launch()} look={look(DEVICES)} />, board()))
-    expect(here).toContain('class="card-ident"')
-    expect(here).toContain('>laptop<')
+    expect(here).toContain('class="card-device-corner"')
+    expect(here).toContain('title="Agent on laptop"')
     const placedLocal = html(
       renderInBoard(<LaunchCard launch={launch({ place: { device: 'local' } })} look={look(DEVICES)} />, board()),
     )
-    expect(placedLocal).toContain('class="card-ident"')
-    expect(placedLocal).toContain('>laptop<')
+    expect(placedLocal).toContain('class="card-device-corner"')
+    expect(placedLocal).toContain('title="Agent on laptop"')
+    const localTitledRemote = html(
+      renderInBoard(
+        <LaunchCard
+          launch={launch({ device: 'laptop' })}
+          look={look([device('local', 'Local', { selfId: 'server-2' }), device('laptop', 'Local')])}
+        />,
+        board(),
+      ),
+    )
+    expect(localTitledRemote).toContain('title="Agent on laptop"')
+    expect(localTitledRemote).not.toContain('Local')
     const choosing = html(
       renderInBoard(<LaunchCard launch={launch({ step: 'placing', place: {} })} look={look(DEVICES)} />, board()),
     )
-    expect(choosing).not.toContain('card-ident')
+    expect(choosing).not.toContain('card-device-corner')
     const standalone = html(renderInBoard(<LaunchCard launch={launch()} look={look()} />, board()))
-    expect(standalone).not.toContain('card-ident')
+    expect(standalone).not.toContain('card-device-corner')
     const standalonePlacedLocal = html(
       renderInBoard(<LaunchCard launch={launch({ place: { device: 'local' } })} look={look()} />, board()),
     )
-    expect(standalonePlacedLocal).not.toContain('card-ident')
+    expect(standalonePlacedLocal).not.toContain('card-device-corner')
   })
 
   test('the placer’s words, from the payload’s fields; nothing for values not sent yet', () => {
@@ -562,10 +632,10 @@ describe('the device switch (#502)', () => {
 
 // ---------------------------------------------------------------- nodes.css, and the phone's width
 
-describe('nodes.css (#502)', () => {
+describe('nodes.css (#502, #758)', () => {
   const css = readFileSync(join(import.meta.dir, '..', '..', 'web', 'styles', 'nodes.css'), 'utf8')
   const OWN = [
-    '.card-ident',
+    '.card-device-corner',
     '.device-chip',
     '.device-dot',
     '.device-title',
@@ -582,29 +652,30 @@ describe('nodes.css (#502)', () => {
     return at < 0 ? '' : css.slice(at, css.indexOf('}', at))
   }
 
-  test('every rule selects by a class of its own: a board without devices draws as before', () => {
+  test('every rule selects by a class of its own: a board without remote nodes draws as before', () => {
     const selectors = selectorsOf(css)
     expect(selectors.length).toBeGreaterThan(0)
     for (const s of selectors) expect(OWN.some(own => s.includes(own))).toBe(true)
-    // Nothing of the name row's.
-    for (const s of selectors) expect(/\.card-top|\.name\b/.test(s)).toBe(false)
+    expect(css).not.toContain('.card-ident')
   })
 
-  test('at a phone’s width the chip keeps its own row and gives way inside it, never taking the name’s room', () => {
-    // No rule of a narrow screen moves the row: it is a line of its own at every width.
+  test('coloured corner adds zero card height, exposes focus tooltip, and stays isolated in Terminal and wrap modes (#758)', () => {
+    // Positioned at the top-left corner: zero card height impact at every width.
     expect(css).not.toMatch(/@media[^{]*max-width/)
-    expect(body('.card-ident')).toContain('display: flex;')
-    expect(body('.card-ident')).toContain('min-width: 0;')
-    // A long title is cut inside the chip, the chip inside the row.
-    expect(body('.device-chip')).toContain('flex: 0 1 auto;')
-    expect(body('.device-chip')).toContain('min-width: 0;')
-    expect(body('.device-chip')).toContain('max-width: 100%;')
-    expect(body('.device-title')).toContain('text-overflow: ellipsis;')
-    // The greying leaves the card's buttons their own showing on hover (app.css: opacity 0 until hovered).
-    expect(css).toContain('.card.node-offline > :not(.card-ident):not(.card-actions) {')
+    expect(body('.card-device-corner')).toContain('position: absolute;')
+    expect(body('.card-device-corner')).toContain('top: 0;')
+    expect(body('.card-device-corner')).toContain('left: 0;')
+    expect(body('.card-device-corner:focus-visible::after')).toContain('content: attr(data-tip);')
+    // The greying leaves the card's corner, offline age, and buttons un-dimmed.
+    expect(css).toContain('.card.node-offline > :not(.card-top):not(.card-actions):not(.card-device-corner),')
+    expect(css).toContain('.card.node-offline > .card-top > :not(.device-as-of) {')
     expect(body('.card.node-offline > .card-actions')).not.toContain('opacity')
-    // The age beside it keeps its words whole.
     expect(body('.device-as-of')).toContain('flex: none;')
+
+    const terminalCss = readFileSync(join(import.meta.dir, '..', '..', 'web', 'styles', 'look-terminal.css'), 'utf8')
+    expect(terminalCss).toContain(':root[data-look="terminal"] .card-device-corner:focus-visible::after')
+    const wrapCss = readFileSync(join(import.meta.dir, '..', '..', 'web', 'styles', 'card-wrap.css'), 'utf8')
+    expect(wrapCss).toContain(':root[data-card-text="wrap"] .card-top > .device-as-of')
   })
 
   test('the page links it after the sheets it may build on', () => {

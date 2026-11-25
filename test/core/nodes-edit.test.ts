@@ -266,11 +266,17 @@ describe('title (#601)', () => {
     expect(applied({ op: 'set', id: 'local', title: null }, bare).r).toEqual({ changed: false })
   })
 
-  test('setting local title to nodes.id deletes title and falls back to nodes.id (#752)', () => {
+  test('setting local title to nodes.id or "local" (any case) deletes title and falls back to id (#752, #758)', () => {
     const base: Record<string, unknown> = { id: 'server-2', devices: { local: { title: 'Main Server' } } }
     expect(applied({ op: 'set', id: 'local', title: 'server-2' }, base).r).toEqual({ changed: true })
     expect(devices(base).local).toBeUndefined()
     expect(nodesConfig(base, 'laptop')?.devices.local?.title).toBe('server-2')
+
+    const remoteBase = section()
+    devices(remoteBase)['server-1'] = { ...devices(remoteBase)['server-1'], title: 'Atlas Box' }
+    expect(applied({ op: 'set', id: 'server-1', title: 'Local' }, remoteBase).r).toEqual({ changed: true })
+    expect('title' in (devices(remoteBase)['server-1'] ?? {})).toBe(false)
+    expect(nodesConfig(remoteBase, 'laptop')?.devices['server-1']?.title).toBe('server-1')
   })
 
   test('unchanged title returns changed: false; invalid or unknown device is refused without writing', () => {
@@ -279,5 +285,28 @@ describe('title (#601)', () => {
     expect(applied({ op: 'set', id: 'server-1', title: 'x'.repeat(201) }, base).r).toEqual({ error: 'title' })
     expect(applied({ op: 'set', id: 'server-1', title: 'bad\u001bname' }, base).r).toEqual({ error: 'title' })
     expect(applied({ op: 'set', id: 'server-9', title: 'Ghost' }, base).r).toEqual({ error: 'id' })
+  })
+
+  test('sets, clears, and validates device color (#758)', () => {
+    const base = section()
+    expect(nodesEditOf({ op: 'set', id: 'server-1', color: 'rose' })).toEqual({
+      op: 'set',
+      id: 'server-1',
+      values: { color: 'rose' },
+    })
+    expect(applied({ op: 'set', id: 'server-1', color: 'Rose' }, base).r).toEqual({ changed: true })
+    expect(devices(base)['server-1']?.color).toBe('rose')
+    expect(nodesConfig(base, 'laptop')?.devices['server-1']?.color).toBe('rose')
+
+    expect(applied({ op: 'set', id: 'local', color: '#336699' }, base).r).toEqual({ changed: true })
+    expect(devices(base).local?.color).toBe('#336699')
+
+    expect(applied({ op: 'set', id: 'server-1', color: 'invalid' }, base).r).toEqual({ error: 'color' })
+    expect(devices(base)['server-1']?.color).toBe('rose')
+
+    expect(applied({ op: 'set', id: 'server-1', color: '' }, base).r).toEqual({ changed: true })
+    expect('color' in (devices(base)['server-1'] ?? {})).toBe(false)
+    expect(applied({ op: 'set', id: 'local', color: null }, base).r).toEqual({ changed: true })
+    expect(devices(base).local).toBeUndefined()
   })
 })

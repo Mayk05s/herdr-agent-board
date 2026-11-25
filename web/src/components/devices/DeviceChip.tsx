@@ -1,15 +1,13 @@
-// The device of a card of another device (#502, docs/design/nodes 12): a small chip with the device's
-// title, in a row of its own under the card's name row, so it never takes the name's room in the
-// compact and the phone layouts. That row is the card's identity row (#141 adds the pane and the
-// profile to it): the chip goes there, not into a second one. An offline device's cards say how
-// old they are beside it. A card of this computer has no `device` and no row: it draws as before.
-import type { Item } from '../../../../src/core/types.ts'
+// The device of a card or sheet (#502, #758, docs/design/nodes 12): on a card, a small
+// coloured top-left corner with zero text and zero height impact ("Agent on <name>" / "Агент на
+// <name>" on hover and keyboard focus); in the session sheet's line, a chip with the device's
+// title and offline age (so touch users see the machine name there). A board without remote nodes
+// draws none of it.
 import { useT } from '../../i18n/I18nProvider.tsx'
-import { type NodeLook, nodeLook } from '../../models/devices.ts'
-import { useBoardContext } from '../../state/BoardProvider.tsx'
+import type { NodeLook } from '../../models/devices.ts'
 import { classNames } from '../class-names.ts'
 
-/** The chip alone: the card's row, the launch card's and the session sheet's head. */
+/** The chip alone: the session sheet's head. */
 export function DeviceChip({ node }: { node: NodeLook }) {
   const t = useT()
   return (
@@ -33,15 +31,24 @@ export function DeviceFacts({ node }: { node: NodeLook }) {
   )
 }
 
-/** A card's identity row with its device; none for a card of this computer. */
-export function CardIdentity({ item }: { item: Pick<Item, 'device'> }) {
+/**
+ * Subtle coloured top-left corner on a card (#758): zero text, zero height impact; hover or
+ * keyboard focus shows "Agent on <name>" / "Агент на <name>" (or offline reason), and
+ * aria-label carries the machine name so colour is never the only carrier.
+ */
+export function CardDeviceCorner({ node }: { node: NodeLook }) {
   const t = useT()
-  const { data, now } = useBoardContext()
-  const node = nodeLook(item, data?.devices, now, t)
-  if (!node) return null
+  const label = node.why || t('node.agentOn', { name: node.title })
   return (
-    <div className="card-ident">
-      <DeviceFacts node={node} />
-    </div>
+    <span
+      className={classNames('card-device-corner', node.offline && 'offline')}
+      style={{ '--device': node.color }}
+      role="img"
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: keyboard users can focus the corner to read which machine runs the card
+      tabIndex={0}
+      aria-label={label}
+      title={label}
+      data-tip={label}
+    />
   )
 }

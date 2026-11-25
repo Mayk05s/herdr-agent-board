@@ -173,9 +173,10 @@ describe('core/master-handover (#697)', () => {
       lanes: ['atlas', 'agent-board'],
       relay: { host: 'relay.example.com', sshPort: 22, user: 'agent-board-relay-m' },
       devices: {
-        local: { title: 'Anna Laptop', maxSessions: 4, minFreeMemMb: 2048, tags: ['mac'] },
+        local: { title: 'Anna Laptop', color: 'bronze', maxSessions: 4, minFreeMemMb: 2048, tags: ['mac'] },
         'server-1': {
           title: 'Atlas Server',
+          color: 'teal',
           link: { kind: 'ssh', host: 'atlas.example.com', sshPort: 22, user: 'agent-board-link', port: 12430 },
           maxSessions: 12,
           tags: ['linux'],
@@ -205,11 +206,13 @@ describe('core/master-handover (#697)', () => {
     expect((flipped.devices as Record<string, unknown>)['revoked-box']).toBeUndefined()
     expect((flipped.devices as Record<string, unknown>).local).toEqual({
       title: 'Atlas Server',
+      color: 'teal',
       maxSessions: 12,
       tags: ['linux'],
     })
     expect((flipped.devices as Record<string, unknown>).laptop).toEqual({
       title: 'Anna Laptop',
+      color: 'bronze',
       maxSessions: 4,
       minFreeMemMb: 2048,
       tags: ['mac'],
@@ -245,16 +248,18 @@ describe('core/master-handover (#697)', () => {
         id: 'laptop',
         order: ['local', 'server-1'],
         devices: {
-          'server-1': { title: 'Atlas', link: { kind: 'direct', url: 'http://127.0.0.1:12430' } },
+          local: { title: 'Local' },
+          'server-1': { title: 'LOCAL', link: { kind: 'direct', url: 'http://127.0.0.1:12430' } },
         },
       },
       {
         oldMasterId: 'laptop',
         targetId: 'server-1',
-        oldMasterTitle: 'local',
+        oldMasterTitle: 'LOCAL',
         reverseLink: { kind: 'relay', socket: 'laptop' },
       },
     )
+    expect((literalLocalFallback.devices as Record<string, Record<string, unknown>>).local).toEqual({})
     expect((literalLocalFallback.devices as Record<string, Record<string, unknown>>).laptop).toEqual({
       link: { kind: 'relay', socket: 'laptop' },
     })
