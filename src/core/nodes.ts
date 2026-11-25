@@ -64,6 +64,12 @@ export interface DeviceConfig {
    * bypass; absent, it is on. Only here when off.
    */
   pilotBridge?: false
+  /**
+   * Whether this board takes a request the device relays (#764, services/nodes/master-relay.ts) as
+   * the owner's, held to what the owner may do from away: `owner: false` turns it off; absent, it is
+   * on, as the machines are one mesh of the owner's (design 10, Trust). Only here when off.
+   */
+  owner?: false
 }
 
 /**
@@ -144,6 +150,7 @@ const DEVICE_KEYS = [
   'accept',
   'giveSecrets',
   'pilotBridge',
+  'owner',
 ]
 const LINK_KEYS: Record<LinkConfig['kind'], string[]> = {
   ssh: ['kind', 'host', 'sshPort', 'user', 'port'],
@@ -359,6 +366,8 @@ function deviceOf(
   if (o.sinks !== undefined && !isObject(o.sinks)) flag('sinks', 'type')
   if (o.giveSecrets !== undefined && typeof o.giveSecrets !== 'boolean') flag('giveSecrets', 'type')
   if (o.pilotBridge !== undefined && typeof o.pilotBridge !== 'boolean') flag('pilotBridge', 'type')
+  if (o.owner !== undefined && typeof o.owner !== 'boolean') flag('owner', 'type')
+  if (id === LOCAL && o.owner !== undefined) flag('owner', 'local')
   const device: DeviceConfig = {
     id,
     title,
@@ -377,6 +386,7 @@ function deviceOf(
     accept: words('accept'),
     ...(o.giveSecrets === false && { giveSecrets: false as const }),
     ...(o.pilotBridge === false && { pilotBridge: false as const }),
+    ...(o.owner === false && { owner: false as const }),
   }
   return ok ? device : null
 }
@@ -807,6 +817,7 @@ const DEVICE_SETTINGS = [
   'drain',
   'giveSecrets',
   'pilotBridge',
+  'owner',
   'maxSessions',
   'minFreeMemMb',
   'maxLoad',
@@ -883,7 +894,7 @@ export function nodesEditOf(body: Record<string, unknown>): NodesEdit | { error:
     const fits =
       key === 'title' || key === 'color'
         ? v === null || typeof v === 'string'
-        : key === 'paused' || key === 'drain' || key === 'giveSecrets' || key === 'pilotBridge'
+        : key === 'paused' || key === 'drain' || key === 'giveSecrets' || key === 'pilotBridge' || key === 'owner'
           ? typeof v === 'boolean'
           : v === null || typeof v === 'number'
     if (!fits) return { error: key }
@@ -894,6 +905,8 @@ export function nodesEditOf(body: Record<string, unknown>): NodesEdit | { error:
   if (body.id === LOCAL && 'paused' in values) return { error: 'paused' }
   // Nor given secrets: they are this computer's own.
   if (body.id === LOCAL && 'giveSecrets' in values) return { error: 'giveSecrets' }
+  // Nor its relay switched: this computer relays nothing to itself.
+  if (body.id === LOCAL && 'owner' in values) return { error: 'owner' }
   return { op: 'set', id: body.id, values }
 }
 
@@ -950,6 +963,7 @@ export function applyNodesEdit(
         else entry.color = trimmed.toLowerCase()
       } else if (key === 'giveSecrets' && v === true) delete entry[key]
       else if (key === 'pilotBridge' && v === true) delete entry[key]
+      else if (key === 'owner' && v === true) delete entry[key]
       else entry[key] = v
     if (edit.id === LOCAL && Object.keys(entry).length === 0) {
       delete devices[LOCAL]
