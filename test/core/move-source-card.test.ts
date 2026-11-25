@@ -56,9 +56,7 @@ test('a marked card stays while no card of its session is on the device it moved
   ).toEqual([`@server-3:${SID}`])
   // server-2 still shows a card of the session, so the laptop's is gone; server-2's own source
   // stays, as nothing runs on server-3 yet.
-  expect(keys([laptop({ movedTo: 'server-2' }), atServer2({ movedTo: 'server-3' })])).toEqual([
-    `@server-2:${SID}`,
-  ])
+  expect(keys([laptop({ movedTo: 'server-2' }), atServer2({ movedTo: 'server-3' })])).toEqual([`@server-2:${SID}`])
 })
 
 test('a move back names the master by its id, which its own cards carry no device under', () => {
@@ -80,4 +78,18 @@ test('cards with no mark, and cards without a session id, are left exactly as th
   // A session other cards share nothing with: order and count kept.
   const other = card({ key: 'x'.repeat(36), session: 'x'.repeat(36), name: 'other' })
   expect(keys([laptop({ movedTo: 'server-2' }), atServer2(), other])).toEqual([`@server-2:${SID}`, other.key])
+})
+
+test('#642 fix: a sleeping destination card does not drop the awake source', () => {
+  // The session came back on the master while server-2's card sleeps: dropMovedCards must keep
+  // the awake source, or the master's payload hides the only card that can answer.
+  // The awake source stays; the node's sleeping card stays listed too, but the source is targetable.
+  expect(keys([laptop({ movedTo: 'server-2', activity: 500 }), atServer2({ sleeping: true, activity: 1 })])).toEqual([
+    SID,
+    `@server-2:${SID}`,
+  ])
+  // Both asleep: the mark still hides the source, as collect() does.
+  expect(keys([laptop({ movedTo: 'server-2', sleeping: true }), atServer2({ sleeping: true })])).toEqual([
+    `@server-2:${SID}`,
+  ])
 })

@@ -421,20 +421,21 @@ const ENTRY: Record<string, Check> = {
 
 /**
  * Cards of a merged payload left after a move (#642): a card its own board marked `movedTo` goes
- * when the session has another card running on that device — `masterId` naming this computer, whose
- * own cards carry no `device` (a move back from a node marks the master's id, #616). Only the mark
- * drops, never the clocks: a chain move (laptop → server-2 → server-3) leaves no duplicate, while a
+ * when the session has another card running AWAKE on that device — `masterId` naming this computer,
+ * whose own cards carry no `device` (a move back from a node marks the master's id, #616). A
+ * sleeping destination does not drop an awake source: the session came back here, and only a
+ * source that sleeps too hides behind the mark (targetsOf in core/agent-send.ts answers the same).
+ * Only the mark drops, never the clocks: a chain move (laptop → server-2 → server-3) leaves no duplicate, while a
  * card of a session with no card yet on the device it moved to stays (an offline node, a move that
  * did not land). Items without a session id are never compared. Order is kept.
  */
 export function dropMovedCards(items: readonly Item[], masterId = ''): Item[] {
   const same = new Map<string, Item[]>()
-  for (const i of items)
-    if (i.session) same.set(i.session, [...(same.get(i.session) ?? []), i])
+  for (const i of items) if (i.session) same.set(i.session, [...(same.get(i.session) ?? []), i])
   const here = (j: Item): string => j.device ?? masterId
   return items.filter(i => {
     if (!i.movedTo || !i.session) return true
-    return !(same.get(i.session) ?? []).some(j => j !== i && here(j) === i.movedTo)
+    return !(same.get(i.session) ?? []).some(j => j !== i && here(j) === i.movedTo && (!j.sleeping || i.sleeping))
   })
 }
 

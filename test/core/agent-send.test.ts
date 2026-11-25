@@ -239,7 +239,7 @@ test('#639 the moved card is weighed against targets only; one device’s cards 
   ).toHaveLength(2)
 })
 
-test('#642 the card a move marked is dropped by its mark, not by weighing two machines\' clocks', () => {
+test("#642 the card a move marked is dropped by its mark, not by weighing two machines' clocks", () => {
   const keys = (items: unknown[]) => targetsOf(items).map(t => t.key)
   const laptop = (more: Record<string, unknown>) => card(A, 'Legacy-master', more)
   const node = (more: Record<string, unknown>) =>
@@ -255,4 +255,41 @@ test('#642 the card a move marked is dropped by its mark, not by weighing two ma
   // Moved back: the laptop's card, unmarked, answers by name again even while server-2's lingers.
   expect(keys([laptop({ activity: 1 }), node({ activity: 9_999, sleeping: true })])).toEqual([`@server-2:${A}`])
   expect(keys([laptop({ activity: 9_999 }), node({ activity: 1, sleeping: true, movedTo: 'laptop' })])).toEqual([A])
+})
+
+test('#642 fix: a chain mark does not read as a move back; the two paths agree', () => {
+  const keys = (items: unknown[]) => targetsOf(items).map(t => t.key)
+  const laptop = (more: Record<string, unknown>) => card(A, 'Legacy-master', more)
+  const s2 = (more: Record<string, unknown>) => card(`@server-2:${A}`, 'Legacy-master', { device: 'server-2', ...more })
+  const s3 = (more: Record<string, unknown>) => card(`@server-3:${A}`, 'Legacy-master', { device: 'server-3', ...more })
+  // The blocker's shape: laptop -> server-2 -> server-3, nothing on server-3 yet. Before the fix the
+  // master card of the pair (unmarked by device, and with its own mark) let s2's mark read as a move
+  // back, so BOTH laptop and s2 dropped and `board send` had no target. s2's mark names server-3,
+  // so it stays: exactly one card remains, the one where the session last landed.
+  expect(keys([laptop({ activity: 9_999, movedTo: 'server-2' }), s2({ activity: 1, movedTo: 'server-3' })])).toEqual([
+    `@server-2:${A}`,
+  ])
+  // The full chain landed: the marks retire laptop AND s2 against every kept card, leaving server-3 —
+  // exactly what dropMovedCards answers for the same input (test/core/move-source-card.test.ts).
+  expect(
+    keys([
+      laptop({ activity: 9_999, movedTo: 'server-2' }),
+      s2({ activity: 1, movedTo: 'server-3' }),
+      s3({ activity: 50 }),
+    ]),
+  ).toEqual([`@server-3:${A}`])
+})
+
+test('#642 fix: a sleeping destination does not hide the awake source behind its stale mark', () => {
+  const keys = (items: unknown[]) => targetsOf(items).map(t => t.key)
+  const laptop = (more: Record<string, unknown>) => card(A, 'Legacy-master', more)
+  const node = (more: Record<string, unknown>) =>
+    card(`@server-2:${A}`, 'Legacy-master', { device: 'server-2', ...more })
+  // Session resumed on the master while server-2's card sleeps and the mark was never cleared:
+  // the working card stays targetable; the #641 weigh decides instead of the one-sided mark.
+  expect(keys([laptop({ activity: 9_999, movedTo: 'server-2' }), node({ activity: 1, sleeping: true })])).toEqual([A])
+  // Both asleep: the mark hides the source, as collect() does for a sleeping marked card.
+  expect(
+    keys([laptop({ activity: 9_999, sleeping: true, movedTo: 'server-2' }), node({ activity: 1, sleeping: true })]),
+  ).toEqual([`@server-2:${A}`])
 })

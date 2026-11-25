@@ -87,22 +87,34 @@ function replaced(t: Target, by: Target): boolean {
 /**
  * One whose session runs on another device now (#639): a move (`board move --device`, #616) can leave
  * the card it had where it was, under the session's id, beside the new one under the other device's.
- * The mark the source card carries (`movedTo`, core/types.ts) says so outright (#642): where it points
- * to the other card's device — or anywhere off here while the other card is this computer's own, since
- * a move back marks the master's id (#616) — this one is no target. No such match, or no mark at all
- * (a board too old to write one): the more recent activity is where it runs, as #641 weighed it; an
+ * A card its own board marked `movedTo` (#642) goes before this weighing, in `movedAwayByMark` below —
+ * as dropMovedCards (core/node-items.ts) does for the merged payload — so what is weighed here is the
+ * #641 fallback for boards too old to write a mark: the more recent activity is where it runs; an
  * awake card beats a sleeping one of the same moment.
  */
 function movedAway(t: Target, by: Target): boolean {
   if (by === t || by.device === t.device || !t.session || by.session !== t.session) return false
-  const marksThis = !!t.movedTo && (t.movedTo === by.device || (!by.device && t.device))
-  const marksOther = !!by.movedTo && (by.movedTo === t.device || (!t.device && by.device))
-  // A mark decides the pair outright: a marked-away card goes and the card it marks stays even when
-  // the stale one's clock runs ahead, which is the whole point of the mark (#642, #641's weigh could
-  // drop both when each side was judged against the other). No mark either way: the #641 weigh, as is.
-  if (marksThis || marksOther) return marksThis
   if (by.activity !== t.activity) return by.activity > t.activity
   return t.sleeping && !by.sleeping
+}
+
+/**
+ * A card of #642 its own mark retires: its `movedTo` names a device where an AWAKE card of the
+ * session runs. This computer's own cards carry no `device`, so a move back (#616 marks the master's
+ * id) is a mark pointing at an unmarked master card — and a marked one is not: a chain move
+ * (laptop -> server-2 -> server-3) reads as a move on, leaving only the last card, as dropMovedCards
+ * does. A sleeping destination does not hide an awake source: the session came back here, and a
+ * source that sleeps too hides behind the mark, as collect() of services/board.ts leaves it out.
+ */
+function movedAwayByMark(t: Target, cards: readonly Target[]): boolean {
+  if (!t.movedTo || !t.session) return false
+  return cards.some(
+    o =>
+      o !== t &&
+      o.session === t.session &&
+      (o.device ? t.movedTo === o.device : t.device !== null && !o.movedTo) &&
+      (!o.sleeping || t.sleeping),
+  )
 }
 
 /** The cards of a payload's `items` a message can go to; anything else in the list is left out. */
@@ -132,8 +144,11 @@ export function targetsOf(items: unknown): Target[] {
     })
   }
   const kept = all.filter(t => t.sleeping || ((t.pane || t.day) && !all.some(o => replaced(t, o))))
-  // Against the cards kept only: one that is no target itself does not push out the one that is.
-  return kept.filter(t => !kept.some(o => movedAway(t, o)))
+  // The marks go first, judged against every kept card — a card the marks retire still answers for
+  // the chain, so laptop -> server-2 -> server-3 keeps only server-3's — then the #641 weigh over
+  // the survivors: one that is no target itself does not push out the one that is.
+  const survivors = kept.filter(t => !movedAwayByMark(t, kept))
+  return survivors.filter(t => !survivors.some(o => movedAway(t, o)))
 }
 
 /** A local session on this computer running an agent other than Claude Code (`agy`, `pi`, `codex`, ...). */
