@@ -19,6 +19,15 @@ import {
 
 const NOW = 1_795_210_000_000
 
+test('Codex placement does not depend on another agent’s profile or login', () => {
+  const v = view({
+    devices: {
+      'server-1': { status: status({ agents: ['claude', 'codex'], profiles: [{ id: 'default', loggedIn: false }] }) },
+    },
+  })
+  assert.deepEqual(place(task({ agent: 'codex' }), v, NOW), { on: 'server-1', why: 'room' })
+})
+
 const status = (o: Partial<DeviceStatus> = {}): DeviceStatus => ({
   memAvailableMb: 20_000,
   load: [0.1, 0.1, 0.1],

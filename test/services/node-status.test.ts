@@ -46,6 +46,7 @@ function sources(over: Partial<StatusSources> = {}): StatusSources {
     exists: file => file.replaceAll('\\', '/') === '/home/owner/.claude/.credentials.json',
     launch: () => undefined,
     piFound: () => false,
+    codexFound: () => false,
     platform: 'linux',
     arch: 'x64',
     home: '/home/owner',
@@ -55,6 +56,11 @@ function sources(over: Partial<StatusSources> = {}): StatusSources {
 }
 
 describe('the status', () => {
+  test('Windows advertises Codex when the launcher can find it', async () => {
+    const status = createNodeStatus(sources({ platform: 'win32', codexFound: () => true }))
+    expect((await status.answer())?.agents).toEqual(['claude', 'codex'])
+  })
+
   test("the answer of 6.3, field for field, from a Linux node's facts", async () => {
     let asked = ''
     const status = createNodeStatus(

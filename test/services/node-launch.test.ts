@@ -237,6 +237,9 @@ test('below 512 MB available the node answers full; a profile it lacks or that i
     body: { error: 'profile', detail: 'login' },
   })
   assert.equal(n.starts.length, 0)
+  const codex = await createNodeLaunch(n.deps).answer(repoBody({ id: OTHER, source: path, agent: 'codex' }))
+  assert.equal(codex.status, 202)
+  assert.equal(n.starts[0]?.body.agent, 'codex')
 })
 
 test('a repository missing on the node is cloned under <workRoot>/<host>/<path>; a checkout with changes answers repo', async () => {
