@@ -35,6 +35,19 @@ which places it. Without it the board places the session by its rules, as before
 export const LAUNCHER_CHILD = 'BOARD_SPAWN_CHILD'
 
 /**
+ * Set by the board on every launcher it runs (services/launch/launcher.ts, #815): a start the owner
+ * asked the board for, never counted against a session's limits, whatever identity the board's own
+ * env carries.
+ */
+export const OWNER_START = 'BOARD_OWNER_START'
+
+/**
+ * Set by the board's MCP on the command it runs for a caller it names (entrypoints/mcp-http.ts,
+ * #815): that caller is a session even when only its pane is known, so its starts are gated.
+ */
+export const MCP_CALLER = 'BOARD_MCP_CALLER'
+
+/**
  * What spawn-agent prints when the session runs on this computer, which the board and agents read:
  * `pane=<id> name=<Name> agent=<herdr name>`, with ` kind=<agent>` when it is not Claude.
  */

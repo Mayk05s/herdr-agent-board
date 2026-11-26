@@ -67,13 +67,17 @@ import {
   claudeCommand,
   HELP,
   LAUNCHER_CHILD,
+  MCP_CALLER,
+  OWNER_START,
   parseArgs,
   type SpawnOptions,
   spawnLine,
   withConvertedPaths,
 } from '../core/launch/spawn-args.ts'
+import type { SpawnParty } from '../core/spawn-limits.ts'
 import type { Config } from '../core/types.ts'
 import { paneInfo, spawnAgent } from '../services/launch/spawn-agent.ts'
+import type { SpawnGate } from '../services/launch/spawn-gate.ts'
 
 // Started by the sh shim under Git Bash (core/install-plan.ts GIT_BASH_PATHS, #490): the arguments
 // came as typed, so a brief or a name that starts with / stays itself, and the folder and file
@@ -84,6 +88,9 @@ const gitBash = takeGitBashArgs()
 // given, and nothing it starts inherits the mark.
 const launcherChild = process.env[LAUNCHER_CHILD] !== undefined
 delete process.env[LAUNCHER_CHILD]
+// Every launcher the board runs marks the start as the owner's (#815): no session's limits hold.
+const ownerStart = process.env[OWNER_START] !== undefined
+delete process.env[OWNER_START]
 
 /**
  * The profile's env file (#507) for the new tab, on a node or the master alike (#824): a board made
@@ -96,13 +103,14 @@ async function nodeEnvOf(): Promise<Pick<Parameters<typeof spawnAgent>[1] & obje
 
 /**
  * Start the session here, in this computer's herdr. `kase` (#488, --thread): told once herdr reports
- * an agent in the new pane, and once the session is up, its words go after the spawn line.
+ * an agent in the new pane, and once the session is up, its words go after the spawn line. Returns
+ * the line to print and the session it started.
  */
 async function startHere(
   o: SpawnOptions,
   cfg: Config,
   kase?: { onAgent(pane: string): void; started(r: { session: string | null; name: string }): string },
-): Promise<void> {
+): Promise<{ line: string; child: SpawnParty }> {
   const launch = cfg.launch ?? {}
   const register = o.workdeskWorker
     ? await (await import('../services/workdesk-workers.ts')).prepareWorkerLaunch(cfg.workdesk)
@@ -122,7 +130,11 @@ async function startHere(
     home,
     ticketNames: launch.linkedWorkspaces === true,
     ...(await nodeEnvOf()),
-    ...(kase && { onAgent: kase.onAgent }),
+    // herdr reported an agent in the new pane: a start that fails after this still runs (#815).
+    onAgent: pane => {
+      opened = pane
+      kase?.onAgent(pane)
+    },
   })
   if (register) {
     try {
@@ -134,7 +146,52 @@ async function startHere(
       )
     }
   }
-  console.log(`${spawnLine(r)}${kase ? kase.started(r) : ''}`)
+  return {
+    line: `${spawnLine(r)}${kase ? kase.started(r) : ''}`,
+    child: { pane: r.pane, ...(r.session && { session: r.session }) },
+  }
+}
+
+/** The pane herdr reported an agent in, once a start here got that far. */
+let opened: string | null = null
+
+/**
+ * The limits on a session's starts (#815, services/launch/spawn-gate.ts): null for the owner's
+ * starts (no session in the env, a launcher the board runs), which load none of it.
+ */
+async function gateOf(o: SpawnOptions, cfg: Config): Promise<SpawnGate | null> {
+  if (launcherChild || ownerStart) return null
+  const env = process.env
+  // A pane alone: pi in it, or the board's MCP running this for a caller it named by its pane.
+  const pi = !!(env.PI_CODING_AGENT || env[MCP_CALLER]) && !!env.HERDR_PANE_ID
+  if (!env.CLAUDE_CODE_SESSION_ID && !env.ANTIGRAVITY_CONVERSATION_ID && !env.CODEX_THREAD_ID && !pi) return null
+  const { gateSpawn } = await import('../services/launch/spawn-gate.ts')
+  return gateSpawn(o, { env, cfg, log: line => console.error(`spawn-agent: ${line}`) })
+}
+
+/** Start it: here, placed by the board, or up to a node's master; the line to print. */
+async function start(o: SpawnOptions, cfg: Config): Promise<{ line: string; child?: SpawnParty }> {
+  // Case files (#488): --thread starts here, never placed, from the case's brief.
+  if (o.thread) return startCase(o, cfg)
+  const hasNodes = cfg.nodes !== undefined && cfg.nodes !== null && cfg.nodes !== false
+  const hasNode = cfg.node !== undefined && cfg.node !== null && cfg.node !== false
+  // On a node (#760) the master places a new session; nothing of that is loaded elsewhere.
+  const node = hasNode && !hasNodes && !launcherChild ? await nodeStart(o, cfg) : undefined
+  if (node !== undefined) return node !== null ? { line: node } : startHere(o, cfg)
+  // With `nodes` the board places a new session (#505); without it, nothing of that is loaded.
+  const placed =
+    hasNodes && !launcherChild
+      ? await (await import('../services/launch/spawn-board.ts')).askBoard(o, cfg, {
+          profiles: loadProfiles({ home: homedir() }),
+          env: process.env,
+          home: homedir(),
+        })
+      : null
+  if (placed !== null) return { line: placed }
+  // --device (#760) on a board with no other machine: only its own computer is one.
+  if (o.device !== undefined && o.device !== 'local' && !hasNodes && !launcherChild)
+    throw new Error(`--device ${o.device}: this board has no other devices (no nodes in its config.json)`)
+  return startHere(o, cfg)
 }
 
 try {
@@ -145,35 +202,18 @@ try {
     console.log(`${HELP}\n\n${CASES_HELP}`)
   } else {
     const cfg = loadConfig()
-    // Case files (#488): --thread starts here, never placed, from the case's brief.
-    if (o.thread) await startCase(o, cfg)
-    else {
-      const hasNodes = cfg.nodes !== undefined && cfg.nodes !== null && cfg.nodes !== false
-      const hasNode = cfg.node !== undefined && cfg.node !== null && cfg.node !== false
-      // On a node (#760) the master places a new session; nothing of that is loaded elsewhere.
-      const node = hasNode && !hasNodes && !launcherChild ? await nodeStart(o, cfg) : undefined
-      if (node !== undefined) {
-        if (node !== null) console.log(node)
-        else await startHere(o, cfg)
-      } else {
-        // With `nodes` the board places a new session (#505); without it, nothing of that is loaded.
-        const placed =
-          hasNodes && !launcherChild
-            ? await (await import('../services/launch/spawn-board.ts')).askBoard(o, cfg, {
-                profiles: loadProfiles({ home: homedir() }),
-                env: process.env,
-                home: homedir(),
-              })
-            : null
-        if (placed !== null) console.log(placed)
-        else {
-          // --device (#760) on a board with no other machine: only its own computer is one.
-          if (o.device !== undefined && o.device !== 'local' && !hasNodes && !launcherChild)
-            throw new Error(`--device ${o.device}: this board has no other devices (no nodes in its config.json)`)
-          await startHere(o, cfg)
-        }
-      }
+    // A session's start passes its limits first (#815), wherever it then runs.
+    const gate = await gateOf(o, cfg)
+    let started: { line: string; child?: SpawnParty }
+    try {
+      started = await start(o, cfg)
+    } catch (err) {
+      // Failed after herdr reported the agent (a dialog, a brief that did not reach): it runs, so it counts.
+      gate?.settle(opened === null ? null : '', opened === null ? undefined : { pane: opened })
+      throw err
     }
+    gate?.settle(started.line, started.child)
+    console.log(started.line)
   }
 } catch (err) {
   console.error(`spawn-agent: ${err instanceof Error ? err.message : String(err)}`)
@@ -215,7 +255,7 @@ async function nodeStart(o: SpawnOptions, cfg: Config): Promise<string | null | 
  * assignee under the minted id, whether or not it finished starting; what is left to do is said on
  * stderr. No agent, and the case stays with its holder.
  */
-async function startCase(o: SpawnOptions, cfg: Config): Promise<void> {
+async function startCase(o: SpawnOptions, cfg: Config): Promise<{ line: string; child: SpawnParty }> {
   if (cfg.node !== undefined && cfg.node !== null && cfg.node !== false) {
     const { nodeConfig } = await import('../core/nodes.ts')
     if (nodeConfig(cfg.node) !== null)
@@ -240,7 +280,7 @@ async function startCase(o: SpawnOptions, cfg: Config): Promise<void> {
   for (const note of kase.notes) console.error(`spawn-agent: ${kase.key} ${note}`)
   let ran: string | null = null
   try {
-    await startHere(kase.options, cfg, {
+    return await startHere(kase.options, cfg, {
       onAgent: pane => {
         ran = pane
       },
