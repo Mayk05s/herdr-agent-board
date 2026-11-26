@@ -109,6 +109,18 @@ test('a Codex request (#426): no Claude profile asked for; an effort only with a
   }
 })
 
+test('an absolute Windows folder pinned to a node is passed through literally', async () => {
+  const box = await sandbox()
+  const profiles = profileSet(mergeProfiles([], [], box.dir).list, defaultProfileDir(box.dir))
+  const cwd = String.raw`C:\Users\Owner\Projects\Трипио 100%`
+  const body = { name: 'Windows project', cwd, workspace: { id: 'w2' } }
+  const r = await checkRequest({ ...body, pin: { device: 'win-laptop' } }, { profiles, pins: true })
+  assert.ok(r.ok)
+  assert.equal(r.launch.cwd, cwd)
+  assert.equal(r.launch.remote, 'win-laptop')
+  assert.equal((await checkRequest({ ...body, cwd: 'relative' }, { profiles, pins: true })).ok, false)
+})
+
 test('a launch request is checked before anything runs', async () => {
   const box = await sandbox()
   const dir = join(box.dir, 'Acme project')

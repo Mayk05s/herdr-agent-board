@@ -3,6 +3,7 @@
 // Claude profile it starts in, refused when the board cannot be sure of it, and the agent it
 // starts as (core/launch/agents.ts), one the board offers, and the model it starts on, if one is
 // asked for (core/launch/model.ts): empty is the profile's default.
+import { win32 } from 'node:path'
 import { cachedCodexModels } from '../../adapters/codex-home.ts'
 import { resolvePath } from '../../adapters/files.ts'
 import { SLOW, statOf } from '../../adapters/folders.ts'
@@ -176,13 +177,15 @@ export async function checkRequest(
     remote = forcedRemote
   } else {
     cwd = resolvePath(b.cwd).path
-    if (!cwd) return fail('cwd', 'launch.err.cwdEmpty')
-    const st = await statOf(cwd, 3000)
+    const foreignPath = typeof b.cwd === 'string' ? b.cwd.trim() : ''
+    const pinnedNode = pin && 'device' in pin && pin.device !== LOCAL ? pin.device : null
+    if (!cwd && !(pinnedNode && win32.isAbsolute(foreignPath))) return fail('cwd', 'launch.err.cwdEmpty')
+    const st = cwd ? await statOf(cwd, 3000) : null
     if (st === SLOW) return fail('cwd', 'launch.err.cwdSlow', { path: cwd })
-    if (!st && pin && 'device' in pin && pin.device !== LOCAL) {
+    if (!st && pinnedNode) {
       // A folder of the pinned node, as that node names it: taken as written, never resolved here.
-      remote = pin.device
-      cwd = String(b.cwd).trim()
+      remote = pinnedNode
+      cwd = foreignPath
     } else if (!st) return fail('cwd', 'launch.err.cwdMissing', { path: cwd })
     else if (!st.isDirectory()) return fail('cwd', 'launch.err.cwdFile', { path: cwd })
   }

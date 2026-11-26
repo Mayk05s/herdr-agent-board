@@ -39,6 +39,7 @@ import { branchPushed, checkoutFacts, checkoutIdentity, gitInfo, headCommit } fr
 import { createNodeQueue, type NodeQueue, type NodeSource, type QueueEntry } from '../../adapters/node-queue.ts'
 import { knobMs, pace } from '../../adapters/pacing.ts'
 import { ROOT } from '../../adapters/paths.ts'
+import { CODEX_AGENT } from '../../core/codex.ts'
 import { t } from '../../core/lang.ts'
 import { checkBranch } from '../../core/launch/names.ts'
 import type { NodeFolderFacts } from '../../core/launch/spawn-node.ts'
@@ -594,7 +595,7 @@ export function createPlacer(o: PlacerOptions): Placer {
     p.device = device
     delete p.wait
     h.l.state = 'starting'
-    if (o.bundle && !skipSync && !ownProfiles(device)) {
+    if (o.bundle && !skipSync && (h.l.agent !== CODEX_AGENT || h.l.exactSession) && !ownProfiles(device)) {
       if (h.gone || closed) {
         if (closed) release(session)
         return 'done'
