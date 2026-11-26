@@ -5,14 +5,15 @@
 // the peer its post reaches them as the owner's agent under its name; a service in a lane not shared
 // is held; it waits for what comes in on its thread and reads it.
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from 'bun:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { generateKey, type KeyPair } from '../../src/core/team.ts'
 import { teamAgents } from '../../src/entrypoints/team-agents-cli.ts'
 import { teamWait, waitFlags } from '../../src/entrypoints/team-inbox-cli.ts'
 import { type Harness, msgOf, question, startHarness } from '../hub/harness.ts'
 import { serveBoard } from '../support/board-server.ts'
-import { sandbox } from '../support/sandbox.ts'
+import { type Sandbox, sandbox } from '../support/sandbox.ts'
+import { softAuthenticator } from '../support/soft-authenticator.ts'
 
 setDefaultTimeout(60_000)
 
@@ -193,4 +194,101 @@ test('registered in the panel, it posts in its lane as the owner agent, is held 
     ),
   ).toEqual({ threads: [], waited: 1 })
   annaClient.close()
+})
+
+/** config.json with the team on, followed as it changes, and the board's key where it keeps it. */
+async function teamBoard(box: Sandbox, me: KeyPair): Promise<string> {
+  const state = join(box.env.LOCALAPPDATA as string, 'herdr', 'plugins', 'agent-board')
+  mkdirSync(state, { recursive: true })
+  writeFileSync(join(state, 'team-key.json'), JSON.stringify({ v: 1, ...me }), { mode: 0o600 })
+  const cfg = {
+    language: 'en',
+    categories: [{ id: 'home', title: 'Home', color: 'green' }],
+    wakeUrl: null,
+    refreshSec: 1,
+    team: { hub: hub.url.replace(/\/v1$/, ''), name: 'owner2' },
+  }
+  const file = join(box.env.APPDATA as string, 'herdr/plugins/config/agent-board/config.json')
+  mkdirSync(join(file, '..'), { recursive: true })
+  writeFileSync(file, JSON.stringify(cfg))
+  box.state({ 'api snapshot': { result: { snapshot: { panes: [], tabs: [], workspaces: [] } } } })
+  const { url } = await serveBoard(box, cfg, { TEST_LIVE_CONFIG: '1' })
+  await waitFor(
+    async () => ((await (await fetch(`${url}/api/team`)).json()) as { state?: string }).state,
+    v => v === 'online',
+    'the board online at the hub',
+  )
+  return url
+}
+
+test('with "Confirm with a passkey" on, adding a service agent waits for the owner; removing it does not; both are in the team log', async () => {
+  const box = await sandbox()
+  const me = await generateKey()
+  ;(await hub.join(me, 'owner2', undefined, ['threads'])).close()
+  const url = await teamBoard(box, me)
+  const key = await softAuthenticator(-7)
+  const local = `http://localhost:${new URL(url).port}`
+  type Reply = Record<string, unknown>
+  const answer = async (res: Promise<Response>): Promise<[number, Reply]> => {
+    const r = await res
+    return [r.status, (await r.json()) as Reply]
+  }
+  /** The confirmation window on localhost: signs with the owner's passkey (or makes it). */
+  const confirm = async (id: string): Promise<[number, Reply]> => {
+    const v = (await (await fetch(`${url}/api/team/confirm/${id}`)).json()) as {
+      step: string
+      options: { challenge: string }
+      action: Reply
+    }
+    const at = { challenge: v.options.challenge, origin: local, rpId: 'localhost' }
+    const cred = v.step === 'create' ? key.register(at) : key.assert(at)
+    return answer(
+      fetch(`${url}/api/team/confirm/${id}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-board': '1', origin: local },
+        body: JSON.stringify({ ...cred, type: 'public-key' }),
+      }),
+    )
+  }
+  const services = async (): Promise<unknown[]> =>
+    ((await (await fetch(`${url}/api/team/agents`)).json()) as { services: unknown[] }).services
+  // The owner adds a passkey and turns the switch on.
+  const [, add] = await answer(post(url, '/api/team/passkeys', { op: 'add' }))
+  expect(await confirm(add.id as string)).toEqual([200, { ok: true, done: true }])
+  const [, on] = await answer(post(url, '/api/team/passkeys', { op: 'on' }))
+  expect(await confirm(on.id as string)).toEqual([200, { ok: true, done: true }])
+
+  // A wrong lane is said at once; a good one waits for the passkey, and nothing is added meanwhile.
+  expect(await answer(post(url, '/api/team/services', { add: { name: 'Juno', lane: 'nowhere' } }))).toEqual([
+    400,
+    { ok: false, error: 'lane' },
+  ])
+  const [status, asked] = await answer(post(url, '/api/team/services', { add: { name: 'Juno', lane: 'home' } }))
+  expect(status).toBe(428)
+  expect(asked).toMatchObject({ ok: false, error: 'confirm' })
+  expect(await services()).toEqual([])
+  const shown = (await (await fetch(`${url}/api/team/confirm/${asked.id}`)).json()) as { action: Reply }
+  expect(shown.action).toEqual({ kind: 'service-add', name: 'Juno', lane: 'Home' })
+  const [done, reply] = await confirm(asked.id as string)
+  expect(done).toBe(200)
+  expect(reply).toMatchObject({ ok: true, added: { key: 'service-juno', name: 'Juno', lane: 'home' } })
+  expect(await services()).toEqual([{ key: 'service-juno', name: 'Juno', lane: 'home' }])
+
+  // Removing narrows: at once.
+  expect(await answer(post(url, '/api/team/services', { remove: 'service-juno' }))).toEqual([
+    200,
+    { ok: true, services: [] },
+  ])
+  const log = readFileSync(
+    join(box.env.LOCALAPPDATA as string, 'herdr', 'plugins', 'agent-board', 'team-audit.jsonl'),
+    'utf8',
+  )
+    .split('\n')
+    .filter(Boolean)
+    .map(l => JSON.parse(l) as Reply)
+    .filter(e => e.action === 'service')
+  expect(log).toEqual([
+    expect.objectContaining({ by: 'ui', op: 'add', key: 'service-juno', lane: 'home' }),
+    expect.objectContaining({ by: 'ui', op: 'remove', key: 'service-juno', lane: 'home' }),
+  ])
 })
