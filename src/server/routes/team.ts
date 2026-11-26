@@ -40,6 +40,7 @@
 // channel), wait for the passkey as the switches do.
 import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
+import { editTeamServices } from '../../adapters/config-file.ts'
 import { isRecord } from '../../adapters/json-store.ts'
 import { uploadsCheck } from '../../adapters/own-files.ts'
 import { uploadsDir } from '../../adapters/paths.ts'
@@ -59,6 +60,7 @@ import { agentLimits, splitKey, TEAM, threadKey, validLoop } from '../../core/te
 import { type OwnerAction, unlocks, widens } from '../../core/team-confirm.ts'
 import { checkMeta } from '../../core/team-file.ts'
 import { normalizeEmoji } from '../../core/team-reactions.ts'
+import { changeServices, type ServiceAgent, serviceAgents } from '../../core/team-services.ts'
 import { isThreadKey } from '../../core/team-unread.ts'
 import { MAX_MEMBERS } from '../../core/team-wire.ts'
 import type { Config } from '../../core/types.ts'
@@ -117,6 +119,8 @@ function agentsView(cfg: Pick<Config, 'categories' | 'team'>): unknown {
     // The loop pause of a peer without its own (#360).
     loopDefault: agentLimits(team.agentLimits).loopRun,
     lanes: cfg.categories.map(c => ({ id: c.id, title: categoryInfo(cfg, c.id).title })),
+    // The owner's service agents (#819): each a card with no pane, in its lane.
+    services: serviceAgents(cfg.team),
   }
 }
 
@@ -689,6 +693,38 @@ export function teamRoutes(
         c.apply()
         onAgents?.()
         return json(200, { ok: true })
+      },
+    },
+    {
+      // Service agents (#819, core/team-services.ts): { add: { name, lane } } or { remove: key },
+      // from the Team panel, on this computer only (localOnly). Written into config.json's
+      // `team.services`; the config watcher reloads it and the board gives the card. Registering one
+      // shares nothing: what its lane may say to whom stays the owner's switches.
+      method: 'POST',
+      path: '/api/team/services',
+      async handle(_req, ctx) {
+        if (!team.view()) return undefined
+        const refused = ctx.refuse('board-header') ?? ctx.refuse('origin')
+        if (refused) return refused
+        const raw = await ctx.rawBody()
+        let added: ServiceAgent | undefined
+        let services: ServiceAgent[] = []
+        const r = editTeamServices(now => {
+          const c = changeServices(
+            now,
+            raw,
+            lanes().categories.map(x => x.id),
+          )
+          if (c.ok) [added, services] = [c.added, c.services]
+          return c
+        })
+        if (!r.ok) return json(r.error === 'off' ? 409 : 400, r)
+        // The board's config follows at once: the panel's next look and the cards need not wait for
+        // the watcher, which reads the same list back.
+        if (cfg && typeof cfg.team === 'object' && cfg.team !== null)
+          (cfg.team as Record<string, unknown>).services = services
+        onAgents?.()
+        return json(200, { ok: true, services, ...(added && { added }) })
       },
     },
     {
