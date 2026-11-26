@@ -272,6 +272,11 @@ const CLASSIFIED: Record<string, [method: string, raw: string, door: 'door' | 'r
   'POST /api/mokupilot': [['POST', '/api/mokupilot', 'refused']],
   'GET /api/presence': [['GET', '/api/presence', 'refused']],
   'POST /api/presence': [['POST', '/api/presence', 'refused']],
+  // The board's MCP (#813): this computer's own sessions only, never a master's.
+  'ANY /mcp': [
+    ['POST', '/mcp', 'refused'],
+    ['GET', '/mcp', 'refused'],
+  ],
   // the away journal (#489) is this computer's owner's, as presence is: phase 1 stays local
   'GET /api/journal': [['GET', '/api/journal', 'refused']],
   'POST /api/journal': [['POST', '/api/journal', 'refused']],
@@ -281,6 +286,8 @@ const CLASSIFIED: Record<string, [method: string, raw: string, door: 'door' | 'r
   'GET /api/team/threads': [['GET', '/api/team/threads', 'refused']],
   'GET ^\\/api\\/team\\/threads\\/([^/]+)\\/([^/]+)$': [['GET', '/api/team/threads/team/general', 'refused']],
   'POST /api/team/post': [['POST', '/api/team/post', 'refused']],
+  'POST /api/team/react': [['POST', '/api/team/react', 'refused']],
+  'POST /api/team/agent-react': [['POST', '/api/team/agent-react', 'refused']],
   'POST ^\\/api\\/team\\/threads\\/([^/]+)\\/([^/]+)\\/(assign|release|mute|unmute)$': [
     ['POST', '/api/team/threads/team/general/mute', 'refused'],
   ],
